@@ -1,0 +1,67 @@
+version: '3.8'
+
+services:
+  # 1. PostgreSQL Database Service
+  postgres:
+    image: postgres:16-alpine
+    container_name: calisthenics-postgres
+    restart: always
+    environment:
+      POSTGRES_DB: calisthenics_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgrespassword
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d calisthenics_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # 2. Calisthenics AI FastAPI Pose Estimation Service
+  ai-service:
+    build:
+      context: ../calisthenics-ai-service
+      dockerfile: Dockerfile
+    container_name: calisthenics-ai-service
+    restart: always
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # 3. Spring Boot Backend Microservice
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: calisthenics-backend
+    restart: always
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ai-service:
+        condition: service_started
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: calisthenics_db
+      DB_USERNAME: postgres
+      DB_PASSWORD: postgrespassword
+      JWT_SECRET: 404E635266556A586E3272357538782F413F4428472B4B6250645367566B5970
+      AI_SERVICE_URL: http://ai-service:8000
+      STORAGE_LOCATION: /app/uploads
+    volumes:
+      - media_uploads:/app/uploads
+
+volumes:
+  postgres_data:
+  media_uploads:
