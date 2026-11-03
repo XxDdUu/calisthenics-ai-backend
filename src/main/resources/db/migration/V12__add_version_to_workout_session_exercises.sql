@@ -1,0 +1,5 @@
+ALTER TABLE workout_session_exercises
+    ADD COLUMN IF NOT EXISTS version BIGINT NOT NULL DEFAULT 0;
+
+ALTER TABLE workout_session_sets
+    ADD COLUMN IF NOT EXISTS version BIGINT NOT NULL DEFAULT 0;

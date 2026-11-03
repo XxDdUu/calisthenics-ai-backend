@@ -40,7 +40,7 @@ public class AiServiceClient {
         try {
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.MULTIPART_FORM_DATA);
-
+            
             ByteArrayResource fileResource = new ByteArrayResource(file.getBytes()) {
                 @Override
                 public String getFilename() {

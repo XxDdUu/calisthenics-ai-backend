@@ -15,6 +15,13 @@ public class AppProperties {
     private AiService aiService = new AiService();
     private Storage storage = new Storage();
     private Firebase firebase = new Firebase();
+    private Google google = new Google();
+
+    @Getter
+    @Setter
+    public static class Google {
+        private String clientId;
+    }
 
     @Getter
     @Setter

@@ -26,6 +26,8 @@ import java.util.Optional;
 @RequiredArgsConstructor
 public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
+    public static final String JWT_VALIDATION_RESULT_ATTRIBUTE = "jwt_validation_result";
+
     private final JwtTokenProvider tokenProvider;
     private final CustomUserDetailsService customUserDetailsService;
     private final FirebaseTokenVerifier firebaseTokenVerifier;
@@ -48,18 +50,24 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
             if (StringUtils.hasText(token)) {
                 // 1. Try local JWT token validation first
-                if (tokenProvider.validateToken(token)) {
+                JwtValidationResult validationResult = tokenProvider.validateAccessToken(token);
+
+                if (validationResult == JwtValidationResult.VALID) {
                     Long userId = tokenProvider.getUserIdFromJWT(token);
                     UserDetails userDetails = customUserDetailsService.loadUserById(userId);
                     setAuthentication(request, userDetails);
-                } 
-                // 2. Try Firebase ID token validation
-                else {
-                    FirebaseToken firebaseToken = firebaseTokenVerifier.verifyToken(token);
-                    if (firebaseToken != null) {
-                        User user = findOrCreateFirebaseUser(firebaseToken);
-                        UserDetails userDetails = UserPrincipal.create(user);
-                        setAuthentication(request, userDetails);
+                } else {
+                    request.setAttribute(JWT_VALIDATION_RESULT_ATTRIBUTE, validationResult);
+
+                    // If it is not an expired local JWT, attempt Firebase ID token validation
+                    if (validationResult != JwtValidationResult.EXPIRED) {
+                        FirebaseToken firebaseToken = firebaseTokenVerifier.verifyToken(token);
+                        if (firebaseToken != null) {
+                            User user = findOrCreateFirebaseUser(firebaseToken);
+                            UserDetails userDetails = UserPrincipal.create(user);
+                            setAuthentication(request, userDetails);
+                            request.removeAttribute(JWT_VALIDATION_RESULT_ATTRIBUTE);
+                        }
                     }
                 }
             }

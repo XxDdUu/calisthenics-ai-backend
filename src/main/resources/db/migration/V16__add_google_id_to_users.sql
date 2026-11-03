@@ -1,0 +1,4 @@
+-- Database Migration V16: Add Google ID support
+ALTER TABLE users ADD COLUMN google_id VARCHAR(128) UNIQUE;
+CREATE INDEX idx_users_google_id ON users(google_id);
+

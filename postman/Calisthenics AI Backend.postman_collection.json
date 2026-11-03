@@ -1,0 +1,2224 @@
+{
+  "info": {
+    "_postman_id": "cdbfb843-3f45-4eed-a504-d04aeb5cdd4d",
+    "name": "Calisthenics AI Backend",
+    "description": "Complete API collection for Calisthenics AI Backend: Authentication, User Management, Coach & Client Profiles, Exercise Catalog, Workout Plans, Coach-Client Sharing, Persistent Workout Sessions, Real-Time Chat, AI Form Analysis, and File Storage.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{accessToken}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8080"
+    },
+    {
+      "key": "accessToken",
+      "value": ""
+    },
+    {
+      "key": "refreshToken",
+      "value": ""
+    },
+    {
+      "key": "email",
+      "value": "planner@example.com"
+    },
+    {
+      "key": "password",
+      "value": "ChangeMe123!"
+    },
+    {
+      "key": "workoutPlanId",
+      "value": ""
+    },
+    {
+      "key": "workoutPlanDayId",
+      "value": ""
+    },
+    {
+      "key": "planExerciseId",
+      "value": ""
+    },
+    {
+      "key": "exerciseId",
+      "value": "1"
+    },
+    {
+      "key": "clientId",
+      "value": ""
+    },
+    {
+      "key": "coachId",
+      "value": ""
+    },
+    {
+      "key": "relationshipId",
+      "value": ""
+    },
+    {
+      "key": "assignmentId",
+      "value": ""
+    },
+    {
+      "key": "conversationId",
+      "value": ""
+    },
+    {
+      "key": "sessionId",
+      "value": ""
+    },
+    {
+      "key": "sessionExerciseId",
+      "value": ""
+    },
+    {
+      "key": "sessionSetId",
+      "value": ""
+    },
+    {
+      "key": "analysisId",
+      "value": ""
+    },
+    {
+      "key": "workoutId",
+      "value": ""
+    },
+    {
+      "key": "fileName",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "Authentication",
+      "item": [
+        {
+          "name": "Register",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/auth/register",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "auth",
+                "register"
+              ]
+            },
+            "description": "Create a local account and save the returned access token and refresh token.",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{email}}\",\n  \"password\": \"{{password}}\",\n  \"fullName\": \"Workout Planner\",\n  \"experienceLevel\": \"INTERMEDIATE\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  const body = pm.response.json();",
+                  "  pm.collectionVariables.set('accessToken', body.accessToken);",
+                  "  if (body.refreshToken) pm.collectionVariables.set('refreshToken', body.refreshToken);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "auth",
+                "login"
+              ]
+            },
+            "description": "Authenticate with email & password and retrieve JWT access and refresh tokens.",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{email}}\",\n  \"password\": \"{{password}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  const body = pm.response.json();",
+                  "  pm.collectionVariables.set('accessToken', body.accessToken);",
+                  "  if (body.refreshToken) pm.collectionVariables.set('refreshToken', body.refreshToken);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Refresh Token",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/auth/refresh",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "auth",
+                "refresh"
+              ]
+            },
+            "description": "Refresh an expired access token using the valid refresh token.",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refreshToken\": \"{{refreshToken}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  const body = pm.response.json();",
+                  "  pm.collectionVariables.set('accessToken', body.accessToken);",
+                  "  if (body.refreshToken) pm.collectionVariables.set('refreshToken', body.refreshToken);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Firebase Login",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/auth/firebase",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "auth",
+                "firebase"
+              ]
+            },
+            "description": "Authenticate and auto-provision user using a Firebase ID token.",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"idToken\": \"FIREBASE_ID_TOKEN_HERE\",\n  \"experienceLevel\": \"INTERMEDIATE\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  const body = pm.response.json();",
+                  "  pm.collectionVariables.set('accessToken', body.accessToken);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Logout",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/auth/logout",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "auth",
+                "logout"
+              ]
+            },
+            "description": "Clear user security context session."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "User Management",
+      "item": [
+        {
+          "name": "Get Current User",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/users/me",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "users",
+                "me"
+              ]
+            },
+            "description": "Get profile of the currently authenticated user."
+          },
+          "response": []
+        },
+        {
+          "name": "Update Current User",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/users/me",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "users",
+                "me"
+              ]
+            },
+            "description": "Update full name, avatar URL, or experience level for the current user.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"fullName\": \"Workout Planner Pro\",\n  \"avatarUrl\": \"https://example.com/avatar.png\",\n  \"experienceLevel\": \"ADVANCED\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "List Users (Admin)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/users",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "users"
+              ]
+            },
+            "description": "Retrieve all registered users (requires ROLE_ADMIN)."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Coach & Client Profiles",
+      "item": [
+        {
+          "name": "Get My Coach Profile",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/coaches/me",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "coaches",
+                "me"
+              ]
+            },
+            "description": "Get current user's Coach profile."
+          },
+          "response": []
+        },
+        {
+          "name": "Update My Coach Profile",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/coaches/me",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "coaches",
+                "me"
+              ]
+            },
+            "description": "Create or update current user's Coach profile.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"displayName\": \"Coach Alex\",\n  \"avatarUrl\": \"https://example.com/coach.jpg\",\n  \"bio\": \"Certified calisthenics coach specializing in planche and levers.\",\n  \"specialties\": \"Planche, Front Lever, Handstand Pushup\",\n  \"yearsExperience\": 6,\n  \"trainingPhilosophy\": \"Strict form before progressive overload.\",\n  \"coachingDescription\": \"Personalized 1-on-1 guidance with video review.\",\n  \"languages\": \"English, Vietnamese\",\n  \"certifications\": \"NSCA-CPT, WCO Level 2\",\n  \"socialLinks\": \"instagram.com/coachalex\",\n  \"isPublic\": true,\n  \"isAcceptingClients\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "List Public Coaches",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/coaches",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "coaches"
+              ]
+            },
+            "description": "Discover public coaches in the directory."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Coach by ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/coaches/{{coachId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "coaches",
+                "{{coachId}}"
+              ]
+            },
+            "description": "Get public profile of a coach by user ID."
+          },
+          "response": []
+        },
+        {
+          "name": "Get My Client Profile",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/clients/me",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clients",
+                "me"
+              ]
+            },
+            "description": "Get current user's Client profile."
+          },
+          "response": []
+        },
+        {
+          "name": "Get My Client Overview",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/clients/me/overview",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clients",
+                "me",
+                "overview"
+              ]
+            },
+            "description": "Get current user's Client training overview & statistics."
+          },
+          "response": []
+        },
+        {
+          "name": "Update My Client Profile",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/clients/me",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clients",
+                "me"
+              ]
+            },
+            "description": "Create or update current user's Client profile.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"displayName\": \"Athlete Duy\",\n  \"avatarUrl\": \"https://example.com/avatar.jpg\",\n  \"bio\": \"Calisthenics enthusiast working towards full planche.\",\n  \"experienceLevel\": \"INTERMEDIATE\",\n  \"trainingExperience\": \"3 years of bodyweight strength training.\",\n  \"primaryGoals\": \"Master straddle planche, achieve 10 clean muscle-ups.\",\n  \"trainingInterests\": \"Statics, Weighted Calisthenics\",\n  \"preferredFrequency\": \"4-5 days/week\",\n  \"coachingLanguage\": \"English\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Client Profile (Coach)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/clients/{{clientId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clients",
+                "{{clientId}}"
+              ]
+            },
+            "description": "View client profile (accessible by client or their active coach)."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Client Overview (Coach)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/clients/{{clientId}}/overview",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clients",
+                "{{clientId}}",
+                "overview"
+              ]
+            },
+            "description": "View client training overview (accessible by client or their active coach)."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Exercise Catalog",
+      "item": [
+        {
+          "name": "List Exercise Catalog",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/exercises",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "exercises"
+              ]
+            },
+            "description": "Browse catalog exercises (supports ?category= &difficulty= &search= filters).",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Exercise by ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/exercises/{{exerciseId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "exercises",
+                "{{exerciseId}}"
+              ]
+            },
+            "description": "Retrieve catalog exercise details by ID.",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Exercise by Code",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/exercises/code/planche",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "exercises",
+                "code",
+                "planche"
+              ]
+            },
+            "description": "Retrieve catalog exercise details by unique code.",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Create Exercise (Admin)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/exercises",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "exercises"
+              ]
+            },
+            "description": "Create a new exercise in catalog (Admin only).",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Full Planche\",\n  \"code\": \"full_planche\",\n  \"category\": \"STATICS\",\n  \"difficulty\": \"ELITE\",\n  \"description\": \"Straight-arm static hold parallel to the ground.\",\n  \"targetMuscles\": \"Anterior deltoids, biceps tendon, core, wrists\",\n  \"instructions\": \"Protraction and depression of scapulae with hips level with shoulders.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Workout Plans",
+      "item": [
+        {
+          "name": "Get Templates",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/workout-plans/templates",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "workout-plans",
+                "templates"
+              ]
+            },
+            "description": "Get editable default schedules for PPL, UPPER_LOWER, and FULL_BODY."
+          },
+          "response": []
+        },
+        {
+          "name": "Create PPL Plan",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/workout-plans",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "workout-plans"
+              ]
+            },
+            "description": "Create a plan and all ordered exercise assignments atomically. A day can contain any number of exercises.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Push Pull Legs Base\",\n  \"splitType\": \"PPL\",\n  \"days\": [\n    {\n      \"dayOfWeek\": \"MONDAY\",\n      \"sessionType\": \"PUSH\",\n      \"name\": \"Push Day\",\n      \"exercises\": [\n        {\n          \"exerciseId\": \"{{exerciseId}}\",\n          \"sets\": 4,\n          \"reps\": 8,\n          \"durationSeconds\": null,\n          \"restSeconds\": 120,\n          \"displayOrder\": 1,\n          \"notes\": \"Target solid pause on lockout.\"\n        },\n        {\n          \"exerciseId\": \"{{exerciseId2}}\",\n          \"sets\": 4,\n          \"reps\": null,\n          \"durationSeconds\": 10,\n          \"restSeconds\": 90,\n          \"displayOrder\": 2,\n          \"notes\": \"Hold the position with proper form.\"\n        }\n      ]\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  const body = pm.response.json();",
+                  "  pm.collectionVariables.set('workoutPlanId', body.id);",
+                  "  if (body.days && body.days.length > 0) {",
+                  "    pm.collectionVariables.set('workoutPlanDayId', body.days[0].id);",
+                  "  }",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List My Plans",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/workout-plans",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "workout-plans"
+              ]
+            },
+            "description": "Retrieve all workout plans created by the authenticated user."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Plan",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/workout-plans/{{workoutPlanId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "workout-plans",
+                "{{workoutPlanId}}"
+              ]
+            },
+            "description": "Retrieve the selected plan and its Monday-to-Sunday schedule."
+          },
+          "response": []
+        },
+        {
+          "name": "Update Plan",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/workout-plans/{{workoutPlanId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "workout-plans",
+                "{{workoutPlanId}}"
+              ]
+            },
+            "description": "Replace the plan configuration atomically. Include an exercise assignment id returned by GET/POST to preserve it during an edit or reorder.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Push Pull Legs Intermediate\",\n  \"splitType\": \"PPL\",\n  \"days\": [\n    {\n      \"dayOfWeek\": \"MONDAY\",\n      \"sessionType\": \"PUSH\",\n      \"name\": \"Push Day\",\n      \"exercises\": [\n        {\n          \"id\": \"{{planExerciseId}}\",\n          \"exerciseId\": \"{{exerciseId}}\",\n          \"sets\": 5,\n          \"reps\": 8,\n          \"durationSeconds\": null,\n          \"restSeconds\": 90,\n          \"displayOrder\": 1,\n          \"notes\": \"Progressing sets.\"\n        }\n      ]\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Delete Plan",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/workout-plans/{{workoutPlanId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "workout-plans",
+                "{{workoutPlanId}}"
+              ]
+            },
+            "description": "Delete the selected workout plan."
+          },
+          "response": []
+        },
+        {
+          "name": "List Day Exercises",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/workout-plans/{{workoutPlanId}}/days/{{workoutPlanDayId}}/exercises",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "workout-plans",
+                "{{workoutPlanId}}",
+                "days",
+                "{{workoutPlanDayId}}",
+                "exercises"
+              ]
+            },
+            "description": "List exercises scheduled for a specific weekday in the plan."
+          },
+          "response": []
+        },
+        {
+          "name": "Assign Catalog Exercise",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/workout-plans/{{workoutPlanId}}/days/{{workoutPlanDayId}}/exercises",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "workout-plans",
+                "{{workoutPlanId}}",
+                "days",
+                "{{workoutPlanDayId}}",
+                "exercises"
+              ]
+            },
+            "description": "Attach a catalog exercise to a specific day.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"exerciseId\": \"{{exerciseId}}\",\n  \"sets\": 4,\n  \"reps\": 8,\n  \"durationSeconds\": null,\n  \"restSeconds\": 120,\n  \"displayOrder\": 1,\n  \"notes\": \"Target solid pause on lockout.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  pm.collectionVariables.set('planExerciseId', pm.response.json().id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Batch Update Day Exercises",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/workout-plans/{{workoutPlanId}}/days/{{workoutPlanDayId}}/exercises",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "workout-plans",
+                "{{workoutPlanId}}",
+                "days",
+                "{{workoutPlanDayId}}",
+                "exercises"
+              ]
+            },
+            "description": "Batch reorder and update all exercises scheduled for a specific workout day in one transaction.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"exercises\": [\n    {\n      \"exerciseId\": {{exerciseId}},\n      \"sets\": 4,\n      \"reps\": 8,\n      \"durationSeconds\": null,\n      \"restSeconds\": 120,\n      \"displayOrder\": 1,\n      \"notes\": \"Target solid pause on lockout.\"\n    },\n    {\n      \"exerciseId\": {{exerciseId}},\n      \"sets\": 3,\n      \"reps\": 5,\n      \"durationSeconds\": null,\n      \"restSeconds\": 180,\n      \"displayOrder\": 2,\n      \"notes\": \"Focus on controlled eccentric.\"\n    },\n    {\n      \"exerciseId\": {{exerciseId}},\n      \"sets\": 4,\n      \"reps\": null,\n      \"durationSeconds\": 10,\n      \"restSeconds\": 90,\n      \"displayOrder\": 3,\n      \"notes\": \"Hold the position with proper form.\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Update Assigned Exercise",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/workout-plans/{{workoutPlanId}}/days/{{workoutPlanDayId}}/exercises/{{planExerciseId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "workout-plans",
+                "{{workoutPlanId}}",
+                "days",
+                "{{workoutPlanDayId}}",
+                "exercises",
+                "{{planExerciseId}}"
+              ]
+            },
+            "description": "Update sets, reps, rest seconds, order, or notes of an assigned exercise.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"exerciseId\": \"{{exerciseId}}\",\n  \"sets\": 5,\n  \"reps\": 8,\n  \"durationSeconds\": null,\n  \"restSeconds\": 90,\n  \"displayOrder\": 1,\n  \"notes\": \"Progressing sets.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Remove Assigned Exercise",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/workout-plans/{{workoutPlanId}}/days/{{workoutPlanDayId}}/exercises/{{planExerciseId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "workout-plans",
+                "{{workoutPlanId}}",
+                "days",
+                "{{workoutPlanDayId}}",
+                "exercises",
+                "{{planExerciseId}}"
+              ]
+            },
+            "description": "Remove an assigned exercise from the day schedule."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Coach-Client Sharing",
+      "item": [
+        {
+          "name": "Send Coach-Client Request (as Coach)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/coach-client-relationships",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "coach-client-relationships"
+              ]
+            },
+            "description": "Initiate a relationship connection request from coach to client.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"clientId\": \"{{clientId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  pm.collectionVariables.set('relationshipId', pm.response.json().id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Send Request (as Client)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/coach-client-relationships/requests",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "coach-client-relationships",
+                "requests"
+              ]
+            },
+            "description": "Initiate a relationship connection request from client to coach.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"coachId\": \"{{coachId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  pm.collectionVariables.set('relationshipId', pm.response.json().id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List My Relationships",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/coach-client-relationships",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "coach-client-relationships"
+              ]
+            },
+            "description": "List all relationships (pending, active, rejected) for the authenticated user."
+          },
+          "response": []
+        },
+        {
+          "name": "Accept Request (Client)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/coach-client-relationships/{{relationshipId}}/accept",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "coach-client-relationships",
+                "{{relationshipId}}",
+                "accept"
+              ]
+            },
+            "description": "Accept a pending coach relationship request."
+          },
+          "response": []
+        },
+        {
+          "name": "Reject Request (Client)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/coach-client-relationships/{{relationshipId}}/reject",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "coach-client-relationships",
+                "{{relationshipId}}",
+                "reject"
+              ]
+            },
+            "description": "Reject a pending coach relationship request."
+          },
+          "response": []
+        },
+        {
+          "name": "Cancel or End Relationship",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/coach-client-relationships/{{relationshipId}}/cancel",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "coach-client-relationships",
+                "{{relationshipId}}",
+                "cancel"
+              ]
+            },
+            "description": "Cancel pending request or terminate active relationship."
+          },
+          "response": []
+        },
+        {
+          "name": "Assign Workout Plan",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/coach-client-relationships/{{relationshipId}}/assignments",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "coach-client-relationships",
+                "{{relationshipId}}",
+                "assignments"
+              ]
+            },
+            "description": "Assign a coach-owned workout plan to a client.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"workoutPlanId\": \"{{workoutPlanId}}\",\n  \"startDate\": \"2026-10-28\",\n  \"endDate\": \"2026-11-28\",\n  \"notes\": \"Four-week introductory mesocycle.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  pm.collectionVariables.set('assignmentId', pm.response.json().id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List Relationship Assignments (Coach)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/coach-client-relationships/{{relationshipId}}/assignments",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "coach-client-relationships",
+                "{{relationshipId}}",
+                "assignments"
+              ]
+            },
+            "description": "List plans assigned by coach in this relationship."
+          },
+          "response": []
+        },
+        {
+          "name": "Update Assignment",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/coach-client-relationships/{{relationshipId}}/assignments/{{assignmentId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "coach-client-relationships",
+                "{{relationshipId}}",
+                "assignments",
+                "{{assignmentId}}"
+              ]
+            },
+            "description": "Update assignment timeframe, status, or notes.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"startDate\": \"2026-10-28\",\n  \"endDate\": \"2026-12-05\",\n  \"status\": \"ACTIVE\",\n  \"notes\": \"Extended mesocycle with progressive volume.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "List My Assigned Plans (Client)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/clients/me/workout-plan-assignments",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clients",
+                "me",
+                "workout-plan-assignments"
+              ]
+            },
+            "description": "List all plans assigned to the current client."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Persistent Workout Sessions",
+      "item": [
+        {
+          "name": "Resolve Today Workout",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/workout-plans/today?date=2026-10-28",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "workout-plans",
+                "today"
+              ],
+              "query": [
+                {
+                  "key": "date",
+                  "value": "2026-10-28"
+                }
+              ]
+            },
+            "description": "Resolve today's candidate workout source (assigned vs personal plan) and day routine."
+          },
+          "response": []
+        },
+        {
+          "name": "Start or Resume Session",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/workout-sessions",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "workout-sessions"
+              ]
+            },
+            "description": "Start a new persistent session or resume existing in-progress session snapshot.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"planId\": \"{{workoutPlanId}}\",\n  \"dayId\": \"{{workoutPlanDayId}}\",\n  \"workoutDate\": \"2026-10-28\",\n  \"assignmentId\": null\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200 || pm.response.code === 201) {",
+                  "  const body = pm.response.json();",
+                  "  pm.collectionVariables.set('sessionId', body.id);",
+                  "  if (body.exercises && body.exercises.length > 0) {",
+                  "    pm.collectionVariables.set('sessionExerciseId', body.exercises[0].id);",
+                  "    if (body.exercises[0].sets && body.exercises[0].sets.length > 0) {",
+                  "      pm.collectionVariables.set('sessionSetId', body.exercises[0].sets[0].id);",
+                  "    }",
+                  "  }",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get Active Sessions",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/workout-sessions/active",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "workout-sessions",
+                "active"
+              ]
+            },
+            "description": "Get currently in-progress workout sessions for the user."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Session History (Paged)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/workout-sessions?page=0&size=20",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "workout-sessions"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "0"
+                },
+                {
+                  "key": "size",
+                  "value": "20"
+                }
+              ]
+            },
+            "description": "Retrieve paginated history of workout sessions."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Session Detail",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/workout-sessions/{{sessionId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "workout-sessions",
+                "{{sessionId}}"
+              ]
+            },
+            "description": "Get session snapshot with exercises and tracked sets."
+          },
+          "response": []
+        },
+        {
+          "name": "Update Session Exercise",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/workout-sessions/{{sessionId}}/exercises/{{sessionExerciseId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "workout-sessions",
+                "{{sessionId}}",
+                "exercises",
+                "{{sessionExerciseId}}"
+              ]
+            },
+            "description": "Update exercise status (IN_PROGRESS, COMPLETED, SKIPPED) with optimistic lock version check.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"COMPLETED\",\n  \"expectedVersion\": 0\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Update Session Set",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/workout-sessions/{{sessionId}}/exercises/{{sessionExerciseId}}/sets/{{sessionSetId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "workout-sessions",
+                "{{sessionId}}",
+                "exercises",
+                "{{sessionExerciseId}}",
+                "sets",
+                "{{sessionSetId}}"
+              ]
+            },
+            "description": "Log reps/duration/weight/completion for a single set with optimistic lock version check.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reps\": 10,\n  \"holdDurationSeconds\": 0,\n  \"weightKg\": 0.0,\n  \"assistanceWeightKg\": 0.0,\n  \"completed\": true,\n  \"notes\": \"Solid reps with 2s pause.\",\n  \"expectedVersion\": 0\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Finish Workout Session",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/workout-sessions/{{sessionId}}/finish",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "workout-sessions",
+                "{{sessionId}}",
+                "finish"
+              ]
+            },
+            "description": "Complete the workout session and compute duration.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"confirmPartial\": false\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Real-Time Chat",
+      "item": [
+        {
+          "name": "List Conversations",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/chat/conversations",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "chat",
+                "conversations"
+              ]
+            },
+            "description": "List all conversations for current user, ordered by lastMessageAt DESC."
+          },
+          "response": []
+        },
+        {
+          "name": "Create or Get Conversation",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/chat/conversations",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "chat",
+                "conversations"
+              ]
+            },
+            "description": "Get or create 1-on-1 chat conversation between active coach and client.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"otherUserId\": \"{{coachId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200 || pm.response.code === 201) {",
+                  "  pm.collectionVariables.set('conversationId', pm.response.json().id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List Messages (Paged)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/chat/conversations/{{conversationId}}/messages?page=0&size=20&direction=asc",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "chat",
+                "conversations",
+                "{{conversationId}}",
+                "messages"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "0"
+                },
+                {
+                  "key": "size",
+                  "value": "20"
+                },
+                {
+                  "key": "direction",
+                  "value": "asc"
+                }
+              ]
+            },
+            "description": "Fetch paginated message history (?direction=asc for chronological, desc for newest first)."
+          },
+          "response": []
+        },
+        {
+          "name": "Send Message (REST)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/chat/conversations/{{conversationId}}/messages",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "chat",
+                "conversations",
+                "{{conversationId}}",
+                "messages"
+              ]
+            },
+            "description": "Send a chat message via HTTP (also broadcasts via WebSocket to /topic and recipient /user/queue).",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"content\": \"Hey coach, ready for today's session!\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Mark Conversation Read",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/chat/conversations/{{conversationId}}/read",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "chat",
+                "conversations",
+                "{{conversationId}}",
+                "read"
+              ]
+            },
+            "description": "Mark all messages in the conversation as read for the current user."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Unread Messages Count",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/chat/unread-count",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "chat",
+                "unread-count"
+              ]
+            },
+            "description": "Get total unread message count across all conversations."
+          },
+          "response": []
+        },
+        {
+          "name": "Get User Presence",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/chat/presence",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "chat",
+                "presence"
+              ]
+            },
+            "description": "Retrieve online/offline status and last seen timestamps for users in active conversations."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "AI Form Analysis",
+      "item": [
+        {
+          "name": "Analyze Image Pose",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": ""
+                },
+                {
+                  "key": "exerciseId",
+                  "type": "text",
+                  "value": "{{exerciseId}}"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/analysis/image",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "analysis",
+                "image"
+              ]
+            },
+            "description": "Upload single frame image for AI pose estimation and form scoring."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 201 || pm.response.code === 200) {",
+                  "  pm.collectionVariables.set('analysisId', pm.response.json().id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Analyze Video Clip",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": ""
+                },
+                {
+                  "key": "exerciseId",
+                  "type": "text",
+                  "value": "{{exerciseId}}"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/analysis/video",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "analysis",
+                "video"
+              ]
+            },
+            "description": "Upload video clip for timeline pose hold duration & angle analysis."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Analysis History",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/analysis/history",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "analysis",
+                "history"
+              ]
+            },
+            "description": "Retrieve user's past AI form analysis records."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Analysis by ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/analysis/{{analysisId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "analysis",
+                "{{analysisId}}"
+              ]
+            },
+            "description": "Retrieve detailed form analysis report by ID."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Quick Workout Logs (Legacy)",
+      "item": [
+        {
+          "name": "Log Workout Session",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/workouts",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "workouts"
+              ]
+            },
+            "description": "Log a completed workout session with exercise set/rep entries.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Push Strength Session\",\n  \"notes\": \"Handstand pushup and ring dip progressions.\",\n  \"startedAt\": \"2026-10-28T09:00:00Z\",\n  \"completedAt\": \"2026-10-28T10:15:00Z\",\n  \"logs\": [\n    {\n      \"exerciseId\": \"{{exerciseId}}\",\n      \"sets\": 4,\n      \"reps\": 8,\n      \"weightKg\": 0,\n      \"holdTimeSeconds\": 0,\n      \"notes\": \"Completed smoothly\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  pm.collectionVariables.set('workoutId', pm.response.json().id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List Logged Workouts",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/workouts",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "workouts"
+              ]
+            },
+            "description": "Get user's logged workout session history."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Logged Workout Detail",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/workouts/{{workoutId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "workouts",
+                "{{workoutId}}"
+              ]
+            },
+            "description": "Get detailed session by ID."
+          },
+          "response": []
+        },
+        {
+          "name": "Delete Logged Workout",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/workouts/{{workoutId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "workouts",
+                "{{workoutId}}"
+              ]
+            },
+            "description": "Delete workout session log."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "File Storage",
+      "item": [
+        {
+          "name": "Upload Media File",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": ""
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/storage/upload",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "storage",
+                "upload"
+              ]
+            },
+            "description": "Upload raw image or video media file."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  pm.collectionVariables.set('fileName', pm.response.json().fileName);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Download File",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/storage/files/{{fileName}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "storage",
+                "files",
+                "{{fileName}}"
+              ]
+            },
+            "description": "Download or stream media file by filename.",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}

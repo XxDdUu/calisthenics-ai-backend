@@ -3,6 +3,7 @@ package com.calisthenics.backend.analysis;
 import com.calisthenics.backend.analysis.dto.AiImageAnalysisResponseDto;
 import com.calisthenics.backend.analysis.dto.AiVideoAnalysisResponseDto;
 import com.calisthenics.backend.analysis.dto.AnalysisResponse;
+import com.calisthenics.backend.analysis.dto.ImageAnalysisResponse;
 import com.calisthenics.backend.exercise.Exercise;
 import com.calisthenics.backend.exercise.ExerciseRepository;
 import com.calisthenics.backend.storage.StorageService;
@@ -122,7 +123,7 @@ public class AnalysisService {
                 .mediaUrl(mediaUrl)
                 .mediaType("IMAGE")
                 .overallScore(overallScore)
-                .holdDurationSeconds(BigDecimal.ZERO)
+                .holdDurationSeconds(null)
                 .formFeedback(formFeedback)
                 .elbowAngle(elbowAngle)
                 .bodyLineAngle(bodyLineAngle)
@@ -176,7 +177,7 @@ public class AnalysisService {
     }
 
     private AnalysisResponse mapToResponse(Analysis analysis) {
-        return AnalysisResponse.builder()
+        AnalysisResponse response = AnalysisResponse.builder()
                 .id(analysis.getId())
                 .userId(analysis.getUser().getId())
                 .exerciseId(analysis.getExercise() != null ? analysis.getExercise().getId() : null)
@@ -184,7 +185,7 @@ public class AnalysisService {
                 .mediaUrl(analysis.getMediaUrl())
                 .mediaType(analysis.getMediaType())
                 .overallScore(analysis.getOverallScore())
-                .holdDurationSeconds(analysis.getHoldDurationSeconds())
+                .holdDurationSeconds("IMAGE".equals(analysis.getMediaType()) ? null : analysis.getHoldDurationSeconds())
                 .formFeedback(analysis.getFormFeedback())
                 .elbowAngle(analysis.getElbowAngle())
                 .bodyLineAngle(analysis.getBodyLineAngle())
@@ -192,5 +193,6 @@ public class AnalysisService {
                 .rawKeypointsJson(analysis.getRawKeypointsJson())
                 .createdAt(analysis.getCreatedAt())
                 .build();
+        return "IMAGE".equals(analysis.getMediaType()) ? ImageAnalysisResponse.from(response) : response;
     }
 }

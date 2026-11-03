@@ -105,49 +105,20 @@ jobs:
           cache-to: type=gha,mode=max
 
   # ----------------------------------------------------------------------------
-  # Job 3: Build & Push AI Service (if monorepo or submodule present)
-  # ----------------------------------------------------------------------------
-  build-and-push-ai-service:
-    name: Build & Push AI Service (Optional / Monorepo)
-    needs: backend-ci
-    runs-on: ubuntu-latest
-    if: hashFiles('../calisthenics-ai-service/Dockerfile') != ''
-    steps:
-      - name: Checkout Source Code
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build & Push AI Service Image
-        run: |
-          REPO_OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          AI_IMAGE="ghcr.io/${REPO_OWNER_LOWER}/calisthenics-ai-service"
-          SHA="${{ github.sha }}"
-          cd ../calisthenics-ai-service
-          docker build -t "${AI_IMAGE}:latest" -t "${AI_IMAGE}:${SHA}" .
-          docker push "${AI_IMAGE}:latest"
-          docker push "${AI_IMAGE}:${SHA}"
-
-  # ----------------------------------------------------------------------------
-  # Job 4: Deploy to Production VPS via Self-Hosted Runner
+  # Job 3: Deploy to Production VPS via Self-Hosted Runner
   # ----------------------------------------------------------------------------
   deploy-vps:
     name: Deploy to Production VPS (Self-Hosted Runner)
     needs: [ build-and-push-backend ]
     runs-on: [ self-hosted, linux, x64, calisthenics-vps ]
-    environment:
-      name: production
-      url: http://localhost:8082
 
     steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Sync Production Compose File
+        run: |
+          cp docker-compose.prod.yml /home/thitheo/calisthenics-ai/docker-compose.prod.yml
       - name: Preflight Verification
         run: |
           echo "=== 1. VERIFY DOCKER DAEMON ACCESS ==="
@@ -216,14 +187,14 @@ jobs:
         run: |
           echo "Polling Spring Boot Actuator health endpoint on port 8082..."
           SUCCESS=0
-          for i in $(seq 1 15); do
+          for i in $(seq 1 25); do
             STATUS=$(curl --fail --silent --show-error http://localhost:8082/actuator/health 2>&1 || true)
             if echo "$STATUS" | grep -q '"status":"UP"'; then
               echo "✅ Backend health check PASSED on attempt $i: $STATUS"
               SUCCESS=1
               break
             fi
-            echo "Waiting for Spring Boot to become healthy ($i/15)..."
+            echo "Waiting for Spring Boot to become healthy ($i/25)..."
             sleep 4
           done
 
@@ -237,12 +208,21 @@ jobs:
       - name: Health Check AI Service (Internal)
         run: |
           echo "Checking AI Service health endpoint..."
-          AI_HEALTH=$(docker exec calisthenics-ai-service-prod curl --fail --silent --show-error http://localhost:8000/health 2>&1 || true)
-          if echo "$AI_HEALTH" | grep -q '"status":"healthy"'; then
-            echo "✅ AI Service health check PASSED: $AI_HEALTH"
-          else
-            echo "⚠️ AI Service health check returned: $AI_HEALTH"
-            docker logs --tail=40 calisthenics-ai-service-prod || true
+          SUCCESS=0
+          for i in $(seq 1 10); do
+            AI_HEALTH=$(docker exec calisthenics-ai-service-prod curl --fail --silent --show-error http://localhost:8000/health 2>&1 || true)
+            if echo "$AI_HEALTH" | grep -q '"status":"healthy"'; then
+              echo "✅ AI Service health check PASSED on attempt $i: $AI_HEALTH"
+              SUCCESS=1
+              break
+            fi
+            echo "Waiting for AI Service to become healthy ($i/10)..."
+            sleep 3
+          done
+
+          if [ $SUCCESS -ne 1 ]; then
+            echo "⚠️ AI Service health check FAILED: $AI_HEALTH" >&2
+            docker logs --tail=40 calisthenics-ai-service-prod >&2 || true
             exit 1
           fi
 
@@ -255,4 +235,4 @@ jobs:
           echo "- **Backend Port**: \`8082\` (Actuator Health UP)" >> $GITHUB_STEP_SUMMARY
           echo "- **Database**: PostgreSQL (Internal Network, Isolated Volume)" >> $GITHUB_STEP_SUMMARY
           echo "- **AI Service**: FastAPI / YOLOv8-pose (Healthy)" >> $GITHUB_STEP_SUMMARY
-          echo "- **Cloudflare Route Needed**: \`api.calisthenics.caelestial.store\` -> \`http://localhost:8082\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Cloudflare Route**: \`api.sky-enterprise.id.vn\` -> \`http://localhost:8082\`" >> $GITHUB_STEP_SUMMARY

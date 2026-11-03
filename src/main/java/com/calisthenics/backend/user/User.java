@@ -26,6 +26,9 @@ public class User {
     @Column(name = "firebase_uid", unique = true)
     private String firebaseUid;
 
+    @Column(name = "google_id", unique = true)
+    private String googleId;
+
     @Column(name = "password_hash")
     private String passwordHash;
 

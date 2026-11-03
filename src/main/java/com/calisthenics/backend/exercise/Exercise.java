@@ -42,6 +42,10 @@ public class Exercise {
     @Column(columnDefinition = "TEXT")
     private String instructions;
 
+    @Column(nullable = false)
+    @Builder.Default
+    private boolean active = true;
+
     @CreationTimestamp
     @Column(name = "created_at", updatable = false)
     private ZonedDateTime createdAt;

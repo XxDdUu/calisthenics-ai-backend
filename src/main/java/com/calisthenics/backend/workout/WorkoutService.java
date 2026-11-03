@@ -10,6 +10,8 @@ import com.calisthenics.backend.workout.dto.WorkoutSessionResponse;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -69,9 +71,9 @@ public class WorkoutService {
     }
 
     @Transactional(readOnly = true)
-    public WorkoutSessionResponse getSessionById(Long id) {
-        WorkoutSession session = sessionRepository.findById(id)
-                .orElseThrow(() -> new RuntimeException("Workout session not found with id: " + id));
+    public WorkoutSessionResponse getSessionById(Long userId, Long id) {
+        WorkoutSession session = sessionRepository.findByIdAndUserId(id, userId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Workout session not found"));
         return mapToResponse(session);
     }
 
@@ -82,6 +84,10 @@ public class WorkoutService {
 
         if (!session.getUser().getId().equals(userId)) {
             throw new IllegalArgumentException("Unauthorized deletion of workout session");
+        }
+        if (session.getWorkoutPlan() != null || !session.getExercises().isEmpty()) {
+            throw new ResponseStatusException(
+                    HttpStatus.CONFLICT, "Plan-based workout history cannot be deleted through the legacy endpoint");
         }
 
         sessionRepository.delete(session);

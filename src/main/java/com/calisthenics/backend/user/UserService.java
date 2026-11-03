@@ -1,10 +1,13 @@
 package com.calisthenics.backend.user;
 
+import com.calisthenics.backend.user.dto.CoachProfileResponse;
 import com.calisthenics.backend.user.dto.UpdateProfileRequest;
 import com.calisthenics.backend.user.dto.UserProfileResponse;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.util.List;
 import java.util.stream.Collectors;
@@ -46,6 +49,31 @@ public class UserService {
         return userRepository.findAll().stream()
                 .map(this::mapToProfileResponse)
                 .collect(Collectors.toList());
+    }
+
+    @Transactional(readOnly = true)
+    public List<CoachProfileResponse> getCoachProfiles(Long currentUserId) {
+        return userRepository.findByRoleAndIdNotOrderByFullNameAsc(Role.ROLE_USER, currentUserId)
+                .stream()
+                .map(this::mapToCoachProfile)
+                .toList();
+    }
+
+    @Transactional(readOnly = true)
+    public CoachProfileResponse getCoachProfile(Long userId) {
+        User user = userRepository.findById(userId)
+                .filter(candidate -> candidate.getRole() == Role.ROLE_USER)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
+        return mapToCoachProfile(user);
+    }
+
+    private CoachProfileResponse mapToCoachProfile(User user) {
+        return CoachProfileResponse.builder()
+                .id(user.getId())
+                .fullName(user.getFullName())
+                .avatarUrl(user.getAvatarUrl())
+                .experienceLevel(user.getExperienceLevel())
+                .build();
     }
 
     private UserProfileResponse mapToProfileResponse(User user) {

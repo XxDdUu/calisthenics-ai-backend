@@ -55,6 +55,7 @@ public class SecurityConfig {
                                 "/swagger-ui.html",
                                 "/actuator/**",
                                 "/api/v1/storage/files/**",
+                                "/ws/**",
                                 "/error"
                         ).permitAll()
                         .requestMatchers(HttpMethod.GET, "/api/v1/exercises/**").permitAll()

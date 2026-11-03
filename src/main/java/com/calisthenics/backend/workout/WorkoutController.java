@@ -42,8 +42,9 @@ public class WorkoutController {
 
     @GetMapping("/{id}")
     @Operation(summary = "Get detailed workout session by ID")
-    public ResponseEntity<WorkoutSessionResponse> getSessionById(@PathVariable Long id) {
-        WorkoutSessionResponse response = workoutService.getSessionById(id);
+    public ResponseEntity<WorkoutSessionResponse> getSessionById(
+            @AuthenticationPrincipal UserPrincipal currentUser, @PathVariable Long id) {
+        WorkoutSessionResponse response = workoutService.getSessionById(currentUser.getId(), id);
         return ResponseEntity.ok(response);
     }
 
