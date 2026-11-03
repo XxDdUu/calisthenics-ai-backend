@@ -53,6 +53,7 @@ services:
     environment:
       PORT: 8080
       SPRING_PROFILES_ACTIVE: prod
+      MANAGEMENT_HEALTH_MAIL_ENABLED: "false"
       DB_HOST: postgres
       DB_PORT: 5432
       DB_NAME: ${POSTGRES_DB:-calisthenics_db}
