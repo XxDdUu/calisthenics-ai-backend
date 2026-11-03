@@ -1,0 +1,95 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: calisthenics-postgres-prod
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-calisthenics_db}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be provided}
+    volumes:
+      - postgres_prod_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-postgres} -d $${POSTGRES_DB:-calisthenics_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - calisthenics-internal
+
+  ai-service:
+    image: ${AI_SERVICE_IMAGE:-ghcr.io/xxdduu/calisthenics-ai-service:latest}
+    container_name: calisthenics-ai-service-prod
+    restart: unless-stopped
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8000
+      MODEL_PATH: ${MODEL_PATH:-yolov8n-pose.pt}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      CONFIDENCE_THRESHOLD: ${CONFIDENCE_THRESHOLD:-0.25}
+      KEYPOINT_CONF_THRESHOLD: ${KEYPOINT_CONF_THRESHOLD:-0.25}
+      DEVICE: ${AI_DEVICE:-cpu}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - calisthenics-internal
+
+  backend:
+    image: ${BACKEND_IMAGE:-ghcr.io/xxdduu/calisthenics-ai-backend:latest}
+    container_name: calisthenics-backend-prod
+    restart: unless-stopped
+    ports:
+      - "${HOST_PORT:-8082}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ai-service:
+        condition: service_healthy
+    environment:
+      PORT: 8080
+      SPRING_PROFILES_ACTIVE: prod
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-calisthenics_db}
+      DB_USERNAME: ${POSTGRES_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be provided}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be provided}
+      JWT_EXPIRATION_MS: ${JWT_EXPIRATION_MS:-86400000}
+      JWT_REFRESH_EXPIRATION_MS: ${JWT_REFRESH_EXPIRATION_MS:-604800000}
+      AI_SERVICE_URL: http://ai-service:8000
+      AI_SERVICE_TIMEOUT_SECONDS: ${AI_SERVICE_TIMEOUT_SECONDS:-60}
+      STORAGE_LOCATION: /app/uploads
+      STORAGE_MAX_FILE_SIZE: ${STORAGE_MAX_FILE_SIZE:-100MB}
+      FIREBASE_ENABLED: ${FIREBASE_ENABLED:-false}
+      FIREBASE_CREDENTIALS_PATH: ${FIREBASE_CREDENTIALS_PATH:-classpath:firebase-service-account.json}
+      MAIL_USERNAME: ${MAIL_USERNAME:-}
+      MAIL_APP_PASSWORD: ${MAIL_APP_PASSWORD:-}
+      MAIL_HOST: ${MAIL_HOST:-smtp.gmail.com}
+      MAIL_PORT: ${MAIL_PORT:-587}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+    volumes:
+      - media_prod_uploads:/app/uploads
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8080/actuator/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks:
+      - calisthenics-internal
+
+networks:
+  calisthenics-internal:
+    driver: bridge
+
+volumes:
+  postgres_prod_data:
+    name: calisthenics_postgres_prod_data
+  media_prod_uploads:
+    name: calisthenics_media_prod_uploads
+

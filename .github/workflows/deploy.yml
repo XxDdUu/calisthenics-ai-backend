@@ -1,0 +1,258 @@
+name: Calisthenics AI - CI/CD & Production Deployment
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      skip_tests:
+        description: 'Skip tests before build (emergency deployment)'
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: production-deployment
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # Job 1: Backend CI (Test & Build JAR)
+  # ----------------------------------------------------------------------------
+  backend-ci:
+    name: Backend CI (Test & Build)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Backend Source
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Run Backend Unit & Integration Tests
+        if: ${{ !inputs.skip_tests }}
+        run: mvn clean test -B
+
+      - name: Package Executable JAR
+        run: mvn package -DskipTests -B
+
+      - name: Upload JAR Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: calisthenics-backend-jar
+          path: target/calisthenics-backend-*.jar
+          retention-days: 7
+
+  # ----------------------------------------------------------------------------
+  # Job 2: Build & Push Backend Docker Image to GHCR
+  # ----------------------------------------------------------------------------
+  build-and-push-backend:
+    name: Build & Push Backend Image to GHCR
+    needs: backend-ci
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tag_sha }}
+      short_sha: ${{ steps.meta.outputs.short_sha }}
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Compute Image Metadata
+        id: meta
+        run: |
+          SHA="${{ github.sha }}"
+          SHORT_SHA=$(echo "$SHA" | cut -c1-7)
+          REPO_OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE="ghcr.io/${REPO_OWNER_LOWER}/calisthenics-ai-backend"
+          echo "sha=$SHA" >> $GITHUB_OUTPUT
+          echo "short_sha=$SHORT_SHA" >> $GITHUB_OUTPUT
+          echo "image=$IMAGE" >> $GITHUB_OUTPUT
+          echo "tag_sha=${IMAGE}:${SHA}" >> $GITHUB_OUTPUT
+          echo "tag_short=${IMAGE}:${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "tag_latest=${IMAGE}:latest" >> $GITHUB_OUTPUT
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and Push Backend Docker Image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.tag_sha }}
+            ${{ steps.meta.outputs.tag_short }}
+            ${{ steps.meta.outputs.tag_latest }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ----------------------------------------------------------------------------
+  # Job 3: Build & Push AI Service (if monorepo or submodule present)
+  # ----------------------------------------------------------------------------
+  build-and-push-ai-service:
+    name: Build & Push AI Service (Optional / Monorepo)
+    needs: backend-ci
+    runs-on: ubuntu-latest
+    if: hashFiles('../calisthenics-ai-service/Dockerfile') != ''
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & Push AI Service Image
+        run: |
+          REPO_OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          AI_IMAGE="ghcr.io/${REPO_OWNER_LOWER}/calisthenics-ai-service"
+          SHA="${{ github.sha }}"
+          cd ../calisthenics-ai-service
+          docker build -t "${AI_IMAGE}:latest" -t "${AI_IMAGE}:${SHA}" .
+          docker push "${AI_IMAGE}:latest"
+          docker push "${AI_IMAGE}:${SHA}"
+
+  # ----------------------------------------------------------------------------
+  # Job 4: Deploy to Production VPS via Self-Hosted Runner
+  # ----------------------------------------------------------------------------
+  deploy-vps:
+    name: Deploy to Production VPS (Self-Hosted Runner)
+    needs: [ build-and-push-backend ]
+    runs-on: [ self-hosted, linux, x64, calisthenics-vps ]
+    environment:
+      name: production
+      url: http://localhost:8082
+
+    steps:
+      - name: Preflight Verification
+        run: |
+          echo "=== 1. VERIFY DOCKER DAEMON ACCESS ==="
+          if ! docker info >/dev/null 2>&1; then
+            echo "ERROR: Runner user does not have permission to access Docker daemon." >&2
+            exit 1
+          fi
+          echo "Docker daemon access: OK"
+
+          echo "=== 2. VERIFY DEPLOYMENT DIRECTORY ==="
+          DEPLOY_DIR="/home/thitheo/calisthenics-ai"
+          if [ ! -d "$DEPLOY_DIR" ]; then
+            echo "ERROR: Deployment directory $DEPLOY_DIR does not exist." >&2
+            exit 1
+          fi
+          echo "Deployment directory: $DEPLOY_DIR OK"
+
+          echo "=== 3. VERIFY PRODUCTION FILES ==="
+          if [ ! -f "$DEPLOY_DIR/docker-compose.prod.yml" ]; then
+            echo "ERROR: $DEPLOY_DIR/docker-compose.prod.yml missing." >&2
+            exit 1
+          fi
+          if [ ! -f "$DEPLOY_DIR/.env.prod" ]; then
+            echo "ERROR: $DEPLOY_DIR/.env.prod missing." >&2
+            exit 1
+          fi
+          echo "Production files: OK"
+
+          echo "=== 4. VERIFY .ENV.PROD PERMISSION (600) ==="
+          ENV_PERM=$(stat -c "%a" "$DEPLOY_DIR/.env.prod" 2>/dev/null || stat -f "%OLp" "$DEPLOY_DIR/.env.prod" 2>/dev/null)
+          if [ "$ENV_PERM" != "600" ]; then
+            echo "WARNING: .env.prod permission is $ENV_PERM, enforcing 600..."
+            chmod 600 "$DEPLOY_DIR/.env.prod"
+          fi
+          echo ".env.prod permissions (600): OK"
+
+          echo "=== 5. VERIFY PORT 8082 AVAILABILITY ==="
+          # Check if port 8082 is listening by a foreign process (not our calisthenics-backend container)
+          PORT_OWNER=$(ss -tlpn '( sport = :8082 )' | grep -v "calisthenics-backend-prod" | grep 8082 || true)
+          # If the port is listening, verify if it belongs to calisthenics-backend-prod
+          CURRENT_BACKEND_CONTAINER=$(docker ps --filter "name=calisthenics-backend-prod" --format "{{.ID}}" || true)
+          if [ -n "$PORT_OWNER" ] && [ -z "$CURRENT_BACKEND_CONTAINER" ]; then
+            echo "ERROR: Port 8082 is already occupied by a non-Calisthenics service: $PORT_OWNER" >&2
+            exit 1
+          fi
+          echo "Port 8082 availability: OK"
+
+      - name: Pull Production Images
+        run: |
+          cd /home/thitheo/calisthenics-ai
+          echo "Pulling latest images from GHCR..."
+          docker compose --env-file .env.prod -f docker-compose.prod.yml pull
+
+      - name: Deploy Containers with Zero-Downtime Rollout
+        run: |
+          cd /home/thitheo/calisthenics-ai
+          echo "Starting production services..."
+          docker compose --env-file .env.prod -f docker-compose.prod.yml up -d
+
+      - name: Check Container Status
+        run: |
+          cd /home/thitheo/calisthenics-ai
+          docker compose --env-file .env.prod -f docker-compose.prod.yml ps
+
+      - name: Health Check Backend (:8082)
+        run: |
+          echo "Polling Spring Boot Actuator health endpoint on port 8082..."
+          SUCCESS=0
+          for i in $(seq 1 15); do
+            STATUS=$(curl --fail --silent --show-error http://localhost:8082/actuator/health 2>&1 || true)
+            if echo "$STATUS" | grep -q '"status":"UP"'; then
+              echo "✅ Backend health check PASSED on attempt $i: $STATUS"
+              SUCCESS=1
+              break
+            fi
+            echo "Waiting for Spring Boot to become healthy ($i/15)..."
+            sleep 4
+          done
+
+          if [ $SUCCESS -ne 1 ]; then
+            echo "❌ Backend health check FAILED on http://localhost:8082/actuator/health." >&2
+            echo "--- Recent Backend Logs ---" >&2
+            docker logs --tail=60 calisthenics-backend-prod >&2 || true
+            exit 1
+          fi
+
+      - name: Health Check AI Service (Internal)
+        run: |
+          echo "Checking AI Service health endpoint..."
+          AI_HEALTH=$(docker exec calisthenics-ai-service-prod curl --fail --silent --show-error http://localhost:8000/health 2>&1 || true)
+          if echo "$AI_HEALTH" | grep -q '"status":"healthy"'; then
+            echo "✅ AI Service health check PASSED: $AI_HEALTH"
+          else
+            echo "⚠️ AI Service health check returned: $AI_HEALTH"
+            docker logs --tail=40 calisthenics-ai-service-prod || true
+            exit 1
+          fi
+
+      - name: Deployment Success Summary
+        if: success()
+        run: |
+          echo "### 🚀 Deployment Successful!" >> $GITHUB_STEP_SUMMARY
+          echo "- **Target Host**: VPS \`fourier\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Directory**: \`/home/thitheo/calisthenics-ai\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Backend Port**: \`8082\` (Actuator Health UP)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Database**: PostgreSQL (Internal Network, Isolated Volume)" >> $GITHUB_STEP_SUMMARY
+          echo "- **AI Service**: FastAPI / YOLOv8-pose (Healthy)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Cloudflare Route Needed**: \`api.calisthenics.caelestial.store\` -> \`http://localhost:8082\`" >> $GITHUB_STEP_SUMMARY

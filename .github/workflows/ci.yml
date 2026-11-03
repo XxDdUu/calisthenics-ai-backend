@@ -1,0 +1,187 @@
+name: Calisthenics AI - Continuous Integration
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # ============================================================================
+  # 1. Spring Boot Java 21 Backend CI
+  # ============================================================================
+  backend-ci:
+    name: Backend (Java 21 / Spring Boot)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'maven'
+
+      - name: Locate Backend Directory
+        id: locate
+        run: |
+          if [ -f "pom.xml" ]; then
+            echo "dir=." >> $GITHUB_OUTPUT
+          elif [ -f "calisthenics-ai-backend/pom.xml" ]; then
+            echo "dir=calisthenics-ai-backend" >> $GITHUB_OUTPUT
+          else
+            echo "dir=none" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run Backend Unit & Integration Tests
+        if: steps.locate.outputs.dir != 'none'
+        working-directory: ${{ steps.locate.outputs.dir }}
+        run: mvn -B clean test
+
+      - name: Build Spring Boot Application JAR
+        if: steps.locate.outputs.dir != 'none'
+        working-directory: ${{ steps.locate.outputs.dir }}
+        run: mvn -B package -DskipTests
+
+      - name: Archive Backend Build Artifact
+        if: steps.locate.outputs.dir != 'none'
+        uses: actions/upload-artifact@v4
+        with:
+          name: calisthenics-backend-jar
+          path: ${{ steps.locate.outputs.dir }}/target/*.jar
+          if-no-files-found: error
+          retention-days: 7
+
+  # ============================================================================
+  # 2. FastAPI Python 3.13 AI Computer Vision Service CI
+  # ============================================================================
+  ai-service-ci:
+    name: AI Service (Python 3.13 / FastAPI / uv)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Locate AI Service Directory
+        id: locate
+        run: |
+          if [ -f "pyproject.toml" ]; then
+            echo "dir=." >> $GITHUB_OUTPUT
+            echo "exists=true" >> $GITHUB_OUTPUT
+          elif [ -f "calisthenics-ai-service/pyproject.toml" ]; then
+            echo "dir=calisthenics-ai-service" >> $GITHUB_OUTPUT
+            echo "exists=true" >> $GITHUB_OUTPUT
+          elif [ -f "../calisthenics-ai-service/pyproject.toml" ]; then
+            echo "dir=../calisthenics-ai-service" >> $GITHUB_OUTPUT
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set up Python 3.13
+        if: steps.locate.outputs.exists == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install uv Package Manager
+        if: steps.locate.outputs.exists == 'true'
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          version: 'latest'
+
+      - name: Install Dependencies with Frozen Lockfile
+        if: steps.locate.outputs.exists == 'true'
+        working-directory: ${{ steps.locate.outputs.dir }}
+        run: uv sync --frozen
+
+      - name: Run PyTest Test Suite
+        if: steps.locate.outputs.exists == 'true'
+        working-directory: ${{ steps.locate.outputs.dir }}
+        env:
+          YOLO_VERBOSE: "False"
+        run: uv run pytest -v
+
+      - name: Validate Application Import & FastAPI Initialization
+        if: steps.locate.outputs.exists == 'true'
+        working-directory: ${{ steps.locate.outputs.dir }}
+        env:
+          YOLO_VERBOSE: "False"
+        run: |
+          uv run python -c "import app.main; print('FastAPI application initialized successfully')"
+
+  # ============================================================================
+  # 3. Android Kotlin / Jetpack Compose CI
+  # ============================================================================
+  android-ci:
+    name: Android (Kotlin / Jetpack Compose)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Locate Android Directory
+        id: locate
+        run: |
+          if [ -f "settings.gradle.kts" ] || [ -f "build.gradle.kts" ]; then
+            echo "dir=." >> $GITHUB_OUTPUT
+            echo "exists=true" >> $GITHUB_OUTPUT
+          elif [ -f "calisthenics-ai-android/settings.gradle.kts" ]; then
+            echo "dir=calisthenics-ai-android" >> $GITHUB_OUTPUT
+            echo "exists=true" >> $GITHUB_OUTPUT
+          elif [ -f "../calisthenics-ai-android/settings.gradle.kts" ]; then
+            echo "dir=../calisthenics-ai-android" >> $GITHUB_OUTPUT
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set up JDK 21
+        if: steps.locate.outputs.exists == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Set up Gradle Cache
+        if: steps.locate.outputs.exists == 'true'
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Grant Execute Permission to Gradle Wrapper
+        if: steps.locate.outputs.exists == 'true'
+        working-directory: ${{ steps.locate.outputs.dir }}
+        run: chmod +x gradlew
+
+      - name: Run Android Unit Tests
+        if: steps.locate.outputs.exists == 'true'
+        working-directory: ${{ steps.locate.outputs.dir }}
+        run: ./gradlew testDebugUnitTest --no-daemon --stacktrace
+
+      - name: Build Debug APK
+        if: steps.locate.outputs.exists == 'true'
+        working-directory: ${{ steps.locate.outputs.dir }}
+        run: ./gradlew assembleDebug --no-daemon
+
+      - name: Archive Debug APK Artifact
+        if: steps.locate.outputs.exists == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: calisthenics-debug-apk
+          path: ${{ steps.locate.outputs.dir }}/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: warn
+          retention-days: 7
+
