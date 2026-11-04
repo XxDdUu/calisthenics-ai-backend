@@ -42,6 +42,15 @@ public class Exercise {
     @Column(columnDefinition = "TEXT")
     private String instructions;
 
+    @Column(name = "image_url")
+    private String imageUrl;
+
+    @Column(name = "video_url")
+    private String videoUrl;
+
+    @Column(name = "equipment")
+    private String equipment;
+
     @Column(nullable = false)
     @Builder.Default
     private boolean active = true;

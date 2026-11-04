@@ -1,0 +1,90 @@
+%% =====================================================================
+%% Hình 3.9: Lưu đồ giải thuật phân tích kỹ thuật bài tập bằng AI
+%% (Exercise Form Analysis Flowchart)
+%% =====================================================================
+
+flowchart TD
+    Start(["<b>BẮT ĐẦU: TIẾP NHẬN DỮ LIỆU KHUNG HÌNH</b><br/>(Input: Raw Frame Bytes / Video Sequence)"]) --> CheckFormat{"Khung hình hợp lệ &<br/>đúng định dạng ảnh?"}
+
+    %% Kiểm tra tính toàn vẹn dữ liệu
+    CheckFormat -->|Không| ErrFormat["<b>Lỗi định dạng (HTTP 400)</b><br/>Thông báo: 'File ảnh/video không hợp lệ hoặc rỗng'"]
+    ErrFormat --> ReturnError(["<b>KẾT THÚC VỚI LỖI</b>"])
+
+    CheckFormat -->|Có| RunYOLO["<b>Suy luận Mô hình YOLOv8-Pose</b><br/>(Ultralytics YOLOv8n-pose)<br/>Phát hiện người & trích xuất 17 điểm then chốt COCO"]
+
+    %% Kiểm tra phát hiện người
+    RunYOLO --> CheckPerson{"Có phát hiện người<br/>trong khung hình?"}
+    CheckPerson -->|Không| NoPerson["<b>Trạng thái: NO_PERSON_DETECTED</b><br/>• Điểm kỹ thuật (Score) = 0<br/>• Nhận xét: 'Không tìm thấy người tập trong góc quay'"]
+    NoPerson --> EndNoPerson(["<b>TRẢ VỀ KẾT QUẢ RỖNG</b>"])
+
+    %% Kiểm tra độ tin cậy khớp
+    CheckPerson -->|Có| CheckConf{"Độ tin cậy trung bình<br/>c_avg >= 0.5 & các khớp<br/>trọng yếu hiển thị rõ?"}
+    CheckConf -->|Không| LowConf["<b>Trạng thái: LOW_CONFIDENCE</b><br/>• Điểm kỹ thuật (Score) = 0<br/>• Nhận xét: 'Ánh sáng yếu hoặc tư thế bị che khuất một phần'"]
+    LowConf --> EndLowConf(["<b>TRẢ VỀ CẢNH BÁO CHE KHUẤT</b>"])
+
+    %% Tiền xử lý & làm mượt tín hiệu
+    CheckConf -->|Có| ApplyEMA["<b>Bộ lọc Làm mượt Thời gian EMA (&alpha; = 0.65)</b><br/>P_t' = 0.65 * P_t + 0.35 * P_t-1<br/>Triệt tiêu rung giật tọa độ giữa các khung hình"]
+
+    ApplyEMA --> ExerciseRouter{"Phân loại Động tác<br/>(Target Exercise)"}
+
+    %% Nhánh 1: Planche
+    ExerciseRouter -->|PLANCHE| PlancheAnalysis["<b>Bộ phân tích Planche (PlancheAnalyzer)</b><br/>• Tính góc khuỷu: &theta;_elbow<br/>• Tính góc đổ vai: &phi;_lean<br/>• Tính độ nghiêng thân: &gamma;_tilt<br/>• Tính góc gập hông: &beta;_hip & gối: &kappa;_knee"]
+    
+    PlancheAnalysis --> PlancheProgression{"Xác định Tiến trình<br/>(Progression Stage)"}
+    PlancheProgression -->|Tuck / Adv Tuck| TuckLogic["Cơ thể co gập gối/hông (&beta; < 90&deg;)"]
+    PlancheProgression -->|Straddle| StraddleLogic["Hai chân dang rộng, thân thẳng"]
+    PlancheProgression -->|Full Planche| FullLogic["Toàn bộ cơ thể thẳng ngang (&beta; >= 170&deg;)"]
+    
+    TuckLogic --> PlancheFaults
+    StraddleLogic --> PlancheFaults
+    FullLogic --> PlancheFaults
+
+    subgraph PlancheFaultsCheck ["Kiểm tra Lỗi Kỹ thuật Planche"]
+        PlancheFaults{"Kiểm tra các lỗi kỹ thuật"}
+        PlancheFaults -->|&theta;_elbow < 165&deg;| FaultBent["Ghi nhận lỗi: 'Trùng tay / Cong khuỷu tay'"]
+        PlancheFaults -->|&phi;_lean < 15&deg;| FaultLean["Ghi nhận lỗi: 'Thiếu độ đổ vai về trước'"]
+        PlancheFaults -->|&gamma;_tilt > 15&deg;| FaultTilt["Ghi nhận lỗi: 'Hông quá cao hoặc võng lưng'"]
+        PlancheFaults -->|Đạt chuẩn| ValidHold["Ghi nhận: 'Khung hình giữ chuẩn (Valid Hold)'<br/>Tích lũy thời gian giữ (Hold Duration)"]
+    end
+
+    %% Nhánh 2: Pull-up
+    ExerciseRouter -->|PULL_UP| PullUpAnalysis["<b>Bộ phân tích Kéo xà (PullUpAnalyzer)</b><br/>• Cập nhật Máy trạng thái (FSM): Dead Hang -> Ascending -> Top -> Descending<br/>• Kiểm tra đối xứng: |&theta;_elbow_L - &theta;_elbow_R| <= 15&deg;<br/>• Kiểm tra cằm vượt xà (Chin over bar) & Khóa khuỷu dưới"]
+    PullUpAnalysis --> PullUpFaults{"Kiểm tra lỗi Pull-up"}
+    PullUpFaults -->|Mất đối xứng > 15&deg;| FaultSymm["Ghi nhận lỗi: 'Kéo lệch tay / Mất cân bằng lực'"]
+    PullUpFaults -->|Cằm chưa qua xà| FaultROM["Ghi nhận lỗi: 'Chưa đủ biên độ chuyển động (ROM)'"]
+    PullUpFaults -->|Đạt chuẩn FSM| IncRep["Tăng bộ đếm Reps hợp lệ (+1 Rep)"]
+
+    %% Nhánh 3: Động tác khác
+    ExerciseRouter -->|OTHER_EXERCISE| OtherAnalysis["<b>Front Lever / Handstand / Dips / Muscle-up</b><br/>• Phân tích góc mở khớp nách, độ sâu Dip, lỗi Chicken-Wing"]
+
+    %% Tổng hợp kết quả
+    FaultBent --> Aggregate
+    FaultLean --> Aggregate
+    FaultTilt --> Aggregate
+    ValidHold --> Aggregate
+    FaultSymm --> Aggregate
+    FaultROM --> Aggregate
+    IncRep --> Aggregate
+    OtherAnalysis --> Aggregate
+
+    Aggregate["<b>Tổng hợp Kết quả & Chấm điểm (0 - 100)</b><br/>• Điểm trừ cho từng lỗi kỹ thuật phát hiện<br/>• Điểm thưởng cho thời gian giữ chuẩn hoặc rep hợp lệ<br/>• Tạo thông điệp hướng dẫn khắc phục (Coaching Cues)"]
+
+    Aggregate --> DrawOverlay{"Cần vẽ khung xương<br/>(draw_overlay == true)?"}
+    DrawOverlay -->|Có| RenderSkeleton["Vẽ khung xương 17 điểm khớp & góc độ lên ảnh"]
+    DrawOverlay -->|Không| SkipSkeleton["Bỏ qua lớp vẽ (Tối ưu băng thông)"]
+
+    RenderSkeleton --> OutputJSON["<b>Đóng gói Dữ liệu JSON Phản hồi</b><br/>{ score, hold_duration, valid_reps, faults, feedback }"]
+    SkipSkeleton --> OutputJSON
+    OutputJSON --> EndSuccess(["<b>KẾT THÚC THÀNH CÔNG (HTTP 200)</b>"])
+
+    classDef startEnd fill:#0F172A,stroke:#0F172A,color:#FFFFFF;
+    classDef checkNode fill:#FEF3C7,stroke:#D97706,stroke-width:2px,color:#92400E;
+    classDef processNode fill:#EFF6FF,stroke:#2563EB,stroke-width:2px,color:#1E3A8A;
+    classDef faultNode fill:#FEE2E2,stroke:#DC2626,stroke-width:2px,color:#991B1B;
+    classDef successNode fill:#ECFDF5,stroke:#059669,stroke-width:2px,color:#065F46;
+
+    class Start,ReturnError,EndNoPerson,EndLowConf,EndSuccess startEnd;
+    class CheckFormat,CheckPerson,CheckConf,ExerciseRouter,PlancheProgression,PlancheFaults,PullUpFaults,DrawOverlay checkNode;
+    class RunYOLO,ApplyEMA,PlancheAnalysis,PullUpAnalysis,OtherAnalysis,Aggregate,RenderSkeleton,SkipSkeleton,OutputJSON processNode;
+    class ErrFormat,NoPerson,LowConf,FaultBent,FaultLean,FaultTilt,FaultSymm,FaultROM faultNode;
+    class ValidHold,IncRep,TuckLogic,StraddleLogic,FullLogic successNode;

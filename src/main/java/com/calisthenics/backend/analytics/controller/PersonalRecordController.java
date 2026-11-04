@@ -1,5 +1,6 @@
 package com.calisthenics.backend.analytics.controller;
 
+import com.calisthenics.backend.analytics.dto.BatchSharePrRequest;
 import com.calisthenics.backend.analytics.dto.CreatePersonalRecordRequest;
 import com.calisthenics.backend.analytics.dto.PersonalRecordResponse;
 import com.calisthenics.backend.analytics.dto.SharedPersonalRecordResponse;
@@ -93,6 +94,14 @@ public class PersonalRecordController {
         return ResponseEntity.ok(personalRecordService.getSessionPRs(sessionId));
     }
 
+    @PostMapping({"/api/v1/clients/me/pr-shares", "/api/v1/prs/batch-share"})
+    @Operation(summary = "Share multiple Personal Records with assigned Coach")
+    public ResponseEntity<List<SharedPersonalRecordResponse>> batchSharePRs(
+            @AuthenticationPrincipal UserPrincipal currentUser,
+            @Valid @RequestBody BatchSharePrRequest request) {
+        return ResponseEntity.ok(personalRecordService.sharePRsWithCoach(currentUser.getId(), request.getEffectivePrIds()));
+    }
+
     @PostMapping("/api/v1/prs/{prId}/share")
     @Operation(summary = "Share a Personal Record with assigned Coach")
     public ResponseEntity<SharedPersonalRecordResponse> sharePR(
@@ -101,10 +110,17 @@ public class PersonalRecordController {
         return ResponseEntity.ok(personalRecordService.sharePRWithCoach(currentUser.getId(), prId));
     }
 
-    @GetMapping("/api/v1/client/shared-prs")
+    @GetMapping({"/api/v1/clients/me/pr-shares", "/api/v1/client/shared-prs"})
     @Operation(summary = "Get list of PRs shared by client, including coach feedback")
     public ResponseEntity<List<SharedPersonalRecordResponse>> getClientSharedPRs(
             @AuthenticationPrincipal UserPrincipal currentUser) {
         return ResponseEntity.ok(personalRecordService.getClientSharedPRs(currentUser.getId()));
+    }
+
+    @GetMapping("/api/v1/clients/me/feedback")
+    @Operation(summary = "Get all coach feedbacks addressed to the authenticated client")
+    public ResponseEntity<List<SharedPersonalRecordResponse>> getClientFeedbacks(
+            @AuthenticationPrincipal UserPrincipal currentUser) {
+        return ResponseEntity.ok(personalRecordService.getClientFeedbacks(currentUser.getId()));
     }
 }

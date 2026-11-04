@@ -20,4 +20,8 @@ public interface WorkoutPlanExerciseRepository extends JpaRepository<WorkoutPlan
             Long workoutPlanDayId, Integer displayOrder, Long id);
 
     boolean existsByWorkoutPlanDayIdAndDisplayOrder(Long workoutPlanDayId, Integer displayOrder);
+
+    long countByExerciseId(Long exerciseId);
+
+    boolean existsByExerciseId(Long exerciseId);
 }

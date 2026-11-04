@@ -56,7 +56,7 @@ public class ExerciseService {
         return mapToResponse(saved);
     }
 
-    private ExerciseResponse mapToResponse(Exercise exercise) {
+    public ExerciseResponse mapToResponse(Exercise exercise) {
         return ExerciseResponse.builder()
                 .id(exercise.getId())
                 .name(exercise.getName())
@@ -66,6 +66,10 @@ public class ExerciseService {
                 .description(exercise.getDescription())
                 .targetMuscles(exercise.getTargetMuscles())
                 .instructions(exercise.getInstructions())
+                .imageUrl(exercise.getImageUrl())
+                .videoUrl(exercise.getVideoUrl())
+                .equipment(exercise.getEquipment())
+                .active(exercise.isActive())
                 .build();
     }
 }

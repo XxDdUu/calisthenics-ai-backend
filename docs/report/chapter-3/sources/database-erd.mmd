@@ -1,0 +1,287 @@
+%% =====================================================================
+%% Hình 3.5: Sơ đồ Thực thể - Quan hệ Cơ sở dữ liệu (Database ERD)
+%% Hệ quản trị CSDL: PostgreSQL 16 (Quản lý qua Flyway Migrations V1-V22)
+%% =====================================================================
+
+erDiagram
+    users ||--o| client_profiles : "has"
+    users ||--o| coach_profiles : "has"
+    users ||--o| user_presence : "tracks"
+    users ||--o{ password_reset_otps : "requests"
+    users ||--o{ notifications : "receives"
+
+    users ||--o{ coach_client_relationships : "coach_of"
+    users ||--o{ coach_client_relationships : "client_of"
+    users ||--o{ coach_client_relationships : "requested_by"
+
+    users ||--o{ workout_plans : "creates"
+    workout_plans ||--|{ workout_plan_days : "contains"
+    workout_plan_days ||--|{ workout_plan_exercises : "includes"
+    exercises ||--o{ workout_plan_exercises : "referenced_in"
+
+    workout_plans ||--o{ workout_plan_assignments : "assigned_as"
+    coach_client_relationships ||--o{ workout_plan_assignments : "applies_to"
+
+    users ||--o{ workout_sessions : "performs"
+    workout_plan_assignments ||--o{ workout_sessions : "associated_with"
+    workout_sessions ||--|{ workout_session_exercises : "consists_of"
+    exercises ||--o{ workout_session_exercises : "performed_in"
+    workout_session_exercises ||--|{ workout_session_sets : "contains"
+    workout_sessions ||--o{ workout_logs : "logs"
+
+    users ||--o{ analyses : "submits"
+    exercises ||--o{ analyses : "evaluated_for"
+
+    users ||--o{ personal_records : "achieves"
+    exercises ||--o{ personal_records : "recorded_on"
+    workout_sessions ||--o{ personal_records : "achieved_in"
+    personal_records ||--o{ shared_personal_records : "shared_via"
+
+    users ||--o{ client_body_measurements : "logs_metrics"
+
+    users ||--o{ chat_conversations : "coach_participant"
+    users ||--o{ chat_conversations : "client_participant"
+    chat_conversations ||--|{ chat_messages : "contains"
+    users ||--o{ chat_messages : "sends"
+
+    users {
+        bigint id PK
+        varchar email UK
+        varchar password_hash
+        varchar full_name
+        varchar role "ROLE_USER, ROLE_COACH, ROLE_ADMIN"
+        varchar experience_level
+        varchar google_id
+        varchar firebase_uid
+        boolean is_active
+        timestamp created_at
+        timestamp updated_at
+    }
+
+    client_profiles {
+        bigint user_id PK,FK
+        varchar fitness_level "BEGINNER, INTERMEDIATE, ADVANCED"
+        varchar goal
+        numeric initial_weight_kg "NUMERIC(5,1)"
+        numeric initial_height_cm "NUMERIC(5,1)"
+        numeric current_weight_kg "NUMERIC(5,1)"
+        numeric current_height_cm "NUMERIC(5,1)"
+        numeric body_fat_percentage "NUMERIC(5,1)"
+        numeric waist_cm "NUMERIC(5,1)"
+        numeric chest_cm "NUMERIC(5,1)"
+        numeric arm_cm "NUMERIC(5,1)"
+        numeric thigh_cm "NUMERIC(5,1)"
+        timestamp updated_at
+    }
+
+    coach_profiles {
+        bigint user_id PK,FK
+        text bio
+        text specialties
+        text certifications
+        int years_of_experience
+        boolean is_accepting_clients
+        numeric rating "NUMERIC(3,2)"
+        timestamp updated_at
+    }
+
+    exercises {
+        bigint id PK
+        varchar code UK
+        varchar name
+        text description
+        varchar category "PUSH, PULL, CORE, LEGS, SKILL"
+        varchar difficulty "BEGINNER, INTERMEDIATE, ADVANCED"
+        boolean is_active
+        varchar media_url
+        varchar equipment
+        timestamp created_at
+    }
+
+    workout_plans {
+        bigint id PK
+        bigint user_id FK "Coach / Creator"
+        varchar name
+        text description
+        varchar goal
+        varchar difficulty
+        boolean is_public
+        timestamp created_at
+    }
+
+    workout_plan_days {
+        bigint id PK
+        bigint workout_plan_id FK
+        int day_of_week
+        varchar day_name "VD: Thứ 2 - Kéo xà"
+    }
+
+    workout_plan_exercises {
+        bigint id PK
+        bigint workout_plan_day_id FK
+        bigint exercise_id FK
+        int order_index
+        int sets
+        int reps
+        int target_rpe
+        int rest_time_seconds
+        text notes
+    }
+
+    coach_client_relationships {
+        bigint id PK
+        bigint coach_id FK
+        bigint client_id FK
+        bigint requested_by FK
+        varchar status "PENDING, ACCEPTED, REJECTED, TERMINATED"
+        timestamp created_at
+        timestamp updated_at
+    }
+
+    workout_plan_assignments {
+        bigint id PK
+        bigint workout_plan_id FK
+        bigint coach_id FK
+        bigint client_id FK
+        bigint relationship_id FK
+        date start_date
+        date end_date
+        boolean is_active
+        timestamp created_at
+    }
+
+    workout_sessions {
+        bigint id PK
+        bigint user_id FK "Client"
+        bigint plan_assignment_id FK
+        bigint plan_day_id FK
+        varchar status "IN_PROGRESS, COMPLETED, ABANDONED"
+        timestamp started_at
+        timestamp completed_at
+        int duration_seconds
+        numeric volume_load_kg "NUMERIC(8,2)"
+        text notes
+    }
+
+    workout_session_exercises {
+        bigint id PK
+        bigint workout_session_id FK
+        bigint exercise_id FK
+        int order_index
+        bigint version "Optimistic Locking"
+    }
+
+    workout_session_sets {
+        bigint id PK
+        bigint workout_session_exercise_id FK
+        int set_number
+        int reps_completed
+        numeric weight_kg "NUMERIC(6,2)"
+        numeric hold_time_seconds "NUMERIC(6,2)"
+        int rpe
+        boolean is_completed
+    }
+
+    workout_logs {
+        bigint id PK
+        bigint user_id FK
+        bigint session_id FK
+        varchar action
+        jsonb payload
+        timestamp created_at
+    }
+
+    analyses {
+        bigint id PK
+        bigint user_id FK "Client"
+        bigint exercise_id FK
+        numeric score "NUMERIC(5,2)"
+        numeric duration_seconds "NUMERIC(6,2)"
+        int valid_reps
+        text feedback
+        jsonb keypoints_json
+        varchar video_storage_path
+        timestamp created_at
+    }
+
+    personal_records {
+        bigint id PK
+        bigint user_id FK
+        bigint exercise_id FK
+        bigint workout_session_id FK
+        varchar record_type "MAX_REPS, MAX_HOLD_TIME, MAX_WEIGHT"
+        numeric value "NUMERIC(8,2)"
+        timestamp achieved_at
+    }
+
+    shared_personal_records {
+        bigint id PK
+        bigint personal_record_id FK
+        bigint client_id FK
+        bigint coach_id FK
+        text coach_feedback
+        timestamp feedback_at
+        timestamp created_at
+    }
+
+    client_body_measurements {
+        bigint id PK
+        bigint client_id FK
+        date recorded_date
+        numeric height_cm "NUMERIC(5,1)"
+        numeric weight_kg "NUMERIC(5,1)"
+        numeric body_fat_percentage "NUMERIC(5,1)"
+        numeric waist_cm "NUMERIC(5,1)"
+        numeric chest_cm "NUMERIC(5,1)"
+        numeric arm_cm "NUMERIC(5,1)"
+        numeric thigh_cm "NUMERIC(5,1)"
+        text notes
+        timestamp created_at
+    }
+
+    chat_conversations {
+        bigint id PK
+        bigint coach_id FK
+        bigint client_id FK
+        timestamp created_at
+        timestamp updated_at
+    }
+
+    chat_messages {
+        bigint id PK
+        bigint conversation_id FK
+        bigint sender_id FK
+        varchar client_message_id UK
+        text content
+        varchar message_type "TEXT, IMAGE, VIDEO, ANALYSIS_REF"
+        boolean is_read
+        timestamp created_at
+    }
+
+    user_presence {
+        bigint id PK
+        bigint user_id FK,UK
+        boolean is_online
+        timestamp last_seen_at
+    }
+
+    password_reset_otps {
+        bigint id PK
+        varchar email
+        varchar otp_hash
+        timestamp expires_at
+        boolean used
+        timestamp created_at
+    }
+
+    notifications {
+        bigint id PK
+        bigint recipient_id FK
+        bigint actor_id FK
+        varchar type "WORKOUT, PR_SHARED, CHAT, FEEDBACK"
+        varchar title
+        text body
+        bigint target_id
+        boolean is_read
+        timestamp created_at
+    }

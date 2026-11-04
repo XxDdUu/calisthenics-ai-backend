@@ -1,0 +1,79 @@
+%% =====================================================================
+%% Hình 3.10: Sơ đồ hoạt động quản lý bài tập của Quản trị viên
+%% (Admin Exercise Management Activity Diagram)
+%% =====================================================================
+
+flowchart TD
+    Start(["<b>BẮT ĐẦU: QUẢN TRỊ VIÊN ĐĂNG NHẬP</b><br/>(Xác thực quyền ROLE_ADMIN)"]) --> OpenDashboard["Mở Bảng điều khiển Quản trị (Admin Dashboard)"]
+    OpenDashboard --> NavExercise["Chọn mục 'Quản lý Thư viện Bài tập'<br/>(Admin Exercise Management)"]
+
+    %% Tải danh sách
+    NavExercise --> FetchList["<b>Gửi yêu cầu tải danh sách:</b><br/>GET /api/v1/admin/exercises<br/>(Pagination: page=0, size=20)"]
+    FetchList --> RenderTable["Hiển thị Danh sách Bài tập<br/>(Mã bài, Tên, Nhóm cơ, Độ khó, Trạng thái Kích hoạt, Lượt sử dụng)"]
+
+    %% Nhánh lựa chọn hành động
+    RenderTable --> ActionSelect{"Quản trị viên chọn thao tác"}
+
+    %% Nhánh 1: Tìm kiếm & Lọc
+    ActionSelect -->|Tìm kiếm / Lọc| FilterAction["Nhập từ khóa tìm kiếm (Name/Code)<br/>hoặc lọc theo Category (PUSH/PULL) & Độ khó"]
+    FilterAction --> ApplyFilter["<b>Gọi API lọc:</b><br/>GET /api/v1/admin/exercises?search=...&category=..."]
+    ApplyFilter --> RenderTable
+
+    %% Nhánh 2: Thêm mới bài tập
+    ActionSelect -->|Tạo bài tập mới| ClickCreate["Nhấn nút '+ Thêm bài tập mới'"]
+    ClickCreate --> FormCreate["Mở biểu mẫu (Form Modal):<br/>• Mã bài tập (Code - Duy nhất)<br/>• Tên bài tập (Name)<br/>• Nhóm chuyển động (Category)<br/>• Mức độ khó (Difficulty)<br/>• Dụng cụ (Equipment) & Link Video"]
+    FormCreate --> SubmitCreate["Nhấn 'Lưu bài tập'<br/>POST /api/v1/admin/exercises"]
+    SubmitCreate --> ValidateCreate{"Kiểm tra hợp lệ<br/>(@Valid Request & Mã bài tập chưa tồn tại?)"}
+    ValidateCreate -->|Không hợp lệ| ShowErrCreate["Hiển thị thông báo lỗi:<br/>'Mã bài tập đã tồn tại hoặc thiếu trường bắt buộc'"]
+    ShowErrCreate --> FormCreate
+    ValidateCreate -->|Hợp lệ| SaveCreate["<b>Backend lưu CSDL:</b><br/>INSERT INTO exercises (...)<br/>Trả về HTTP 201 Created"]
+    SaveCreate --> NotifySuccess["Thông báo 'Tạo bài tập thành công!'"]
+    NotifySuccess --> FetchList
+
+    %% Nhánh 3: Chỉnh sửa bài tập
+    ActionSelect -->|Chỉnh sửa bài tập| ClickEdit["Chọn một bài tập và nhấn 'Chỉnh sửa'"]
+    ClickEdit --> FetchDetail["<b>Lấy thông tin chi tiết:</b><br/>GET /api/v1/admin/exercises/{id}"]
+    FetchDetail --> FormEdit["Hiển thị dữ liệu hiện tại lên Form chỉnh sửa"]
+    FormEdit --> SubmitEdit["Cập nhật thông tin & nhấn 'Lưu thay đổi'<br/>PUT /api/v1/admin/exercises/{id}"]
+    SubmitEdit --> ValidateEdit{"Dữ liệu hợp lệ?"}
+    ValidateEdit -->|Lỗi| ShowErrEdit["Hiển thị lỗi kiểm tra dữ liệu"]
+    ShowErrEdit --> FormEdit
+    ValidateEdit -->|Hợp lệ| SaveEdit["<b>Backend cập nhật CSDL:</b><br/>UPDATE exercises SET ... WHERE id=?<br/>Trả về HTTP 200 OK"]
+    SaveEdit --> NotifyEditSuccess["Thông báo 'Cập nhật thành công!'"]
+    NotifyEditSuccess --> FetchList
+
+    %% Nhánh 4: Bật / Tắt trạng thái kích hoạt
+    ActionSelect -->|Bật/Tắt kích hoạt| ToggleStatus["Nhấn công tắc chuyển đổi (Active/Inactive Toggle)"]
+    ToggleStatus --> SendPatch["<b>Gửi yêu cầu cập nhật trạng thái:</b><br/>PATCH /api/v1/admin/exercises/{id}/status<br/>Payload: { active: true/false }"]
+    SendPatch --> UpdateStatusDB["<b>Backend cập nhật cờ is_active trong CSDL</b><br/>Trả về HTTP 200 OK"]
+    UpdateStatusDB --> UpdateTableRow["Cập nhật trạng thái tức thời trên hàng bảng dữ liệu"]
+    UpdateTableRow --> RenderTable
+
+    %% Nhánh 5: Xóa bài tập
+    ActionSelect -->|Xóa bài tập| ClickDelete["Nhấn nút 'Xóa' bài tập"]
+    ClickDelete --> ConfirmModal["Hiển thị hộp thoại xác nhận xóa<br/>(Lựa chọn Xóa vĩnh viễn hoặc Xóa mềm - Soft Delete)"]
+    ConfirmModal --> ConfirmDecision{"Quản trị viên xác nhận?"}
+    ConfirmDecision -->|Hủy bỏ| RenderTable
+    ConfirmDecision -->|Xác nhận xóa| SendDelete["<b>Gửi yêu cầu xóa bài tập:</b><br/>DELETE /api/v1/admin/exercises/{id}?softDelete=true"]
+    SendDelete --> CheckReferences{"Bài tập đã được sử dụng<br/>trong giáo án hoặc buổi tập cũ?"}
+    CheckReferences -->|Có ràng buộc dữ liệu| SoftDeleteDB["<b>Thực hiện Xóa mềm an toàn:</b><br/>UPDATE exercises SET is_active = false<br/>Bảo toàn toàn vẹn dữ liệu lịch sử"]
+    CheckReferences -->|Chưa có ràng buộc| HardDeleteDB["<b>Xóa bản ghi vật lý:</b><br/>DELETE FROM exercises WHERE id = ?"]
+    SoftDeleteDB --> DeleteSuccess["Trả về AdminExerciseDeleteResponse<br/>(Thông báo: 'Đã vô hiệu hóa an toàn bài tập')"]
+    HardDeleteDB --> DeleteSuccess
+    DeleteSuccess --> NotifyDelete["Hiển thị thông báo xóa thành công"]
+    NotifyDelete --> FetchList
+
+    RenderTable --> FinishAction["Hoàn tất phiên quản trị"]
+    FinishAction --> End(["<b>KẾT THÚC HOẠT ĐỘNG</b>"])
+
+    classDef startEnd fill:#0F172A,stroke:#0F172A,color:#FFFFFF;
+    classDef actionNode fill:#EFF6FF,stroke:#2563EB,stroke-width:1.5px,color:#1E3A8A;
+    classDef decisionNode fill:#FEF3C7,stroke:#D97706,stroke-width:2px,color:#92400E;
+    classDef errorNode fill:#FEE2E2,stroke:#DC2626,stroke-width:1.5px,color:#991B1B;
+    classDef successNode fill:#ECFDF5,stroke:#059669,stroke-width:1.5px,color:#065F46;
+
+    class Start,End startEnd;
+    class OpenDashboard,NavExercise,FetchList,RenderTable,FilterAction,ApplyFilter,ClickCreate,FormCreate,SubmitCreate,ClickEdit,FetchDetail,FormEdit,SubmitEdit,ToggleStatus,SendPatch,UpdateTableRow,ClickDelete,ConfirmModal,SendDelete,FinishAction actionNode;
+    class ActionSelect,ValidateCreate,ValidateEdit,ConfirmDecision,CheckReferences decisionNode;
+    class ShowErrCreate,ShowErrEdit errorNode;
+    class SaveCreate,NotifySuccess,SaveEdit,NotifyEditSuccess,UpdateStatusDB,SoftDeleteDB,HardDeleteDB,DeleteSuccess,NotifyDelete successNode;

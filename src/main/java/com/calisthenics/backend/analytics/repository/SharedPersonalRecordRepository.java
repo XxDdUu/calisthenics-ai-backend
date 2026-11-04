@@ -14,6 +14,9 @@ public interface SharedPersonalRecordRepository extends JpaRepository<SharedPers
     boolean existsByPersonalRecordIdAndCoachId(Long personalRecordId, Long coachId);
 
     @EntityGraph(attributePaths = {"personalRecord", "personalRecord.exercise", "personalRecord.workoutSession", "coach", "client"})
+    Optional<SharedPersonalRecord> findByPersonalRecordIdAndCoachId(Long personalRecordId, Long coachId);
+
+    @EntityGraph(attributePaths = {"personalRecord", "personalRecord.exercise", "personalRecord.workoutSession", "coach", "client"})
     Optional<SharedPersonalRecord> findByIdAndCoachId(Long id, Long coachId);
 
     @EntityGraph(attributePaths = {"personalRecord", "personalRecord.exercise", "personalRecord.workoutSession", "coach", "client"})
@@ -23,6 +26,12 @@ public interface SharedPersonalRecordRepository extends JpaRepository<SharedPers
     List<SharedPersonalRecord> findByCoachIdOrderBySharedAtDesc(Long coachId);
 
     @EntityGraph(attributePaths = {"personalRecord", "personalRecord.exercise", "personalRecord.workoutSession", "coach", "client"})
+    List<SharedPersonalRecord> findByCoachIdAndIsReadOrderBySharedAtDesc(Long coachId, boolean isRead);
+
+    @EntityGraph(attributePaths = {"personalRecord", "personalRecord.exercise", "personalRecord.workoutSession", "coach", "client"})
     List<SharedPersonalRecord> findByCoachIdAndClientIdOrderBySharedAtDesc(Long coachId, Long clientId);
+
+    @EntityGraph(attributePaths = {"personalRecord", "personalRecord.exercise", "personalRecord.workoutSession", "coach", "client"})
+    List<SharedPersonalRecord> findByClientIdAndCoachFeedbackIsNotNullOrderByFeedbackAtDesc(Long clientId);
 }
 

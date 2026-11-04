@@ -102,4 +102,6 @@ public interface PersonalRecordRepository extends JpaRepository<PersonalRecord, 
     long countByUserId(Long userId);
 
     long countByUserIdAndAchievedAtBetween(Long userId, ZonedDateTime start, ZonedDateTime end);
+
+    long countByExerciseId(Long exerciseId);
 }

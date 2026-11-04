@@ -18,6 +18,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.validation.FieldError;
 import org.springframework.web.HttpMediaTypeNotSupportedException;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
@@ -93,7 +94,8 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler({
             CoachClientForbiddenException.class,
-            ChatAccessDeniedException.class
+            ChatAccessDeniedException.class,
+            AccessDeniedException.class
     })
     public ResponseEntity<Map<String, Object>> handleCoachClientForbidden() {
         return error(HttpStatus.FORBIDDEN, "Forbidden", "You are not allowed to perform this action");

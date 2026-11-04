@@ -52,6 +52,16 @@ public class SharedPersonalRecord {
     @Column(name = "feedback_at")
     private ZonedDateTime feedbackAt;
 
+    @Column(name = "rating")
+    private Integer rating;
+
+    @Column(name = "is_read", nullable = false)
+    @Builder.Default
+    private boolean isRead = false;
+
+    @Column(name = "read_at")
+    private ZonedDateTime readAt;
+
     @Column(nullable = false, length = 20)
     @Builder.Default
     private String status = "SHARED";

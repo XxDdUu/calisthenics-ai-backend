@@ -25,6 +25,7 @@ public class ClientProfileResponse {
     private String trainingInterests;
     private String preferredFrequency;
     private String coachingLanguage;
+    private Double heightCm;
 
     // Training overview details
     private Long activePlansCount;

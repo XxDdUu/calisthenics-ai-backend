@@ -6,6 +6,7 @@ import lombok.*;
 import org.hibernate.annotations.CreationTimestamp;
 import org.hibernate.annotations.UpdateTimestamp;
 
+import java.math.BigDecimal;
 import java.time.ZonedDateTime;
 
 @Entity
@@ -56,6 +57,9 @@ public class ClientProfile {
 
     @Column(name = "coaching_language", length = 100)
     private String coachingLanguage;
+
+    @Column(name = "height_cm", precision = 5, scale = 1)
+    private BigDecimal heightCm;
 
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)

@@ -1,0 +1,60 @@
+%% =====================================================================
+%% Hình 3.4: Sơ đồ triển khai hệ thống Calisthenics AI (Deployment Diagram)
+%% =====================================================================
+
+graph TB
+    subgraph ClientNode ["<<Thiết bị Di động>> Smartphone Android (API 26+)"]
+        AppArtifact["<b>CalisthenicsApp.apk</b><br/>• Jetpack Compose UI<br/>• Retrofit 2 & OkHttp STOMP<br/>• EncryptedSharedPreferences"]
+    end
+
+    subgraph EdgeNode ["<<Mạng Biên Đám Mây>> Cloudflare Edge Network"]
+        CFProxy["<b>Cloudflare DNS & Edge Gateway</b><br/>• api.sky-enterprise.id.vn<br/>• TLS 1.3 Termination & DDoS Shield"]
+    end
+
+    subgraph VPSNode ["<<Máy chủ Ảo Cá nhân VPS>> Ubuntu 22.04 LTS (Host: fourier)"]
+        subgraph HostLayer ["Dịch vụ Hệ điều hành Host"]
+            CFTunnel["<b>cloudflared.service (systemd)</b><br/>• Tunnel ID: d7223a50-...-e7a149c7e21a<br/>• Chuyển tiếp an toàn về localhost:8082"]
+        end
+
+        subgraph DockerLayer ["<<Mạng Ảo Docker Compose>> Bridge Network"]
+            subgraph BackendCont ["Container: calisthenics-backend (Spring Boot 3 - Java 21)"]
+                BackendJAR["<b>calisthenics-backend.jar</b><br/>• Port: 8080 (Host: 8082)<br/>• Spring Security & JWT<br/>• Flyway Migrations V1-V22"]
+            end
+
+            subgraph AICont ["Container: calisthenics-ai-service (Python 3.11 - FastAPI)"]
+                AIApp["<b>FastAPI & Uvicorn ASGI</b><br/>• Port: 8000 (Internal)<br/>• YOLOv8-Pose (yolov8n-pose.pt)<br/>• Biomechanical Analyzers"]
+            end
+
+            subgraph DBCont ["Container: calisthenics-postgres (PostgreSQL 16)"]
+                PostgresEngine["<b>PostgreSQL 16 Database Engine</b><br/>• Port: 5432 (Internal / Mapped)<br/>• Database: calisthenics_db"]
+            end
+        end
+
+        subgraph StorageLayer ["<<Phân vùng Lưu trữ Bền vững>> Docker Named Volumes"]
+            DBVol[("<b>postgres_data</b><br/>/var/lib/postgresql/data")]
+            MediaVol["<b>media_uploads</b><br/>/app/uploads"]
+        end
+    end
+
+    %% Kết nối
+    ClientNode <==>|"HTTPS (Port 443) / WSS<br/>TLS 1.3 Encrypted"| EdgeNode
+    EdgeNode <==>|"Outbound Tunnel (Zero Trust Ingress)"| CFTunnel
+    CFTunnel <==>|"HTTP Localhost Proxy<br/>localhost:8082 -> :8080"| BackendCont
+    
+    BackendCont <==>|"HTTP REST Multipart<br/>http://ai-service:8000"| AICont
+    BackendCont <==>|"JDBC / TCP Port 5432<br/>HikariCP Connection Pool"| DBCont
+
+    DBCont --- DBVol
+    BackendCont --- MediaVol
+
+    classDef clientNode fill:#EFF6FF,stroke:#2563EB,stroke-width:2px;
+    classDef edgeNode fill:#FEF3C7,stroke:#D97706,stroke-width:2px;
+    classDef vpsNode fill:#F8FAFC,stroke:#334155,stroke-width:2px;
+    classDef container fill:#F0FDF4,stroke:#16A34A,stroke-width:2px;
+    classDef volume fill:#F1F5F9,stroke:#64748B,stroke-width:1.5px,stroke-dasharray: 3 3;
+
+    class ClientNode clientNode;
+    class EdgeNode edgeNode;
+    class VPSNode vpsNode;
+    class BackendCont,AICont,DBCont container;
+    class DBVol,MediaVol volume;

@@ -21,4 +21,8 @@ public class ExerciseResponse {
     private String description;
     private String targetMuscles;
     private String instructions;
+    private String imageUrl;
+    private String videoUrl;
+    private String equipment;
+    private boolean active;
 }

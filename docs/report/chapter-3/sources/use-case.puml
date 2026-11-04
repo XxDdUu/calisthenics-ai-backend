@@ -1,0 +1,110 @@
+@startuml
+!theme plain
+skinparam defaultFontName Arial
+skinparam packageStyle rectangle
+skinparam roundCorner 10
+skinparam actorStyle awesome
+skinparam shadowing false
+
+skinparam usecase {
+    BackgroundColor #F0F7FF
+    BorderColor #0066CC
+    FontColor #003366
+}
+
+skinparam actor {
+    BackgroundColor #E6F4EA
+    BorderColor #137333
+    FontColor #137333
+}
+
+skinparam arrow {
+    Color #333333
+    FontColor #555555
+}
+
+left to right direction
+
+actor "Học viên\n(Client)" as Client
+actor "Huấn luyện viên\n(Coach)" as Coach
+actor "Quản trị viên\n(Admin)" as Admin
+
+rectangle "HỆ THỐNG CALISTHENICS AI" {
+
+    package "Phân hệ Xác thực & Hồ sơ cá nhân" {
+        usecase "UC01: Đăng ký tài khoản" as UC01
+        usecase "UC02: Đăng nhập hệ thống\n(Local / Google SSO)" as UC02
+        usecase "UC03: Quản lý hồ sơ cá nhân" as UC03
+        usecase "UC04: Khôi phục mật khẩu (OTP)" as UC04
+    }
+
+    package "Phân hệ Thư viện & Giáo án tập luyện" {
+        usecase "UC05: Tra cứu danh mục bài tập" as UC05
+        usecase "UC06: Xây dựng giáo án mẫu" as UC06
+        usecase "UC07: Gán giáo án cho học viên" as UC07
+        usecase "UC08: Xem giáo án được chỉ định" as UC08
+    }
+
+    package "Phân hệ Thực hiện Tập luyện & AI" {
+        usecase "UC09: Thực hiện buổi tập trực tiếp\n(Ghi log Sets/Reps/RPE)" as UC09
+        usecase "UC10: Sử dụng bộ đếm thời gian nghỉ\n(Rest Timer)" as UC10
+        usecase "UC11: Phân tích tư thế bài tập bằng AI\n(Video / Image Form Analysis)" as UC11
+        usecase "UC12: Xem lịch sử & phân tích Volume" as UC12
+    }
+
+    package "Phân hệ Theo dõi Chỉ số & Tương tác" {
+        usecase "UC13: Ghi nhận & theo dõi số đo cơ thể\n(Body Metrics Tracking)" as UC13
+        usecase "UC14: Tự động ghi nhận & chia sẻ PR\n(Personal Records)" as UC14
+        usecase "UC15: Quản lý liên kết Học viên - HLV" as UC15
+        usecase "UC16: Nhắn tin thời gian thực (Chat STOMP)" as UC16
+        usecase "UC17: Đánh giá & phản hồi buổi tập\n(Coach Feedback)" as UC17
+    }
+
+    package "Phân hệ Quản trị Hệ thống (Admin)" {
+        usecase "UC18: Quản lý danh mục bài tập chuẩn\n(Thêm, Sửa, Đổi trạng thái, Xóa mềm)" as UC18
+        usecase "UC19: Quản lý tài khoản người dùng" as UC19
+        usecase "UC20: Giám sát chỉ số vận hành hệ thống" as UC20
+    }
+}
+
+' Include and Extend relationships
+UC09 ..> UC10 : <<include>>
+UC09 <.. UC11 : <<extend>>
+UC09 <.. UC14 : <<extend>>
+UC07 ..> UC08 : <<include>>
+
+' Client associations
+Client --> UC01
+Client --> UC02
+Client --> UC03
+Client --> UC04
+Client --> UC05
+Client --> UC08
+Client --> UC09
+Client --> UC11
+Client --> UC12
+Client --> UC13
+Client --> UC14
+Client --> UC15
+Client --> UC16
+
+' Coach associations
+Coach --> UC02
+Coach --> UC03
+Coach --> UC04
+Coach --> UC05
+Coach --> UC06
+Coach --> UC07
+Coach --> UC15
+Coach --> UC16
+Coach --> UC17
+Coach --> UC13 : Xem số đo của học viên
+Coach --> UC12 : Xem lịch sử của học viên
+
+' Admin associations
+Admin --> UC02
+Admin --> UC18
+Admin --> UC19
+Admin --> UC20
+
+@enduml

@@ -1,0 +1,110 @@
+@startuml
+!theme plain
+autonumber
+skinparam defaultFontName Arial
+skinparam roundCorner 10
+skinparam shadowing false
+skinparam BoxPadding 10
+skinparam ParticipantPadding 10
+
+skinparam sequence {
+    ArrowColor #2563EB
+    ActorBorderColor #1E40AF
+    LifeLineBorderColor #64748B
+    LifeLineBackgroundColor #F1F5F9
+    ParticipantBorderColor #1E3A8A
+    ParticipantBackgroundColor #EFF6FF
+    ParticipantFontColor #1E3A8A
+}
+
+actor "Học viên\n(Client)" as Client
+box "Ứng dụng Di động Android" #F8FAFC
+    participant "AnalysisScreen /\nVideoPicker" as UI
+    participant "VideoSelectionViewModel" as VM
+    participant "AnalysisRepositoryImpl" as Repo
+end box
+
+box "Máy chủ Backend (Spring Boot 3)" #F0FDF4
+    participant "AnalysisController" as Ctrl
+    participant "FileStorageService" as Storage
+    participant "AiServiceClient\n(RestTemplate)" as AiClient
+end box
+
+box "Dịch vụ AI Microservice (FastAPI - Python 3.11)" #FAF5FF
+    participant "FastAPI Router\n(/analysis/video)" as APIRouter
+    participant "FrameSampler\n(OpenCV cv2)" as Sampler
+    participant "YOLOv8-Pose Engine\n(yolov8n-pose.pt)" as YOLO
+    participant "TemporalFilter\n(EMA alpha=0.65)" as EMA
+    participant "ExerciseAnalyzer\n(Planche / Pull-up)" as Analyzer
+end box
+
+database "PostgreSQL 16" as DB #FEF3C7
+
+== GIAI ĐOẠN 1: THU THẬP & TẢI VIDEO PHÂN TÍCH ==
+
+Client -> UI: Quay video hoặc chọn video từ thư viện (ví dụ: Full Planche hold)
+Client -> UI: Chọn bài tập tương ứng và bấm "Bắt đầu phân tích AI"
+UI -> VM: uploadAndAnalyzeVideo(exerciseId, videoFile)
+VM -> Repo: analyzeVideo(exerciseId, multipartFile)
+Repo -> Ctrl: POST /api/v1/analysis/video?exerciseId=...\nHeader: Multipart/form-data
+activate Ctrl
+
+Ctrl -> Storage: storeVideoFile(multipartFile)
+activate Storage
+Storage --> Ctrl: videoPath (Lưu trữ an toàn tại /app/uploads/videos/...)
+deactivate Storage
+
+Ctrl -> AiClient: analyzeVideo(file, sampleFps = 5)
+activate AiClient
+AiClient -> APIRouter: POST http://ai-service:8000/api/v1/analysis/video?sample_fps=5\nMultipart Body: file bytes
+activate APIRouter
+
+== GIAI ĐOẠN 2: SUY LUẬN MÔ HÌNH VÀ PHÂN TÍCH CƠ SINH HỌC ==
+
+APIRouter -> Sampler: extractSampleFrames(video_bytes, sample_fps=5)
+activate Sampler
+Sampler --> APIRouter: Danh sách khung hình mẫu (Frame Sequence: F_0, F_1, ..., F_n)
+deactivate Sampler
+
+loop Từng khung hình được lấy mẫu (F_t)
+    APIRouter -> YOLO: predict(F_t, conf_threshold=0.5)
+    activate YOLO
+    YOLO --> APIRouter: 17 Keypoints COCO {(x_i, y_i, c_i)} & Bounding Box
+    deactivate YOLO
+
+    alt Không phát hiện người hoặc độ tin cậy c < 0.5
+        APIRouter -> APIRouter: Đánh dấu khung hình không hợp lệ (Invalid Frame)
+    else Phát hiện tư thế hợp lệ
+        APIRouter -> EMA: applySmoothing(Keypoints_t, Keypoints_t-1)
+        activate EMA
+        EMA --> APIRouter: SmoothedKeypoints: P_t = 0.65*P_t + 0.35*P_t-1
+        deactivate EMA
+
+        APIRouter -> Analyzer: evaluateBiomechanics(SmoothedKeypoints)
+        activate Analyzer
+        Analyzer -> Analyzer: Tính góc khuỷu tay: theta = |atan2(...) - atan2(...)| * 180 / pi\nTính góc đổ vai (Shoulder Lean) & Độ nghiêng thân (Horizontal Tilt)\nKiểm tra cấp độ (Tuck / Straddle / Full)
+        Analyzer -> Analyzer: Đánh giá tiêu chuẩn:\n- Khóa khuỷu >= 165 độ\n- Độ đổ vai >= 15 độ\n- Độ lệch thân <= 15 độ
+        Analyzer --> APIRouter: FrameEvaluation { isValidHold: true/false, currentFaults: [...] }
+        deactivate Analyzer
+    end
+end
+
+APIRouter -> APIRouter: Tổng hợp kết quả toàn phiên:\n- Tổng thời gian giữ chuẩn (Hold Duration seconds)\n- Danh sách lỗi sai lặp lại (ví dụ: Bent Arms, Low Lean)\n- Tính điểm kỹ thuật tổng quan (Overall Score: 0-100)\n- Tạo nhận xét hướng dẫn khắc phục (Coaching Feedback)
+
+APIRouter --> AiClient: VideoAnalysisResponse (JSON DTO)
+deactivate APIRouter
+AiClient --> Ctrl: AiVideoAnalysisResponseDto
+deactivate AiClient
+
+== GIAI ĐOẠN 3: LƯU TRỮ KẾT QUẢ & HIỂN THỊ TRỰC QUAN ==
+
+Ctrl -> DB: INSERT INTO analyses (user_id, exercise_id, score, duration_seconds, feedback, keypoints_json, video_storage_path)
+DB --> Ctrl: Bản ghi Analysis đã lưu (kèm ID mới)
+
+Ctrl --> Repo: HTTP 200 OK (AnalysisResponseDto)
+deactivate Ctrl
+Repo --> VM: Result.success(AnalysisResult)
+VM --> UI: Điều hướng sang AnalysisResultScreen(analysisId)
+UI -> Client: Hiển thị Báo cáo Phân tích AI Kỹ thuật:\n• Huy hiệu Điểm số Form (Score Badge: 0-100)\n• Khung xương chuyển động (Skeleton Overlay)\n• Danh sách lỗi kỹ thuật & Hướng dẫn cải thiện
+
+@enduml

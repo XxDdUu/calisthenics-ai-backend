@@ -7,10 +7,15 @@ import org.springframework.data.repository.query.Param;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.Collection;
+import java.util.Set;
 
 public interface CoachProfileRepository extends JpaRepository<CoachProfile, Long> {
 
     Optional<CoachProfile> findByUserId(Long userId);
+
+    @Query("SELECT cp.user.id FROM CoachProfile cp WHERE cp.user.id IN :userIds")
+    Set<Long> findUserIdsWithProfiles(@Param("userIds") Collection<Long> userIds);
 
     Optional<CoachProfile> findByUserIdAndIsPublicTrue(Long userId);
 

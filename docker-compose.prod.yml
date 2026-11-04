@@ -1,4 +1,7 @@
 services:
+  # ============================================================================
+  # 1. Infrastructure Services
+  # ============================================================================
   postgres:
     image: postgres:16-alpine
     container_name: calisthenics-postgres-prod
@@ -18,10 +21,74 @@ services:
     networks:
       - calisthenics-internal
 
+  # MinIO Object Storage Service
+  minio:
+    image: ${MINIO_IMAGE:-cgr.dev/chainguard/minio:latest}
+    container_name: calisthenics-minio-prod
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER must be provided}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be provided}
+      TZ: ${TZ:-Asia/Ho_Chi_Minh}
+    ports:
+      # S3 API (port 9000) is internal only within calisthenics-internal network.
+      # Web Console (port 9001) is strictly bound to 127.0.0.1 for local/SSH tunnel access.
+      - "${MINIO_CONSOLE_HOST_BIND:-127.0.0.1}:${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio_prod_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+    networks:
+      - calisthenics-internal
+
+  # MinIO Bucket & Service Account Provisioning (Idempotent Job)
+  minio-init:
+    image: ${MINIO_MC_IMAGE:-cgr.dev/chainguard/minio-client:latest-dev}
+    container_name: calisthenics-minio-init-prod
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_HOST: minio
+      MINIO_PORT: 9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER must be provided}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be provided}
+      MINIO_BACKEND_ACCESS_KEY: ${MINIO_BACKEND_ACCESS_KEY:?MINIO_BACKEND_ACCESS_KEY must be provided}
+      MINIO_BACKEND_SECRET_KEY: ${MINIO_BACKEND_SECRET_KEY:?MINIO_BACKEND_SECRET_KEY must be provided}
+      MINIO_AI_ACCESS_KEY: ${MINIO_AI_ACCESS_KEY:?MINIO_AI_ACCESS_KEY must be provided}
+      MINIO_AI_SECRET_KEY: ${MINIO_AI_SECRET_KEY:?MINIO_AI_SECRET_KEY must be provided}
+    volumes:
+      - ./docker/minio/init-minio.sh:/init-minio.sh:ro
+      - ./docker/minio/backend-policy.json:/etc/minio/policies/backend-policy.json:ro
+      - ./docker/minio/ai-service-policy.json:/etc/minio/policies/ai-service-policy.json:ro
+    entrypoint: ["/bin/sh", "/init-minio.sh"]
+    networks:
+      - calisthenics-internal
+
+  # ============================================================================
+  # 2. Application Services
+  # ============================================================================
   ai-service:
     image: ${AI_SERVICE_IMAGE:-ghcr.io/xxdduu/calisthenics-ai-service:latest}
     container_name: calisthenics-ai-service-prod
     restart: unless-stopped
+    depends_on:
+      minio:
+        condition: service_healthy
     environment:
       HOST: 0.0.0.0
       PORT: 8000
@@ -30,6 +97,10 @@ services:
       CONFIDENCE_THRESHOLD: ${CONFIDENCE_THRESHOLD:-0.25}
       KEYPOINT_CONF_THRESHOLD: ${KEYPOINT_CONF_THRESHOLD:-0.25}
       DEVICE: ${AI_DEVICE:-cpu}
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_AI_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_AI_SECRET_KEY}
+      MINIO_BUCKET_ANALYSIS_MEDIA: analysis-media
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 15s
@@ -48,6 +119,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      minio:
+        condition: service_healthy
       ai-service:
         condition: service_healthy
     environment:
@@ -64,8 +137,17 @@ services:
       JWT_REFRESH_EXPIRATION_MS: ${JWT_REFRESH_EXPIRATION_MS:-604800000}
       AI_SERVICE_URL: http://ai-service:8000
       AI_SERVICE_TIMEOUT_SECONDS: ${AI_SERVICE_TIMEOUT_SECONDS:-60}
+      STORAGE_PROVIDER: ${STORAGE_PROVIDER:-minio}
       STORAGE_LOCATION: /app/uploads
       STORAGE_MAX_FILE_SIZE: ${STORAGE_MAX_FILE_SIZE:-100MB}
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_BACKEND_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_BACKEND_SECRET_KEY}
+      MINIO_EXTERNAL_URL: ${MINIO_EXTERNAL_URL:-https://api.sky-enterprise.id.vn/api/v1/storage}
+      MINIO_BUCKET_AVATARS: avatars
+      MINIO_BUCKET_EXERCISE_MEDIA: exercise-media
+      MINIO_BUCKET_WORKOUT_MEDIA: workout-media
+      MINIO_BUCKET_ANALYSIS_MEDIA: analysis-media
       FIREBASE_ENABLED: ${FIREBASE_ENABLED:-false}
       FIREBASE_CREDENTIALS_PATH: ${FIREBASE_CREDENTIALS_PATH:-classpath:firebase-service-account.json}
       MAIL_USERNAME: ${MAIL_USERNAME:-}
@@ -91,6 +173,7 @@ networks:
 volumes:
   postgres_prod_data:
     name: calisthenics_postgres_prod_data
+  minio_prod_data:
+    name: calisthenics_minio_prod_data
   media_prod_uploads:
     name: calisthenics_media_prod_uploads
-

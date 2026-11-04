@@ -1,0 +1,80 @@
+%% =====================================================================
+%% Hình 3.7: Sơ đồ tuần tự thực hiện phiên tập luyện (Workout Session Sequence)
+%% =====================================================================
+
+sequenceDiagram
+    autonumber
+    actor Client as Học viên (Client)
+    participant UI as WorkoutSessionScreen
+    participant VM as WorkoutSessionViewModel
+    participant Repo as WorkoutSessionRepository
+    participant Backend as Spring Boot PersistentWorkoutSessionController
+    participant Svc as PersistentWorkoutSessionService
+    participant PRSvc as PersonalRecordService
+    participant DB as PostgreSQL 16
+
+    Note over Client, DB: BƯỚC 1: KHỞI TẠO HOẶC TIẾP TỤC PHIÊN TẬP (START / RESUME)
+    Client->>UI: Mở giáo án hôm nay -> Nhấn "Bắt đầu buổi tập"
+    UI->>VM: startWorkoutSession(planAssignmentId, planDayId)
+    VM->>Repo: startOrResume(request)
+    Repo->>Backend: POST /api/v1/workout-sessions { planAssignmentId, planDayId }
+    activate Backend
+    Backend->>Svc: startOrResume(clientId, request)
+    activate Svc
+    Svc->>DB: Kiểm tra session đang IN_PROGRESS
+    alt Đã có session đang dở
+        DB-->>Svc: WorkoutSession hiện tại
+    else Chưa có session
+        Svc->>DB: INSERT INTO workout_sessions (status='IN_PROGRESS')<br/>Khởi tạo workout_session_exercises & sets
+        DB-->>Svc: WorkoutSession mới
+    end
+    Svc-->>Backend: PersistentWorkoutSessionResponse
+    deactivate Svc
+    Backend-->>Repo: HTTP 200 OK
+    deactivate Backend
+    Repo-->>UI: Hiển thị danh sách bài tập & các hiệp (Sets)
+
+    Note over Client, DB: BƯỚC 2: GHI NHẬN KẾT QUẢ TỪNG HIỆP TẬP & ĐẾM GIỜ NGHỈ
+    loop Từng hiệp tập (Sets)
+        Client->>UI: Thực hiện set (VD: 10 reps, RPE 8) -> Bấm "Hoàn thành"
+        UI->>VM: updateSet(sessionId, exerciseId, setId, reps=10, rpe=8)
+        VM->>Repo: updateSet(...)
+        Repo->>Backend: PUT /api/v1/workout-sessions/{sId}/exercises/{eId}/sets/{setId}
+        activate Backend
+        Backend->>Svc: updateSet(...)
+        activate Svc
+        Svc->>DB: UPDATE workout_session_sets SET reps_completed=10, is_completed=true
+        DB-->>Svc: Cập nhật thành công
+        Svc-->>Backend: PersistentWorkoutSessionResponse
+        deactivate Svc
+        Backend-->>Repo: HTTP 200 OK
+        deactivate Backend
+        Repo-->>UI: Cập nhật giao diện hoàn thành set
+        UI->>UI: Tự động kích hoạt đếm ngược thời gian nghỉ (Rest Timer: 90s)
+    end
+
+    Note over Client, DB: BƯỚC 3: KẾT THÚC BUỔI TẬP & TỰ ĐỘNG GHI NHẬN KỶ LỤC PR
+    Client->>UI: Nhấn "Hoàn thành buổi tập"
+    UI->>VM: finishWorkoutSession(notes, overallRpe)
+    VM->>Repo: finish(...)
+    Repo->>Backend: POST /api/v1/workout-sessions/{sessionId}/finish
+    activate Backend
+    Backend->>Svc: finish(clientId, sessionId, request)
+    activate Svc
+    Svc->>Svc: Tính thời lượng tập & tổng Volume Load (kg)
+    Svc->>DB: UPDATE workout_sessions SET status='COMPLETED', completed_at=NOW()
+    Svc->>PRSvc: checkAndRecordNewPrs(session)
+    activate PRSvc
+    PRSvc->>DB: SELECT * FROM personal_records WHERE user_id=? AND exercise_id=?
+    PRSvc->>PRSvc: So sánh thành tích với kỷ lục cũ
+    alt Đạt kỷ lục cá nhân mới (Max Reps / Max Hold)
+        PRSvc->>DB: INSERT INTO personal_records (type, value, achieved_at)
+        PRSvc-->>Svc: Danh sách PR mới xác lập
+    end
+    deactivate PRSvc
+    Svc-->>Backend: PersistentWorkoutSessionResponse (newPrAchieved=true)
+    deactivate Svc
+    Backend-->>Repo: HTTP 200 OK
+    deactivate Backend
+    Repo-->>UI: Hiển thị Màn hình Tổng kết (Summary Screen)<br/>• Tổng Volume, Thời lượng, Huy hiệu Kỷ lục mới PR
+    UI-->>Client: Chúc mừng hoàn thành & tùy chọn chia sẻ PR cho Coach

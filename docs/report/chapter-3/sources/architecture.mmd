@@ -1,0 +1,104 @@
+%% =====================================================================
+%% Hình 3.3: Kiến trúc phân tầng tổng thể hệ thống (Overall System Architecture)
+%% Dự án: Calisthenics AI Platform
+%% =====================================================================
+
+graph TB
+    subgraph TIER1 ["1. CLIENT TIER - ỨNG DỤNG DI ĐỘNG ANDROID (KOTLIN / JETPACK COMPOSE)"]
+        subgraph AndroidPresentation ["Tầng Trình diễn (Presentation Layer)"]
+            Screens["<b>Jetpack Compose Screens & Material 3</b><br/>• Auth: Login, Register, Google SSO, ForgotPassword<br/>• Client: Home, WorkoutPlan, WorkoutSession, Analysis, BodyMetrics, PRs<br/>• Coach: Dashboard, ClientDetail, PlanBuilder, Feedback<br/>• Shared: ChatScreen (STOMP), ProfileScreen, AdminDashboard"]
+        end
+
+        subgraph AndroidViewModel ["Tầng Quản lý Trạng thái (ViewModel Layer)"]
+            ViewModels["<b>Jetpack ViewModels & Kotlin Coroutines</b><br/>• StateFlow / SharedFlow (Immutable UI State)<br/>• LifecycleScope & Hilt Dependency Injection (@HiltViewModel)<br/>• Rest Timer, CameraX Controller, Live Video Picker"]
+        end
+
+        subgraph AndroidData ["Tầng Dữ liệu Khách (Data Layer)"]
+            Repos["<b>Repositories & UseCases</b><br/>• AuthRepository, WorkoutSessionRepository<br/>• AnalysisRepository, BodyMetricsRepository, ChatRepository"]
+            LocalData["<b>Local Storage & Security</b><br/>• TokenManager (EncryptedSharedPreferences)<br/>• JWT Access & Refresh Token Store"]
+            RemoteData["<b>Network Client</b><br/>• Retrofit 2 REST Client (Gson Converter)<br/>• OkHttp Interceptors: AuthInterceptor & TokenAuthenticator (Auto 401 refresh)<br/>• ChatWebSocketClient (STOMP over WebSocket)"]
+        end
+    end
+
+    subgraph TIER2 ["2. INGRESS & NETWORK SECURITY TIER"]
+        Cloudflare["<b>Cloudflare Edge & Cloudflare Tunnel</b><br/>• Tên miền công khai: api.sky-enterprise.id.vn (Cổng 443 HTTPS / WSS)<br/>• Quản lý DNS, Chứng chỉ SSL/TLS tự động<br/>• Định tuyến đường hầm an toàn qua cloudflared.service vào localhost:8082"]
+    end
+
+    subgraph TIER3 ["3. APPLICATION BACKEND TIER (SPRING BOOT 3.2.12 - JAVA 21 LTS)"]
+        subgraph BackendSecurity ["Tầng Bảo mật & Lọc Yêu cầu (Security Layer)"]
+            SecFilters["<b>Spring Security 6 & Filter Chain</b><br/>• JwtAuthenticationFilter (Phân giải Bearer token & Context)<br/>• GoogleOAuth2AuthFilter (Kiểm tra Google ID Token)<br/>• Method Security: @PreAuthorize('hasRole(...)')"]
+        end
+
+        subgraph BackendControllers ["Tầng Giao diện Lập trình (API & Messaging Layer)"]
+            RestControllers["<b>26 REST Controllers (/api/v1/*)</b><br/>• AuthController, UserController, ClientController, CoachController<br/>• WorkoutPlanController, PersistentWorkoutSessionController<br/>• AnalysisController, PersonalRecordController, BodyMetricsController<br/>• AdminController, AdminExerciseController, NotificationController"]
+            StompController["<b>WebSocket STOMP Controller</b><br/>• Điểm kết nối /ws, Kênh gửi /app/chat.send, Kênh nhận /topic/conversation.{id}"]
+            ActuatorController["<b>Spring Boot Actuator</b><br/>• /actuator/health, /actuator/metrics, /actuator/info"]
+        end
+
+        subgraph BackendServices ["Tầng Nghiệp vụ Hệ thống (Business Service Layer)"]
+            Services["<b>Core Business Services</b><br/>• PersistentWorkoutSessionService, WorkoutPlanService<br/>• BodyMetricsService, PersonalRecordService, ChatService<br/>• AdminExerciseService, NotificationService<br/>• <b>AiServiceClient</b> (HTTP RestTemplate Multipart Client)"]
+        end
+
+        subgraph BackendPersistence ["Tầng Truy xuất Dữ liệu (Persistence Layer)"]
+            JPARepos["<b>Spring Data JPA & Hibernate 6.4</b><br/>• JpaRepositories, Entity Graphs, Optimistic Locking (@Version)"]
+            FlywayEngine["<b>Flyway Migration Engine</b><br/>• Quản lý lược đồ CSDL từ phiên bản V1 đến V22"]
+        end
+    end
+
+    subgraph TIER4 ["4. AI & BIOMECHANICS MICROSERVICE TIER (PYTHON 3.11 - FASTAPI)"]
+        subgraph AITransport ["Tầng Tiếp nhận (Transport Layer)"]
+            FastAPIEndpoints["<b>FastAPI REST & WebSocket Gateway (Port 8000)</b><br/>• POST /api/v1/analysis/video (Multipart batch analysis)<br/>• POST /api/v1/analysis/image (Single image evaluation)<br/>• POST /api/v1/analysis/live/frame & WS /api/v1/analysis/live/ws"]
+        end
+
+        subgraph AIPipeline ["Tầng Xử lý & Mô hình Học sâu (Inference Pipeline)"]
+            VisionPre["<b>Tiền xử lý Thị giác (Vision Preprocessing)</b><br/>• OpenCV VideoCapture & Frame Sampler (Sample FPS = 5)<br/>• Normalization & Bounding Box Extraction"]
+            YOLOv8Pose["<b>Mô hình Ultralytics YOLOv8n-Pose</b><br/>• Trích xuất tọa độ 17 Keypoints COCO (x, y, confidence)"]
+        end
+
+        subgraph AIBiomechanics ["Tầng Tính toán Cơ sinh học (Biomechanics Engine)"]
+            MathFilters["<b>Xử lý Tín hiệu & Hình học Vector</b><br/>• Lọc tin cậy điểm khớp (c &ge; 0.5)<br/>• Bộ lọc làm mượt thời gian EMA (&alpha; = 0.65)<br/>• Tính góc khớp 2D (Joint Angles) & Độ nghiêng cơ thể (Tilt)"]
+            Analyzers["<b>Bộ 6 Phân tích Chuyên biệt (Exercise Analyzers)</b><br/>• PlancheAnalyzer (Tuck/Adv/Straddle/Full, Elbow Lockout &ge;165&deg;, Lean &ge;15&deg;)<br/>• FrontLeverAnalyzer (Horizontal alignment, Arm lockout)<br/>• HandstandAnalyzer (Vertical body line, HSPU rep counter)<br/>• PullUpAnalyzer (Dead hang, Chin-over-bar, Bilateral symmetry)<br/>• DipAnalyzer (Lockout & Depth &le;90&deg;)<br/>• MuscleUpAnalyzer (Transition detection & Chicken-wing check)"]
+        end
+    end
+
+    subgraph TIER5 ["5. STORAGE & DATABASE TIER"]
+        PostgresDB[("<b>PostgreSQL 16 Alpine (Port 5432)</b><br/>• 22 Bảng dữ liệu quan hệ<br/>• Dữ liệu phân tích JSONB (Keypoints & Angles)<br/>• Chỉ mục tối ưu truy vấn thời gian thực")]
+        FileStorage["<b>Hệ thống Lưu trữ Tệp Cục bộ</b><br/>• Thư mục gắn kết /app/uploads (Videos, Avatars)"]
+    end
+
+    %% Tương tác luồng giữa các tầng
+    Screens --> ViewModels
+    ViewModels --> Repos
+    Repos --> RemoteData
+    Repos --> LocalData
+    RemoteData <==>|"HTTPS REST (JSON/Multipart) & WSS STOMP"| Cloudflare
+    Cloudflare <==>|"Reverse Proxy nội bộ (Port 8082)"| SecFilters
+    SecFilters --> RestControllers
+    SecFilters --> StompController
+    RestControllers --> Services
+    StompController --> Services
+    Services --> JPARepos
+    FlywayEngine --> PostgresDB
+    JPARepos <==>|"JDBC Connection Pool (HikariCP)"| PostgresDB
+    Services -->|"Lưu trữ tệp video/ảnh"| FileStorage
+    
+    %% Gọi sang AI Service
+    Services <==>|"HTTP REST Multipart (Port 8000)<br/>POST /api/v1/analysis/video"| FastAPIEndpoints
+    FastAPIEndpoints --> VisionPre
+    VisionPre --> YOLOv8Pose
+    YOLOv8Pose --> MathFilters
+    MathFilters --> Analyzers
+    Analyzers -.->|"Trả về JSON Kết quả (Score, Reps, Faults)"| FastAPIEndpoints
+
+    %% Định dạng màu sắc chuẩn học thuật
+    classDef clientTier fill:#EFF6FF,stroke:#2563EB,stroke-width:2px,color:#1E3A8A;
+    classDef ingressTier fill:#FEF3C7,stroke:#D97706,stroke-width:2px,color:#92400E;
+    classDef backendTier fill:#F0FDF4,stroke:#16A34A,stroke-width:2px,color:#14532D;
+    classDef aiTier fill:#FAF5FF,stroke:#9333EA,stroke-width:2px,color:#581C87;
+    classDef storageTier fill:#F8FAFC,stroke:#475569,stroke-width:2px,color:#0F172A;
+
+    class TIER1 clientTier;
+    class TIER2 ingressTier;
+    class TIER3 backendTier;
+    class TIER4 aiTier;
+    class TIER5 storageTier;

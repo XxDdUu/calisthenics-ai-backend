@@ -1,7 +1,9 @@
 version: '3.8'
 
 services:
-  # 1. PostgreSQL Database Service
+  # ============================================================================
+  # 1. Infrastructure Services
+  # ============================================================================
   postgres:
     image: postgres:16-alpine
     container_name: calisthenics-postgres
@@ -20,7 +22,54 @@ services:
       timeout: 5s
       retries: 5
 
-  # 2. Calisthenics AI FastAPI Pose Estimation Service
+  # MinIO Object Storage
+  minio:
+    image: ${MINIO_IMAGE:-cgr.dev/chainguard/minio:latest}
+    container_name: calisthenics-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      TZ: Asia/Ho_Chi_Minh
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # MinIO Bucket & Policy Provisioning (Idempotent Job)
+  minio-init:
+    image: ${MINIO_MC_IMAGE:-cgr.dev/chainguard/minio-client:latest-dev}
+    container_name: calisthenics-minio-init
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_HOST: minio
+      MINIO_PORT: 9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_BACKEND_ACCESS_KEY: ${MINIO_BACKEND_ACCESS_KEY:-calisthenics-backend}
+      MINIO_BACKEND_SECRET_KEY: ${MINIO_BACKEND_SECRET_KEY:-backend-secret-key-123}
+      MINIO_AI_ACCESS_KEY: ${MINIO_AI_ACCESS_KEY:-calisthenics-ai}
+      MINIO_AI_SECRET_KEY: ${MINIO_AI_SECRET_KEY:-ai-secret-key-123}
+    volumes:
+      - ./docker/minio/init-minio.sh:/init-minio.sh:ro
+      - ./docker/minio/backend-policy.json:/etc/minio/policies/backend-policy.json:ro
+      - ./docker/minio/ai-service-policy.json:/etc/minio/policies/ai-service-policy.json:ro
+    entrypoint: ["/bin/sh", "/init-minio.sh"]
+
+  # ============================================================================
+  # 2. Application Services
+  # ============================================================================
   ai-service:
     build:
       context: ../calisthenics-ai-service
@@ -29,13 +78,22 @@ services:
     restart: always
     ports:
       - "8000:8000"
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8000
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_AI_ACCESS_KEY:-calisthenics-ai}
+      MINIO_SECRET_KEY: ${MINIO_AI_SECRET_KEY:-ai-secret-key-123}
+      MINIO_BUCKET_ANALYSIS_MEDIA: analysis-media
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s
       timeout: 5s
       retries: 3
 
-  # 3. Spring Boot Backend Microservice
   backend:
     build:
       context: .
@@ -46,6 +104,8 @@ services:
       - "8080:8080"
     depends_on:
       postgres:
+        condition: service_healthy
+      minio:
         condition: service_healthy
       ai-service:
         condition: service_started
@@ -58,7 +118,16 @@ services:
       DB_PASSWORD: postgrespassword
       JWT_SECRET: 404E635266556A586E3272357538782F413F4428472B4B6250645367566B5970
       AI_SERVICE_URL: http://ai-service:8000
+      STORAGE_PROVIDER: ${STORAGE_PROVIDER:-minio}
       STORAGE_LOCATION: /app/uploads
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_BACKEND_ACCESS_KEY:-calisthenics-backend}
+      MINIO_SECRET_KEY: ${MINIO_BACKEND_SECRET_KEY:-backend-secret-key-123}
+      MINIO_EXTERNAL_URL: ${MINIO_EXTERNAL_URL:-http://localhost:8080/api/v1/storage}
+      MINIO_BUCKET_AVATARS: avatars
+      MINIO_BUCKET_EXERCISE_MEDIA: exercise-media
+      MINIO_BUCKET_WORKOUT_MEDIA: workout-media
+      MINIO_BUCKET_ANALYSIS_MEDIA: analysis-media
       MAIL_USERNAME: ${MAIL_USERNAME:-}
       MAIL_APP_PASSWORD: ${MAIL_APP_PASSWORD:-}
       MAIL_HOST: ${MAIL_HOST:-smtp.gmail.com}
@@ -68,4 +137,5 @@ services:
 
 volumes:
   postgres_data:
+  minio_data:
   media_uploads:

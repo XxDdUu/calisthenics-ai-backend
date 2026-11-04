@@ -38,4 +38,8 @@ public class ClientProfileRequest {
 
     @Size(max = 100, message = "Coaching language must not exceed 100 characters")
     private String coachingLanguage;
+
+    @jakarta.validation.constraints.DecimalMin(value = "50.0", message = "Height must be at least 50 cm")
+    @jakarta.validation.constraints.DecimalMax(value = "300.0", message = "Height must not exceed 300 cm")
+    private Double heightCm;
 }

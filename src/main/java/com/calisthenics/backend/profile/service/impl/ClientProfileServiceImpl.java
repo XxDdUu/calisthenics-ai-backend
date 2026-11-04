@@ -23,6 +23,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
+import java.math.BigDecimal;
 import java.util.List;
 import java.util.Optional;
 
@@ -89,6 +90,9 @@ public class ClientProfileServiceImpl implements ClientProfileService {
         }
         if (request.getCoachingLanguage() != null) {
             profile.setCoachingLanguage(request.getCoachingLanguage().trim());
+        }
+        if (request.getHeightCm() != null) {
+            profile.setHeightCm(BigDecimal.valueOf(request.getHeightCm()));
         }
 
         ClientProfile saved = clientProfileRepository.save(profile);
@@ -218,6 +222,7 @@ public class ClientProfileServiceImpl implements ClientProfileService {
                 .trainingInterests(profile != null ? profile.getTrainingInterests() : null)
                 .preferredFrequency(profile != null ? profile.getPreferredFrequency() : null)
                 .coachingLanguage(profile != null ? profile.getCoachingLanguage() : null)
+                .heightCm(profile != null && profile.getHeightCm() != null ? profile.getHeightCm().doubleValue() : null)
                 .activePlansCount(activePlans)
                 .completedSessionsCount(completedSessions)
                 .currentPlanId(currentPlanOpt.map(WorkoutPlan::getId).orElse(null))

@@ -8,6 +8,7 @@ import com.calisthenics.backend.analytics.model.SharedPersonalRecord;
 import com.calisthenics.backend.analytics.repository.PersonalRecordRepository;
 import com.calisthenics.backend.analytics.repository.SharedPersonalRecordRepository;
 import com.calisthenics.backend.analytics.service.PersonalRecordService;
+import com.calisthenics.backend.notification.service.NotificationService;
 import com.calisthenics.backend.coachclient.entity.CoachClientRelationship;
 import com.calisthenics.backend.coachclient.repository.CoachClientRelationshipRepository;
 import com.calisthenics.backend.coachclient.type.CoachClientRelationshipStatus;
@@ -49,6 +50,9 @@ public class PersonalRecordServiceTest {
 
     @Mock
     private CoachClientRelationshipRepository coachClientRelationshipRepository;
+
+    @Mock
+    private NotificationService notificationService;
 
     @InjectMocks
     private PersonalRecordService personalRecordService;
@@ -259,5 +263,121 @@ public class PersonalRecordServiceTest {
         when(sharedPersonalRecordRepository.existsByPersonalRecordIdAndCoachId(502L, 2L)).thenReturn(true);
 
         assertThrows(ResponseStatusException.class, () -> personalRecordService.sharePRWithCoach(1L, 502L));
+    }
+
+    @Test
+    void sharePRWithCoach_OtherClientPR_ThrowsForbidden() {
+        User otherClient = User.builder().id(99L).email("other@calisthenics.ai").build();
+        PersonalRecord otherPr = PersonalRecord.builder()
+                .id(503L).user(otherClient).exercise(weightedPullUp)
+                .build();
+
+        when(personalRecordRepository.findById(503L)).thenReturn(Optional.of(otherPr));
+
+        assertThrows(ResponseStatusException.class, () -> personalRecordService.sharePRWithCoach(1L, 503L));
+    }
+
+    @Test
+    void batchSharePRs_Success_NotifiesCoach() {
+        PersonalRecord pr1 = PersonalRecord.builder()
+                .id(601L).user(athlete).exercise(weightedPullUp)
+                .recordType(PersonalRecordType.MAX_WEIGHT).recordValue(BigDecimal.valueOf(30))
+                .build();
+        PersonalRecord pr2 = PersonalRecord.builder()
+                .id(602L).user(athlete).exercise(plancheHold)
+                .recordType(PersonalRecordType.MAX_DURATION).recordValue(BigDecimal.valueOf(12))
+                .build();
+
+        when(personalRecordRepository.findById(601L)).thenReturn(Optional.of(pr1));
+        when(personalRecordRepository.findById(602L)).thenReturn(Optional.of(pr2));
+
+        CoachClientRelationship relationship = CoachClientRelationship.builder()
+                .coach(coach).client(athlete).status(CoachClientRelationshipStatus.ACTIVE)
+                .build();
+        when(coachClientRelationshipRepository.findFirstByClientIdAndStatusOrderByUpdatedAtDesc(
+                1L, CoachClientRelationshipStatus.ACTIVE)).thenReturn(Optional.of(relationship));
+
+        when(sharedPersonalRecordRepository.findByPersonalRecordIdAndCoachId(any(), eq(2L))).thenReturn(Optional.empty());
+        when(sharedPersonalRecordRepository.save(any())).thenAnswer(invocation -> {
+            SharedPersonalRecord s = invocation.getArgument(0);
+            s.setId(900L + s.getPersonalRecord().getId());
+            return s;
+        });
+
+        List<SharedPersonalRecordResponse> results = personalRecordService.sharePRsWithCoach(1L, List.of(601L, 602L));
+
+        assertThat(results).hasSize(2);
+        verify(notificationService, times(2)).createNotification(
+                eq(coach), eq(athlete), any(), any(), eq("New PR Shared"), any()
+        );
+    }
+
+    @Test
+    void markShareAsRead_Success() {
+        SharedPersonalRecord share = SharedPersonalRecord.builder()
+                .id(700L).client(athlete).coach(coach)
+                .isRead(false)
+                .personalRecord(PersonalRecord.builder().id(500L).user(athlete).exercise(weightedPullUp).recordType(PersonalRecordType.MAX_WEIGHT).recordValue(BigDecimal.TEN).build())
+                .build();
+
+        when(sharedPersonalRecordRepository.findByIdAndCoachId(700L, 2L)).thenReturn(Optional.of(share));
+        when(sharedPersonalRecordRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+
+        SharedPersonalRecordResponse response = personalRecordService.markShareAsRead(2L, 700L);
+
+        assertThat(response.isRead()).isTrue();
+        assertThat(share.isRead()).isTrue();
+    }
+
+    @Test
+    void markShareAsRead_UnrelatedCoach_ThrowsNotFound() {
+        when(sharedPersonalRecordRepository.findByIdAndCoachId(701L, 999L)).thenReturn(Optional.empty());
+
+        assertThrows(ResponseStatusException.class, () -> personalRecordService.markShareAsRead(999L, 701L));
+    }
+
+    @Test
+    void addCoachFeedback_Success_NotifiesClient() {
+        SharedPersonalRecord share = SharedPersonalRecord.builder()
+                .id(702L).client(athlete).coach(coach)
+                .personalRecord(PersonalRecord.builder().id(500L).user(athlete).exercise(weightedPullUp).recordType(PersonalRecordType.MAX_WEIGHT).recordValue(BigDecimal.TEN).build())
+                .build();
+
+        when(sharedPersonalRecordRepository.findByIdAndCoachId(702L, 2L)).thenReturn(Optional.of(share));
+        when(sharedPersonalRecordRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+
+        SharedPersonalRecordResponse response = personalRecordService.addCoachFeedback(2L, 702L, "Form looked solid!", 5);
+
+        assertThat(response.getCoachFeedback()).isEqualTo("Form looked solid!");
+        assertThat(response.getRating()).isEqualTo(5);
+        assertThat(response.getStatus()).isEqualTo("REVIEWED");
+        verify(notificationService).createNotification(
+                eq(athlete), eq(coach), any(), eq(702L), eq("Coach Feedback on PR"), any()
+        );
+    }
+
+    @Test
+    void addCoachFeedback_UnrelatedCoach_ThrowsNotFound() {
+        when(sharedPersonalRecordRepository.findByIdAndCoachId(703L, 999L)).thenReturn(Optional.empty());
+
+        assertThrows(ResponseStatusException.class, () -> personalRecordService.addCoachFeedback(999L, 703L, "Feedback", 4));
+    }
+
+    @Test
+    void getClientFeedbacks_ReturnsOnlyWithFeedback() {
+        SharedPersonalRecord share = SharedPersonalRecord.builder()
+                .id(704L).client(athlete).coach(coach)
+                .coachFeedback("Great job!")
+                .feedbackAt(ZonedDateTime.now())
+                .personalRecord(PersonalRecord.builder().id(500L).user(athlete).exercise(weightedPullUp).recordType(PersonalRecordType.MAX_WEIGHT).recordValue(BigDecimal.TEN).build())
+                .build();
+
+        when(sharedPersonalRecordRepository.findByClientIdAndCoachFeedbackIsNotNullOrderByFeedbackAtDesc(1L))
+                .thenReturn(List.of(share));
+
+        List<SharedPersonalRecordResponse> feedbacks = personalRecordService.getClientFeedbacks(1L);
+
+        assertThat(feedbacks).hasSize(1);
+        assertThat(feedbacks.get(0).getCoachFeedback()).isEqualTo("Great job!");
     }
 }

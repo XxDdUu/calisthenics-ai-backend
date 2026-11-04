@@ -1,0 +1,70 @@
+%% =====================================================================
+%% Hình 3.6: Sơ đồ tuần tự xác thực người dùng & Quản lý Token
+%% =====================================================================
+
+sequenceDiagram
+    autonumber
+    actor User as Người dùng (User)
+    participant UI as Android LoginScreen
+    participant VM as AuthViewModel
+    participant Repo as AuthRepositoryImpl
+    participant Store as TokenManager (EncryptedPref)
+    participant Interceptor as OkHttp AuthInterceptor / Authenticator
+    participant Backend as Spring Boot AuthController
+    participant AuthMgr as AuthenticationManager
+    participant JwtProv as JwtTokenProvider
+    participant DB as PostgreSQL 16
+
+    Note over User, DB: GIAI ĐOẠN 1: ĐĂNG NHẬP VÀ CẤP PHÁT TOKEN
+    User->>UI: Nhập Email, Mật khẩu -> Bấm "Đăng nhập"
+    UI->>VM: onLoginSubmitted(email, password)
+    VM->>Repo: login(email, password)
+    Repo->>Backend: POST /api/v1/auth/login { email, password }
+    activate Backend
+    Backend->>AuthMgr: authenticate(UsernamePasswordAuthToken)
+    activate AuthMgr
+    AuthMgr->>DB: SELECT * FROM users WHERE email = ?
+    DB-->>AuthMgr: Thực thể User (kèm password_hash, role)
+    AuthMgr->>AuthMgr: BCryptPasswordEncoder.matches(raw, hash)
+    
+    alt Xác thực thất bại
+        AuthMgr-->>Backend: BadCredentialsException
+        Backend-->>Repo: HTTP 401 Unauthorized { "error": "INVALID_PASSWORD" }
+        Repo-->>UI: Hiển thị lỗi xác thực
+    else Xác thực thành công
+        AuthMgr-->>Backend: Authentication (Principal)
+        deactivate AuthMgr
+        Backend->>JwtProv: generateAccessToken(auth) & generateRefreshToken(user)
+        JwtProv-->>Backend: accessToken (60m) & refreshToken (30d)
+        Backend-->>Repo: HTTP 200 OK { accessToken, refreshToken, userId, role }
+        deactivate Backend
+        Repo->>Store: saveAuthToken(accessToken, refreshToken)
+        Store->>Store: Lưu an toàn vào EncryptedSharedPreferences
+        Repo-->>VM: Đăng nhập thành công
+        VM-->>UI: Cập nhật UIState -> Chuyển màn hình HomeScreen
+    end
+
+    Note over User, DB: GIAI ĐOẠN 2: TRUY CẬP TÀI NGUYÊN ĐƯỢC BẢO VỆ
+    User->>UI: Yêu cầu xem giáo án
+    UI->>Interceptor: Gọi API qua Retrofit
+    Interceptor->>Store: getAccessToken()
+    Store-->>Interceptor: Bearer token
+    Interceptor->>Backend: GET /api/v1/workout-plans [Header: Authorization: Bearer <token>]
+    Backend->>JwtProv: validateToken(token) & trích xuất UserPrincipal
+    Backend->>DB: Truy vấn dữ liệu theo quyền
+    DB-->>Backend: Kết quả dữ liệu
+    Backend-->>UI: HTTP 200 OK (Danh sách giáo án)
+
+    Note over User, DB: GIAI ĐOẠN 3: TỰ ĐỘNG LÀM MỚI TOKEN (HTTP 401 REFRESH)
+    Interceptor->>Backend: GET /api/v1/resource (Access Token đã hết hạn)
+    Backend-->>Interceptor: HTTP 401 Unauthorized (Expired JWT)
+    activate Interceptor
+    Interceptor->>Store: getRefreshToken()
+    Store-->>Interceptor: refreshToken
+    Interceptor->>Backend: POST /api/v1/auth/refresh-token { refreshToken }
+    Backend->>JwtProv: validateRefreshToken & generateAccessToken
+    Backend-->>Interceptor: HTTP 200 OK { newAccessToken, newRefreshToken }
+    Interceptor->>Store: saveAuthToken(newAccessToken, newRefreshToken)
+    Interceptor->>Backend: Gửi lại request ban đầu với newAccessToken
+    Backend-->>UI: HTTP 200 OK (Thành công trong suốt)
+    deactivate Interceptor

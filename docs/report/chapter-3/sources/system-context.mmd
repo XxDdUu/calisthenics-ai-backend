@@ -1,0 +1,63 @@
+%% =====================================================================
+%% Hình 3.1: Sơ đồ ngữ cảnh hệ thống Calisthenics AI (System Context Diagram)
+%% Dự án: Calisthenics AI Platform
+%% =====================================================================
+
+graph TB
+    %% Định nghĩa các Actors người dùng
+    subgraph Actors ["TÁC NHÂN NGƯỜI DÙNG (ACTORS)"]
+        Client["<b>Học viên (Client)</b><br/>• Thực hiện bài tập & ghi log hiệp tập<br/>• Quay / tải video phân tích form AI<br/>• Theo dõi số đo cơ thể & kỷ lục cá nhân<br/>• Nhắn tin tương tác với Huấn luyện viên"]
+        Coach["<b>Huấn luyện viên (Coach)</b><br/>• Quản lý danh sách học viên liên kết<br/>• Thiết kế & gán giáo án tập luyện<br/>• Đánh giá kết quả & phản hồi tiến độ<br/>• Nhắn tin tư vấn trực tiếp học viên"]
+        Admin["<b>Quản trị viên (Admin)</b><br/>• Quản trị danh mục bài tập chuẩn<br/>• Quản lý tài khoản người dùng<br/>• Giám sát số liệu vận hành hệ thống"]
+    end
+
+    %% Định nghĩa Ranh giới Hệ thống Calisthenics AI
+    subgraph CalisthenicsAISystem ["RANH GIỚI HỆ THỐNG CALISTHENICS AI (SYSTEM BOUNDARY)"]
+        AndroidApp["<b>Ứng dụng Di động Calisthenics AI</b><br/>(Android Mobile App - Jetpack Compose)<br/>• Giao diện người dùng đa vai trò<br/>• Ghi nhận buổi tập trực tiếp & Rest Timer<br/>• Thu thập video/ảnh từ camera thiết bị<br/>• Trình diễn khung xương và biểu đồ số đo"]
+        
+        BackendAPI["<b>Máy chủ Nghiệp vụ & API Gateway</b><br/>(Spring Boot 3.2.12 - Java 21)<br/>• Xác thực JWT & Kiểm soát truy cập RBAC<br/>• Xử lý nghiệp vụ tập luyện, giáo án, PR<br/>• Nhắn tin thời gian thực qua STOMP WebSocket<br/>• Điều phối dữ liệu phân tích thị giác máy tính"]
+        
+        AIService["<b>Dịch vụ Trí tuệ Nhân tạo & Cơ sinh học</b><br/>(Python 3.11 - FastAPI & YOLOv8-Pose)<br/>• Trích xuất 17 điểm then chốt hình thể COCO<br/>• Lọc nhiễu tọa độ & làm mượt EMA (&alpha;=0.65)<br/>• Đánh giá góc khớp & đo đạc thời gian giữ<br/>• Đếm số lần lặp & phát hiện lỗi sai kỹ thuật"]
+        
+        Database["<b>Cơ sở Dữ liệu Quan hệ</b><br/>(PostgreSQL 16 Alpine)<br/>• Quản lý người dùng, giáo án, buổi tập<br/>• Lưu vết lịch sử số đo & kỷ lục cá nhân<br/>• Lưu trữ dữ liệu phân tích JSONB"]
+        
+        FileStorage["<b>Kho Lưu trữ Tệp Cục bộ</b><br/>(Local File Storage / Volume)<br/>• Lưu trữ video bài tập tải lên<br/>• Lưu trữ ảnh đại diện & ảnh minh họa"]
+    end
+
+    %% Định nghĩa Hệ thống Bên ngoài (External Systems)
+    subgraph ExternalSystems ["DỊCH VỤ NGOÀI (EXTERNAL SERVICES)"]
+        GoogleAuth["<b>Dịch vụ Xác thực Google</b><br/>(Google Identity Service)<br/>• Cung cấp Google OAuth2 ID Token SSO"]
+        CloudflareEdge["<b>Mạng Biên & Định tuyến An toàn</b><br/>(Cloudflare Edge & Cloudflare Tunnel)<br/>• Quản lý DNS: api.sky-enterprise.id.vn<br/>• Mã hóa TLS & Chuyển tiếp Ingress nội bộ"]
+        MailServer["<b>Hệ thống Thư điện tử</b><br/>(SMTP Mail Service - Gmail SMTP)<br/>• Gửi mã OTP khôi phục mật khẩu tài khoản"]
+    end
+
+    %% Tương tác của Tác nhân với Ứng dụng Di động
+    Client -->|"Thao tác ứng dụng, tải video, chat STOMP"| AndroidApp
+    Coach -->|"Gán giáo án, duyệt học viên, tư vấn chat"| AndroidApp
+    Admin -->|"Quản lý bài tập, theo dõi thống kê người dùng"| AndroidApp
+
+    %% Tương tác với Dịch vụ Ngoài
+    Client -.->|"Đăng nhập Google Sign-In"| GoogleAuth
+    GoogleAuth -.->|"Trả về Google ID Token"| AndroidApp
+    
+    AndroidApp <==>|"Yêu cầu HTTPS REST & WSS STOMP (Cổng 443)"| CloudflareEdge
+    CloudflareEdge <==>|"Chuyển tiếp qua Cloudflare Tunnel (Cổng nội bộ 8082)"| BackendAPI
+    
+    BackendAPI -.->|"Gửi email OTP qua giao thức SMTP"| MailServer
+    BackendAPI -.->|"Xác thực tính hợp lệ của Google ID Token"| GoogleAuth
+
+    %% Tương tác nội bộ trong hệ thống
+    AndroidApp -.->|"Trực tiếp gọi WebRTC/WS phân tích nếu có"| AIService
+    BackendAPI <==>|"HTTP REST Multipart (Cổng nội bộ 8000)"| AIService
+    BackendAPI <==>|"Giao vận SQL JPA/Hibernate (Cổng 5432)"| Database
+    BackendAPI -->|"Đọc / ghi tệp phương tiện"| FileStorage
+
+    %% Định dạng màu sắc & đường nét
+    classDef actorStyle fill:#EBF3FB,stroke:#185ADB,stroke-width:2px,color:#0B2B64;
+    classDef boundaryStyle fill:#F9FAFB,stroke:#374151,stroke-width:2px,stroke-dasharray: 4 4;
+    classDef coreApp fill:#E6FFFA,stroke:#047857,stroke-width:2px,color:#064E3B;
+    classDef externalStyle fill:#FEF3C7,stroke:#D97706,stroke-width:2px,color:#78350F;
+
+    class Client,Coach,Admin actorStyle;
+    class AndroidApp,BackendAPI,AIService,Database,FileStorage coreApp;
+    class GoogleAuth,CloudflareEdge,MailServer externalStyle;

@@ -1,0 +1,115 @@
+@startuml
+!theme plain
+autonumber
+skinparam defaultFontName Arial
+skinparam roundCorner 10
+skinparam shadowing false
+skinparam BoxPadding 10
+skinparam ParticipantPadding 10
+
+skinparam sequence {
+    ArrowColor #2563EB
+    ActorBorderColor #1E40AF
+    LifeLineBorderColor #64748B
+    LifeLineBackgroundColor #F1F5F9
+    ParticipantBorderColor #1E3A8A
+    ParticipantBackgroundColor #EFF6FF
+    ParticipantFontColor #1E3A8A
+}
+
+actor "Học viên\n(Client)" as Client
+box "Ứng dụng Di động Android" #F8FAFC
+    participant "WorkoutSessionScreen" as UI
+    participant "WorkoutSessionViewModel" as VM
+    participant "RestTimerController" as Timer
+    participant "WorkoutSessionRepositoryImpl" as Repo
+end box
+
+box "Hệ thống Backend (Spring Boot 3)" #F0FDF4
+    participant "PersistentWorkoutSessionController" as Ctrl
+    participant "PersistentWorkoutSessionService" as Svc
+    participant "PersonalRecordService" as PRSvc
+end box
+
+database "PostgreSQL 16" as DB #FEF3C7
+
+== BƯỚC 1: KHỞI TẠO HOẶC TIẾP TỤC BUỔI TẬP (START / RESUME) ==
+
+Client -> UI: Mở giáo án được gán, nhấn "Bắt đầu buổi tập"
+UI -> VM: startWorkoutSession(planAssignmentId, planDayId)
+VM -> Repo: startOrResume(request)
+Repo -> Ctrl: POST /api/v1/workout-sessions\nPayload: { planAssignmentId, planDayId }
+activate Ctrl
+Ctrl -> Svc: startOrResume(clientId, request)
+activate Svc
+Svc -> DB: Kiểm tra phiên tập đang IN_PROGRESS của Client
+alt Đã tồn tại phiên tập chưa hoàn thành
+    DB --> Svc: Trả về WorkoutSession hiện hành
+else Chưa có phiên tập
+    Svc -> DB: INSERT INTO workout_sessions (status='IN_PROGRESS', started_at=NOW())\nKhởi tạo workout_session_exercises & workout_session_sets
+    DB --> Svc: WorkoutSession mới tạo
+end
+Svc --> Ctrl: PersistentWorkoutSessionResponse
+deactivate Svc
+Ctrl --> Repo: HTTP 200 OK
+deactivate Ctrl
+Repo --> VM: Session data
+VM --> UI: Hiển thị danh sách bài tập & các hiệp (Sets) cần thực hiện
+
+== BƯỚC 2: GHI NHẬN KẾT QUẢ TỪNG HIỆP TẬP (LOGGING SETS) ==
+
+loop Từng hiệp tập (Sets)
+    Client -> UI: Thực hiện động tác (ví dụ: 10 reps Pull-up, RPE 8)
+    Client -> UI: Nhấn nút tích "Hoàn thành hiệp"
+    UI -> VM: updateSet(sessionId, exerciseId, setId, reps=10, weight=0, rpe=8)
+    VM -> Repo: updateSet(...)
+    Repo -> Ctrl: PUT /api/v1/workout-sessions/{sId}/exercises/{eId}/sets/{setId}\nPayload: { repsCompleted: 10, weightKg: 0, rpe: 8, isCompleted: true }
+    activate Ctrl
+    Ctrl -> Svc: updateSet(...)
+    activate Svc
+    Svc -> DB: UPDATE workout_session_sets SET reps_completed=10, is_completed=true WHERE id=?
+    DB --> Svc: Cập nhật thành công
+    Svc --> Ctrl: PersistentWorkoutSessionResponse
+    deactivate Svc
+    Ctrl --> Repo: HTTP 200 OK
+    deactivate Ctrl
+    Repo --> VM: Cập nhật Set thành công
+    VM -> Timer: startCountdown(restTimeSeconds = 90)
+    activate Timer
+    Timer --> UI: Hiển thị đồng hồ đếm ngược thời gian nghỉ
+    Timer -> UI: Phát âm thanh / rung khi hết giờ nghỉ
+    deactivate Timer
+end
+
+== BƯỚC 3: KẾT THÚC BUỔI TẬP & TỰ ĐỘNG GHI NHẬN KỶ LỤC PR ==
+
+Client -> UI: Nhấn nút "Hoàn thành buổi tập"
+UI -> VM: finishWorkoutSession(notes, overallRpe)
+VM -> Repo: finish(...)
+Repo -> Ctrl: POST /api/v1/workout-sessions/{sessionId}/finish\nPayload: { notes: "Buổi tập tốt", overallRpe: 8 }
+activate Ctrl
+Ctrl -> Svc: finish(clientId, sessionId, request)
+activate Svc
+
+Svc -> Svc: Tính thời lượng tập (duration = completedAt - startedAt)\nTính tổng tải trọng Volume Load (kg)
+Svc -> DB: UPDATE workout_sessions SET status='COMPLETED', completed_at=NOW(), volume_load_kg=?
+
+Svc -> PRSvc: checkAndRecordNewPrs(session)
+activate PRSvc
+PRSvc -> DB: SELECT * FROM personal_records WHERE user_id=? AND exercise_id=?
+PRSvc -> PRSvc: So sánh số reps / tải trọng với kỷ lục cũ
+alt Đạt kỷ lục cá nhân mới (ví dụ: Pull-up đạt 12 reps > 10 reps cũ)
+    PRSvc -> DB: INSERT INTO personal_records (type='MAX_REPS', value=12, achieved_at=NOW())
+    PRSvc --> Svc: Danh sách PR mới được xác lập
+end
+deactivate PRSvc
+
+Svc --> Ctrl: PersistentWorkoutSessionResponse (kèm cờ newPrAchieved=true)
+deactivate Svc
+Ctrl --> Repo: HTTP 200 OK
+deactivate Ctrl
+Repo --> VM: Kết quả hoàn thành
+VM --> UI: Hiển thị Màn hình Tổng kết Buổi tập (Summary Screen)\n• Thời lượng, Volume, Huy hiệu kỷ lục mới PR
+UI --> Client: Chúc mừng hoàn thành & gợi ý chia sẻ PR cho Coach
+
+@enduml

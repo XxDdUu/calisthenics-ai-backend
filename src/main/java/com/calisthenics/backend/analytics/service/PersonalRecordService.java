@@ -16,6 +16,8 @@ import com.calisthenics.backend.exercise.Exercise;
 import com.calisthenics.backend.exercise.ExerciseRepository;
 import com.calisthenics.backend.user.User;
 import com.calisthenics.backend.user.UserRepository;
+import com.calisthenics.backend.notification.model.NotificationType;
+import com.calisthenics.backend.notification.service.NotificationService;
 import com.calisthenics.backend.workout.WorkoutSession;
 import com.calisthenics.backend.workout.WorkoutSessionExercise;
 import com.calisthenics.backend.workout.WorkoutSessionSet;
@@ -42,6 +44,7 @@ public class PersonalRecordService {
     private final CoachClientRelationshipRepository coachClientRelationshipRepository;
     private final ExerciseRepository exerciseRepository;
     private final UserRepository userRepository;
+    private final NotificationService notificationService;
 
     @Transactional
     public PersonalRecordResponse createPR(Long userId, CreatePersonalRecordRequest request) {
@@ -469,6 +472,75 @@ public class PersonalRecordService {
     }
 
     @Transactional
+    public List<SharedPersonalRecordResponse> sharePRsWithCoach(Long clientId, List<Long> prIds) {
+        if (clientId == null) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Authentication required");
+        }
+        if (prIds == null || prIds.isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "At least one PR ID must be provided");
+        }
+
+        List<PersonalRecord> prsToShare = new ArrayList<>();
+        for (Long prId : prIds) {
+            PersonalRecord pr = personalRecordRepository.findById(prId)
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Personal record not found: " + prId));
+
+            if (!pr.getUser().getId().equals(clientId)) {
+                throw new ResponseStatusException(HttpStatus.FORBIDDEN, "You cannot share a record belonging to another user");
+            }
+            prsToShare.add(pr);
+        }
+
+        CoachClientRelationship activeRelationship = coachClientRelationshipRepository
+                .findFirstByClientIdAndStatusOrderByUpdatedAtDesc(clientId, CoachClientRelationshipStatus.ACTIVE)
+                .orElseThrow(() -> new ResponseStatusException(
+                        HttpStatus.BAD_REQUEST, "You do not have an active coach assigned to share this PR with."));
+
+        User coach = activeRelationship.getCoach();
+        List<SharedPersonalRecord> sharesToReturn = new ArrayList<>();
+        int alreadySharedCount = 0;
+
+        for (PersonalRecord pr : prsToShare) {
+            Optional<SharedPersonalRecord> existing = sharedPersonalRecordRepository.findByPersonalRecordIdAndCoachId(pr.getId(), coach.getId());
+            if (existing.isPresent()) {
+                alreadySharedCount++;
+                sharesToReturn.add(existing.get());
+                continue;
+            }
+
+            SharedPersonalRecord shared = SharedPersonalRecord.builder()
+                    .personalRecord(pr)
+                    .client(pr.getUser())
+                    .coach(coach)
+                    .status("SHARED")
+                    .isRead(false)
+                    .build();
+
+            SharedPersonalRecord saved = sharedPersonalRecordRepository.save(shared);
+            sharesToReturn.add(saved);
+
+            // Notify Coach
+            String unit = pr.getUnit() != null ? pr.getUnit() : pr.getRecordType().getDefaultUnit();
+            String formattedPr = formatRecord(pr.getRecordType(), pr.getRecordValue(), pr.getSecondaryValue(), unit);
+            notificationService.createNotification(
+                    coach,
+                    pr.getUser(),
+                    NotificationType.PR_SHARED,
+                    saved.getId(),
+                    "New PR Shared",
+                    pr.getUser().getFullName() + " shared a new PR: " + pr.getEffectiveExerciseName() + " (" + formattedPr + ")"
+            );
+            log.info("Client {} shared PR {} with Coach {}", clientId, pr.getId(), coach.getId());
+        }
+
+        if (alreadySharedCount == prsToShare.size() && prsToShare.size() == 1) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "This PR has already been shared with your coach");
+        }
+
+        return sharesToReturn.stream().map(this::mapToSharedResponse).toList();
+    }
+
+    @Transactional
     public SharedPersonalRecordResponse sharePRWithCoach(Long clientId, Long prId) {
         PersonalRecord pr = personalRecordRepository.findById(prId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Personal record not found"));
@@ -493,9 +565,22 @@ public class PersonalRecordService {
                 .client(pr.getUser())
                 .coach(coach)
                 .status("SHARED")
+                .isRead(false)
                 .build();
 
         SharedPersonalRecord saved = sharedPersonalRecordRepository.save(shared);
+
+        // Notify Coach
+        String unit = pr.getUnit() != null ? pr.getUnit() : pr.getRecordType().getDefaultUnit();
+        String formattedPr = formatRecord(pr.getRecordType(), pr.getRecordValue(), pr.getSecondaryValue(), unit);
+        notificationService.createNotification(
+                coach,
+                pr.getUser(),
+                NotificationType.PR_SHARED,
+                saved.getId(),
+                "New PR Shared",
+                pr.getUser().getFullName() + " shared a new PR: " + pr.getEffectiveExerciseName() + " (" + formattedPr + ")"
+        );
         log.info("Client {} shared PR {} with Coach {}", clientId, prId, coach.getId());
         return mapToSharedResponse(saved);
     }
@@ -503,6 +588,13 @@ public class PersonalRecordService {
     @Transactional(readOnly = true)
     public List<SharedPersonalRecordResponse> getClientSharedPRs(Long clientId) {
         return sharedPersonalRecordRepository.findByClientIdOrderBySharedAtDesc(clientId).stream()
+                .map(this::mapToSharedResponse)
+                .toList();
+    }
+
+    @Transactional(readOnly = true)
+    public List<SharedPersonalRecordResponse> getClientFeedbacks(Long clientId) {
+        return sharedPersonalRecordRepository.findByClientIdAndCoachFeedbackIsNotNullOrderByFeedbackAtDesc(clientId).stream()
                 .map(this::mapToSharedResponse)
                 .toList();
     }
@@ -520,20 +612,64 @@ public class PersonalRecordService {
 
     @Transactional(readOnly = true)
     public List<SharedPersonalRecordResponse> getCoachAllSharedPRs(Long coachId) {
-        return sharedPersonalRecordRepository.findByCoachIdOrderBySharedAtDesc(coachId).stream()
+        return getCoachAllSharedPRs(coachId, null);
+    }
+
+    @Transactional(readOnly = true)
+    public List<SharedPersonalRecordResponse> getCoachAllSharedPRs(Long coachId, Boolean unread) {
+        List<SharedPersonalRecord> list = Boolean.TRUE.equals(unread)
+                ? sharedPersonalRecordRepository.findByCoachIdAndIsReadOrderBySharedAtDesc(coachId, false)
+                : sharedPersonalRecordRepository.findByCoachIdOrderBySharedAtDesc(coachId);
+
+        return list.stream()
                 .map(this::mapToSharedResponse)
                 .toList();
     }
 
     @Transactional
+    public SharedPersonalRecordResponse markShareAsRead(Long coachId, Long shareId) {
+        SharedPersonalRecord share = sharedPersonalRecordRepository.findByIdAndCoachId(shareId, coachId)
+                .orElseThrow(() -> new ResponseStatusException(
+                        HttpStatus.NOT_FOUND, "Shared PR not found or you are not authorized to view it"));
+
+        if (!share.isRead()) {
+            share.setRead(true);
+            share.setReadAt(ZonedDateTime.now());
+            share = sharedPersonalRecordRepository.save(share);
+        }
+
+        return mapToSharedResponse(share);
+    }
+
+    @Transactional
     public SharedPersonalRecordResponse addCoachFeedback(Long coachId, Long shareId, String feedback) {
+        return addCoachFeedback(coachId, shareId, feedback, null);
+    }
+
+    @Transactional
+    public SharedPersonalRecordResponse addCoachFeedback(Long coachId, Long shareId, String feedback, Integer rating) {
         SharedPersonalRecord share = sharedPersonalRecordRepository.findByIdAndCoachId(shareId, coachId)
                 .orElseThrow(() -> new ResponseStatusException(
                         HttpStatus.NOT_FOUND, "Shared PR not found or you are not authorized to provide feedback"));
 
         share.setCoachFeedback(feedback != null ? feedback.trim() : null);
+        share.setRating(rating);
         share.setFeedbackAt(ZonedDateTime.now());
+        share.setStatus("REVIEWED");
         SharedPersonalRecord updated = sharedPersonalRecordRepository.save(share);
+
+        // Notify client about coach feedback
+        String exerciseName = share.getPersonalRecord() != null ? share.getPersonalRecord().getEffectiveExerciseName() : "PR";
+        String feedbackPreview = feedback != null && !feedback.isBlank() ? ": \"" + feedback.trim() + "\"" : ".";
+        notificationService.createNotification(
+                share.getClient(),
+                share.getCoach(),
+                NotificationType.COACH_FEEDBACK,
+                share.getId(),
+                "Coach Feedback on PR",
+                "Coach " + share.getCoach().getFullName() + " gave feedback on your " + exerciseName + " PR" + feedbackPreview
+        );
+
         return mapToSharedResponse(updated);
     }
 
@@ -578,6 +714,9 @@ public class PersonalRecordService {
                 .sharedAt(shared.getSharedAt())
                 .coachFeedback(shared.getCoachFeedback())
                 .feedbackAt(shared.getFeedbackAt())
+                .rating(shared.getRating())
+                .isRead(shared.isRead())
+                .readAt(shared.getReadAt())
                 .status(shared.getStatus())
                 .build();
     }

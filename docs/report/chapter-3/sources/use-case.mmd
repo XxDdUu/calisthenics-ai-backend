@@ -1,0 +1,94 @@
+%% =====================================================================
+%% Hình 3.2: Sơ đồ Use Case tổng quát hệ thống Calisthenics AI
+%% =====================================================================
+
+graph LR
+    subgraph Actors ["TÁC NHÂN (ACTORS)"]
+        Client(("Học viên<br/>(Client)"))
+        Coach(("Huấn luyện viên<br/>(Coach)"))
+        Admin(("Quản trị viên<br/>(Admin)"))
+    end
+
+    subgraph SystemBoundary ["HỆ THỐNG CALISTHENICS AI"]
+        subgraph AuthPackage ["Xác thực & Hồ sơ"]
+            UC01(["UC01: Đăng ký tài khoản"])
+            UC02(["UC02: Đăng nhập (Local / Google SSO)"])
+            UC03(["UC03: Quản lý hồ sơ cá nhân"])
+            UC04(["UC04: Khôi phục mật khẩu (OTP)"])
+        end
+
+        subgraph PlanPackage ["Thư viện & Giáo án"]
+            UC05(["UC05: Tra cứu bài tập"])
+            UC06(["UC06: Xây dựng giáo án mẫu"])
+            UC07(["UC07: Gán giáo án cho học viên"])
+            UC08(["UC08: Xem giáo án được chỉ định"])
+        end
+
+        subgraph WorkoutPackage ["Tập luyện & Phân tích AI"]
+            UC09(["UC09: Thực hiện phiên tập trực tiếp"])
+            UC10(["UC10: Đếm giờ nghỉ (Rest Timer)"])
+            UC11(["UC11: Phân tích tư thế AI (Video/Ảnh)"])
+            UC12(["UC12: Xem lịch sử & phân tích Volume"])
+        end
+
+        subgraph InteractionPackage ["Chỉ số & Tương tác"]
+            UC13(["UC13: Ghi nhận & theo dõi số đo cơ thể"])
+            UC14(["UC14: Ghi nhận & chia sẻ kỷ lục PR"])
+            UC15(["UC15: Quản lý kết nối Coach - Client"])
+            UC16(["UC16: Chat thời gian thực (STOMP)"])
+            UC17(["UC17: Đánh giá & phản hồi buổi tập"])
+        end
+
+        subgraph AdminPackage ["Quản trị Hệ thống"]
+            UC18(["UC18: Quản trị danh mục bài tập"])
+            UC19(["UC19: Quản lý tài khoản người dùng"])
+            UC20(["UC20: Giám sát vận hành hệ thống"])
+        end
+    end
+
+    %% Quan hệ giữa các Use Cases
+    UC09 -.->|"<<include>>"| UC10
+    UC09 -.->|"<<extend>>"| UC11
+    UC09 -.->|"<<extend>>"| UC14
+    UC07 -.->|"<<include>>"| UC08
+
+    %% Client links
+    Client --- UC01
+    Client --- UC02
+    Client --- UC03
+    Client --- UC04
+    Client --- UC05
+    Client --- UC08
+    Client --- UC09
+    Client --- UC11
+    Client --- UC12
+    Client --- UC13
+    Client --- UC14
+    Client --- UC15
+    Client --- UC16
+
+    %% Coach links
+    Coach --- UC02
+    Coach --- UC03
+    Coach --- UC04
+    Coach --- UC05
+    Coach --- UC06
+    Coach --- UC07
+    Coach --- UC12
+    Coach --- UC13
+    Coach --- UC15
+    Coach --- UC16
+    Coach --- UC17
+
+    %% Admin links
+    Admin --- UC02
+    Admin --- UC18
+    Admin --- UC19
+    Admin --- UC20
+
+    classDef actorStyle fill:#EBF3FB,stroke:#185ADB,stroke-width:2px,color:#0B2B64;
+    classDef ucStyle fill:#FFFFFF,stroke:#0284C7,stroke-width:1.5px,color:#0F172A;
+    classDef pkgStyle fill:#F8FAFC,stroke:#94A3B8,stroke-width:1px;
+
+    class Client,Coach,Admin actorStyle;
+    class UC01,UC02,UC03,UC04,UC05,UC06,UC07,UC08,UC09,UC10,UC11,UC12,UC13,UC14,UC15,UC16,UC17,UC18,UC19,UC20 ucStyle;

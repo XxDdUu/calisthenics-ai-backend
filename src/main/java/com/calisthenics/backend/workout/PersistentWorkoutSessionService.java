@@ -143,6 +143,10 @@ public class PersistentWorkoutSessionService {
         return map(ownedSession(userId, sessionId));
     }
 
+    public PersistentWorkoutSessionResponse mapForAdmin(WorkoutSession session) {
+        return map(session);
+    }
+
     @Transactional(readOnly = true)
     public List<PersistentWorkoutSessionResponse> getActive(Long userId) {
         return sessionRepository.findByUserIdAndStatusOrderByStartedAtDesc(userId, WorkoutSessionStatus.IN_PROGRESS)

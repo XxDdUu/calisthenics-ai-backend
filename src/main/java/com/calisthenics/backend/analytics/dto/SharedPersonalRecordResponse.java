@@ -23,6 +23,9 @@ public class SharedPersonalRecordResponse {
     private ZonedDateTime sharedAt;
     private String coachFeedback;
     private ZonedDateTime feedbackAt;
+    private Integer rating;
+    private boolean isRead;
+    private ZonedDateTime readAt;
     private String status;
 
     @JsonProperty("clientUserId")

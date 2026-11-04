@@ -74,19 +74,33 @@ public class CoachAnalyticsController {
         return ResponseEntity.ok(personalRecordService.getPRHistory(clientId, exerciseId, prType));
     }
 
-    @GetMapping("/api/v1/coach/shared-prs")
-    @Operation(summary = "Get all shared PRs from all connected clients for the coach")
+    @GetMapping({"/api/v1/coach/me/pr-shares", "/api/v1/coach/shared-prs"})
+    @Operation(summary = "Get all shared PRs from all connected clients for the coach, with optional unread filter")
     public ResponseEntity<List<SharedPersonalRecordResponse>> getAllSharedPRs(
-            @AuthenticationPrincipal UserPrincipal currentUser) {
-        return ResponseEntity.ok(personalRecordService.getCoachAllSharedPRs(currentUser.getId()));
+            @AuthenticationPrincipal UserPrincipal currentUser,
+            @RequestParam(required = false) Boolean unread) {
+        return ResponseEntity.ok(personalRecordService.getCoachAllSharedPRs(currentUser.getId(), unread));
     }
 
-    @PostMapping("/api/v1/coach/pr-shares/{shareId}/feedback")
+    @PatchMapping({"/api/v1/coach/me/pr-shares/{shareId}/read", "/api/v1/coach/pr-shares/{shareId}/read"})
+    @Operation(summary = "Mark a client's shared PR as read by the coach")
+    public ResponseEntity<SharedPersonalRecordResponse> markShareAsRead(
+            @AuthenticationPrincipal UserPrincipal currentUser,
+            @PathVariable Long shareId) {
+        return ResponseEntity.ok(personalRecordService.markShareAsRead(currentUser.getId(), shareId));
+    }
+
+    @PostMapping({"/api/v1/coach/me/pr-shares/{shareId}/feedback", "/api/v1/coach/pr-shares/{shareId}/feedback"})
     @Operation(summary = "Leave feedback on a client's shared Personal Record")
     public ResponseEntity<SharedPersonalRecordResponse> addFeedback(
             @AuthenticationPrincipal UserPrincipal currentUser,
             @PathVariable Long shareId,
             @Valid @RequestBody CoachFeedbackRequest request) {
-        return ResponseEntity.ok(personalRecordService.addCoachFeedback(currentUser.getId(), shareId, request.getFeedback()));
+        return ResponseEntity.ok(personalRecordService.addCoachFeedback(
+                currentUser.getId(),
+                shareId,
+                request.getEffectiveFeedback(),
+                request.getRating()
+        ));
     }
 }

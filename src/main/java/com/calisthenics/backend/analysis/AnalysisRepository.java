@@ -11,4 +11,6 @@ public interface AnalysisRepository extends JpaRepository<Analysis, Long> {
     List<Analysis> findByUserIdOrderByCreatedAtDesc(Long userId);
 
     List<Analysis> findByUserIdAndExerciseIdOrderByCreatedAtDesc(Long userId, Long exerciseId);
+
+    long countByExerciseId(Long exerciseId);
 }

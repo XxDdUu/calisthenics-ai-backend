@@ -1,0 +1,128 @@
+@startuml
+!theme plain
+autonumber
+skinparam defaultFontName Arial
+skinparam roundCorner 10
+skinparam shadowing false
+skinparam BoxPadding 10
+skinparam ParticipantPadding 10
+
+skinparam sequence {
+    ArrowColor #2563EB
+    ActorBorderColor #1E40AF
+    LifeLineBorderColor #64748B
+    LifeLineBackgroundColor #F1F5F9
+    ParticipantBorderColor #1E3A8A
+    ParticipantBackgroundColor #EFF6FF
+    ParticipantFontColor #1E3A8A
+}
+
+actor "Người dùng\n(User)" as User
+box "Ứng dụng Di động Android (Client Device)" #F8FAFC
+    participant "LoginScreen / UI" as UI
+    participant "AuthViewModel" as VM
+    participant "AuthRepositoryImpl" as Repo
+    participant "TokenManager\n(EncryptedPref)" as TokenMgr
+    participant "AuthInterceptor /\nTokenAuthenticator" as Interceptor
+end box
+
+box "Máy chủ Ứng dụng Backend (Spring Boot 3)" #F0FDF4
+    participant "SecurityConfig /\nFilterChain" as SecFilter
+    participant "AuthController" as AuthCtrl
+    participant "AuthenticationManager" as AuthMgr
+    participant "JwtTokenProvider" as JwtProv
+    participant "UserRepository" as UserRepo
+end box
+
+database "PostgreSQL 16" as DB #FEF3C7
+
+== GIAI ĐOẠN 1: ĐĂNG NHẬP VÀ CẤP PHÁT TOKEN ==
+
+User -> UI: Nhập Email và Mật khẩu, nhấn "Đăng nhập"
+UI -> VM: onLoginSubmitted(email, password)
+VM -> Repo: login(email, password)
+Repo -> AuthCtrl: POST /api/v1/auth/login\nPayload: { email, password }
+
+activate AuthCtrl
+AuthCtrl -> AuthMgr: authenticate(UsernamePasswordAuthToken)
+activate AuthMgr
+AuthMgr -> UserRepo: findByEmail(email)
+activate UserRepo
+UserRepo -> DB: SELECT * FROM users WHERE email = ?
+DB --> UserRepo: Trả về thực thể User (kèm password_hash, role)
+UserRepo --> AuthMgr: UserPrincipal
+deactivate UserRepo
+
+AuthMgr -> AuthMgr: BCryptPasswordEncoder.matches(password, hash)
+alt Mật khẩu không chính xác hoặc không tồn tại
+    AuthMgr --> AuthCtrl: BadCredentialsException
+    AuthCtrl --> Repo: HTTP 401 Unauthorized\n{ "error": "INVALID_PASSWORD" }
+    Repo --> VM: Result.failure(Exception)
+    VM --> UI: Hiển thị thông báo "Mật khẩu không chính xác"
+else Xác thực thông tin thành công
+    AuthMgr --> AuthCtrl: Authentication (đã xác thực)
+    deactivate AuthMgr
+
+    AuthCtrl -> JwtProv: generateAccessToken(authentication)
+    activate JwtProv
+    JwtProv --> AuthCtrl: accessToken (Hạn dùng 60 phút, HMAC-SHA256)
+    deactivate JwtProv
+
+    AuthCtrl -> JwtProv: generateRefreshToken(userPrincipal)
+    activate JwtProv
+    JwtProv --> AuthCtrl: refreshToken (Hạn dùng 30 ngày)
+    deactivate JwtProv
+
+    AuthCtrl --> Repo: HTTP 200 OK\n{ accessToken, refreshToken, userId, role }
+    deactivate AuthCtrl
+
+    Repo -> TokenMgr: saveAuthToken(accessToken, refreshToken, userId, role)
+    activate TokenMgr
+    TokenMgr -> TokenMgr: Mã hóa AES-256 GCM & lưu vào EncryptedSharedPreferences
+    TokenMgr --> Repo: Lưu thành công
+    deactivate TokenMgr
+
+    Repo --> VM: Result.success(AuthResponse)
+    VM --> UI: Cập nhật UIState (Authenticated) -> Điều hướng HomeScreen
+    UI --> User: Hiển thị giao diện Trang chủ tương ứng vai trò
+end
+
+== GIAI ĐOẠN 2: TRUY CẬP TÀI NGUYÊN ĐƯỢC BẢO VỆ ==
+
+User -> UI: Yêu cầu xem giáo án / thực hiện buổi tập
+UI -> Interceptor: Gửi HTTP Request qua Retrofit
+activate Interceptor
+Interceptor -> TokenMgr: getAccessToken()
+TokenMgr --> Interceptor: accessToken
+Interceptor -> SecFilter: GET /api/v1/workout-plans\nHeader: Authorization: Bearer <accessToken>
+activate SecFilter
+SecFilter -> JwtProv: validateToken(accessToken) & getUserIdFromJWT()
+JwtProv --> SecFilter: Token hợp lệ, trích xuất Claims (userId, role)
+SecFilter -> SecFilter: Thiết lập SecurityContextHolder
+SecFilter --> Interceptor: HTTP 200 OK (Dữ liệu trả về)
+deactivate SecFilter
+Interceptor --> UI: Dữ liệu giáo án hợp lệ
+deactivate Interceptor
+
+== GIAI ĐOẠN 3: TỰ ĐỘNG LÀM MỚI TOKEN KHI ACCESS TOKEN HẾT HẠN ==
+
+Note over Interceptor, SecFilter: Giả sử Access Token đã hết hạn (sau 60 phút)
+Interceptor -> SecFilter: GET /api/v1/workout-sessions/active (Token cũ)
+SecFilter --> Interceptor: HTTP 401 Unauthorized (Expired JWT)
+
+activate Interceptor
+Interceptor -> TokenMgr: getRefreshToken()
+TokenMgr --> Interceptor: refreshToken
+Interceptor -> AuthCtrl: POST /api/v1/auth/refresh-token\nPayload: { refreshToken }
+activate AuthCtrl
+AuthCtrl -> JwtProv: validateRefreshToken(refreshToken)
+AuthCtrl -> JwtProv: generateAccessToken(...)
+AuthCtrl --> Interceptor: HTTP 200 OK { newAccessToken, newRefreshToken }
+deactivate AuthCtrl
+
+Interceptor -> TokenMgr: saveAuthToken(newAccessToken, newRefreshToken)
+Interceptor -> SecFilter: Tự động gửi lại request ban đầu với newAccessToken
+SecFilter --> Interceptor: HTTP 200 OK (Thành công trong suốt đối với người dùng)
+deactivate Interceptor
+
+@enduml

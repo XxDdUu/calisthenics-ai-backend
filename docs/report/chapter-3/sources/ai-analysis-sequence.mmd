@@ -1,0 +1,64 @@
+%% =====================================================================
+%% Hình 3.8: Sơ đồ tuần tự phân tích tư thế bài tập bằng AI
+%% =====================================================================
+
+sequenceDiagram
+    autonumber
+    actor Client as Học viên (Client)
+    participant UI as AnalysisScreen
+    participant VM as VideoSelectionViewModel
+    participant Backend as Spring Boot AnalysisController
+    participant AiClient as Backend AiServiceClient
+    participant FastAPI as FastAPI AI Microservice (Port 8000)
+    participant YOLO as Ultralytics YOLOv8-Pose
+    participant EMA as Temporal EMA Smoothing Filter
+    participant Analyzer as Biomechanical Analyzers
+    participant DB as PostgreSQL 16
+
+    Note over Client, DB: GIAI ĐOẠN 1: TẢI VIDEO PHÂN TÍCH
+    Client->>UI: Chọn video bài tập (VD: Full Planche) -> Bấm "Phân tích AI"
+    UI->>VM: uploadAndAnalyzeVideo(exerciseId, file)
+    VM->>Backend: POST /api/v1/analysis/video [Multipart/form-data]
+    activate Backend
+    Backend->>Backend: Lưu tệp video gốc an toàn (/app/uploads/videos)
+    Backend->>AiClient: analyzeVideo(file, sampleFps = 5)
+    activate AiClient
+    AiClient->>FastAPI: POST /api/v1/analysis/video?sample_fps=5
+    activate FastAPI
+
+    Note over FastAPI, Analyzer: GIAI ĐOẠN 2: SUY LUẬN AI & ĐÁNH GIÁ CƠ SINH HỌC
+    FastAPI->>FastAPI: OpenCV trích xuất frame định kỳ (Sample FPS = 5)
+    loop Từng khung hình được lấy mẫu (F_t)
+        FastAPI->>YOLO: predict(F_t, conf_threshold=0.5)
+        activate YOLO
+        YOLO-->>FastAPI: 17 Keypoints COCO {(x_i, y_i, c_i)}
+        deactivate YOLO
+
+        alt Không phát hiện người hoặc c < 0.5
+            FastAPI->>FastAPI: Đánh dấu khung hình không hợp lệ (Invalid Frame)
+        else Tư thế hợp lệ
+            FastAPI->>EMA: applySmoothing(Keypoints_t, Keypoints_t-1)
+            activate EMA
+            EMA-->>FastAPI: SmoothedKeypoints (alpha = 0.65)
+            deactivate EMA
+
+            FastAPI->>Analyzer: evaluateBiomechanics(SmoothedKeypoints)
+            activate Analyzer
+            Analyzer->>Analyzer: Tính góc khuỷu tay: theta = |atan2(...) - atan2(...)| * 180 / pi<br/>Tính độ đổ vai & độ nghiêng thân người<br/>Kiểm tra khóa khuỷu >= 165 độ, đổ vai >= 15 độ
+            Analyzer-->>FastAPI: FrameEvaluation (isValidHold, faultsList)
+            deactivate Analyzer
+        end
+    end
+
+    FastAPI->>FastAPI: Tổng hợp: Thời gian giữ chuẩn, Lỗi lặp lại, Điểm số (0-100), Nhận xét
+    FastAPI-->>AiClient: VideoAnalysisResponse (JSON)
+    deactivate FastAPI
+    AiClient-->>Backend: AiVideoAnalysisResponseDto
+    deactivate AiClient
+
+    Note over Client, DB: GIAI ĐOẠN 3: LƯU TRỮ VÀ HIỂN THỊ KẾT QUẢ
+    Backend->>DB: INSERT INTO analyses (score, duration_seconds, feedback, keypoints_json)
+    DB-->>Backend: Ghi nhận thành công
+    Backend-->>UI: HTTP 200 OK (AnalysisResponseDto)
+    deactivate Backend
+    UI->>Client: Hiển thị Báo cáo Phân tích AI:<br/>• Điểm số Form, Khung xương chuyển động, Lỗi kỹ thuật & Hướng dẫn khắc phục
