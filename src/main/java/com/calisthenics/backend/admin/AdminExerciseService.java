@@ -5,10 +5,13 @@ import com.calisthenics.backend.admin.dto.AdminExerciseResponse;
 import com.calisthenics.backend.admin.dto.AdminPageResponse;
 import com.calisthenics.backend.admin.dto.CreateAdminExerciseRequest;
 import com.calisthenics.backend.admin.dto.UpdateAdminExerciseRequest;
+import com.calisthenics.backend.admin.dto.ExerciseMediaItemRequest;
 import com.calisthenics.backend.analysis.AnalysisRepository;
 import com.calisthenics.backend.analytics.repository.PersonalRecordRepository;
 import com.calisthenics.backend.exercise.DifficultyLevel;
 import com.calisthenics.backend.exercise.Exercise;
+import com.calisthenics.backend.exercise.ExerciseMediaItem;
+import com.calisthenics.backend.exercise.ExerciseMediaMapper;
 import com.calisthenics.backend.exercise.ExerciseCategory;
 import com.calisthenics.backend.exercise.ExerciseRepository;
 import com.calisthenics.backend.workout.WorkoutSessionExerciseRepository;
@@ -99,6 +102,7 @@ public class AdminExerciseService {
                 .active(request.active() != null ? request.active() : true)
                 .build();
 
+        replaceMediaItems(exercise, request.mediaItems());
         Exercise saved = exerciseRepository.save(exercise);
         return mapToAdminResponse(saved);
     }
@@ -131,6 +135,7 @@ public class AdminExerciseService {
         exercise.setImageUrl(normalizeUrl(request.imageUrl()));
         exercise.setVideoUrl(normalizeUrl(request.videoUrl()));
         exercise.setEquipment(request.equipment());
+        replaceMediaItems(exercise, request.mediaItems());
         if (request.active() != null) {
             exercise.setActive(request.active());
         }
@@ -208,8 +213,26 @@ public class AdminExerciseService {
                 exercise.getCreatedAt(),
                 planRefs,
                 sessionRefs,
-                canDelete
+                canDelete,
+                ExerciseMediaMapper.toResponses(exercise)
         );
+    }
+
+    private void replaceMediaItems(Exercise exercise, List<ExerciseMediaItemRequest> mediaItems) {
+        if (mediaItems == null) {
+            return;
+        }
+        exercise.getMediaItems().clear();
+        for (int index = 0; index < mediaItems.size(); index++) {
+            ExerciseMediaItemRequest item = mediaItems.get(index);
+            exercise.getMediaItems().add(ExerciseMediaItem.builder()
+                    .exercise(exercise)
+                    .type(item.type())
+                    .url(item.url().trim())
+                    .thumbnailUrl(normalizeUrl(item.thumbnailUrl()))
+                    .displayOrder(item.displayOrder() != null ? item.displayOrder() : index)
+                    .build());
+        }
     }
 
     private String generateCodeFromName(String name) {

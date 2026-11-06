@@ -3,12 +3,14 @@ package com.calisthenics.backend.admin;
 import com.calisthenics.backend.admin.dto.AdminExerciseDeleteResponse;
 import com.calisthenics.backend.admin.dto.AdminExerciseResponse;
 import com.calisthenics.backend.admin.dto.CreateAdminExerciseRequest;
+import com.calisthenics.backend.admin.dto.ExerciseMediaItemRequest;
 import com.calisthenics.backend.admin.dto.UpdateAdminExerciseRequest;
 import com.calisthenics.backend.analysis.AnalysisRepository;
 import com.calisthenics.backend.analytics.repository.PersonalRecordRepository;
 import com.calisthenics.backend.exercise.DifficultyLevel;
 import com.calisthenics.backend.exercise.Exercise;
 import com.calisthenics.backend.exercise.ExerciseCategory;
+import com.calisthenics.backend.exercise.ExerciseMediaType;
 import com.calisthenics.backend.exercise.ExerciseRepository;
 import com.calisthenics.backend.workout.WorkoutSessionExerciseRepository;
 import com.calisthenics.backend.workoutplan.repository.WorkoutPlanExerciseRepository;
@@ -126,7 +128,8 @@ class AdminExerciseServiceTest {
                 "https://example.com/ring_dips.jpg",
                 "https://example.com/ring_dips.mp4",
                 "Gymnastic Rings",
-                true
+                true,
+                null
         );
 
         when(exerciseRepository.existsByNameIgnoreCase("Ring Dips")).thenReturn(false);
@@ -143,7 +146,53 @@ class AdminExerciseServiceTest {
         assertEquals("Ring Dips", created.name());
         assertEquals("RING_DIPS", created.code());
         assertEquals("Gymnastic Rings", created.equipment());
+        assertEquals(2, created.mediaItems().size());
+        assertEquals(ExerciseMediaType.IMAGE, created.mediaItems().get(0).type());
+        assertEquals(ExerciseMediaType.VIDEO, created.mediaItems().get(1).type());
         assertTrue(created.canDelete());
+    }
+
+    @Test
+    void createExercise_WithOrderedMediaItems_ReturnsAllMedia() {
+        CreateAdminExerciseRequest request = new CreateAdminExerciseRequest(
+                "Media Exercise",
+                "MEDIA_EXERCISE",
+                ExerciseCategory.PUSH,
+                DifficultyLevel.INTERMEDIATE,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                true,
+                List.of(
+                        new ExerciseMediaItemRequest(ExerciseMediaType.IMAGE, "https://cdn.example.com/one.jpg", null, 0),
+                        new ExerciseMediaItemRequest(ExerciseMediaType.IMAGE, "https://cdn.example.com/two.jpg", null, 1),
+                        new ExerciseMediaItemRequest(ExerciseMediaType.VIDEO, "https://cdn.example.com/one.mp4", null, 2),
+                        new ExerciseMediaItemRequest(ExerciseMediaType.VIDEO, "https://cdn.example.com/two.mp4", null, 3)
+                )
+        );
+        when(exerciseRepository.existsByNameIgnoreCase("Media Exercise")).thenReturn(false);
+        when(exerciseRepository.existsByCode("MEDIA_EXERCISE")).thenReturn(false);
+        when(exerciseRepository.save(any(Exercise.class))).thenAnswer(inv -> {
+            Exercise saved = inv.getArgument(0);
+            saved.setId(11L);
+            return saved;
+        });
+
+        AdminExerciseResponse response = service.createExercise(request);
+
+        assertEquals(4, response.mediaItems().size());
+        assertEquals(List.of(0, 1, 2, 3), response.mediaItems().stream()
+                .map(item -> item.displayOrder())
+                .toList());
+        assertEquals(List.of(
+                ExerciseMediaType.IMAGE,
+                ExerciseMediaType.IMAGE,
+                ExerciseMediaType.VIDEO,
+                ExerciseMediaType.VIDEO
+        ), response.mediaItems().stream().map(item -> item.type()).toList());
     }
 
     @Test
@@ -153,7 +202,7 @@ class AdminExerciseServiceTest {
                 "HANDSTAND",
                 ExerciseCategory.SKILL,
                 DifficultyLevel.INTERMEDIATE,
-                null, null, null, null, null, null, true
+                null, null, null, null, null, null, true, null
         );
 
         when(exerciseRepository.existsByNameIgnoreCase("Handstand")).thenReturn(true);
@@ -187,7 +236,7 @@ class AdminExerciseServiceTest {
                 "Updated desc",
                 "Chest",
                 "Instructions",
-                null, null, "Parallettes", false
+                null, null, "Parallettes", false, null
         );
 
         AdminExerciseResponse updated = service.updateExercise(5L, request);

@@ -5,6 +5,7 @@ import com.calisthenics.backend.coachclient.repository.WorkoutPlanAssignmentRepo
 import com.calisthenics.backend.coachclient.type.CoachClientRelationshipStatus;
 import com.calisthenics.backend.coachclient.type.WorkoutPlanAssignmentStatus;
 import com.calisthenics.backend.exercise.Exercise;
+import com.calisthenics.backend.exercise.ExerciseMediaMapper;
 import com.calisthenics.backend.exercise.ExerciseRepository;
 import com.calisthenics.backend.exercise.dto.ExerciseResponse;
 import com.calisthenics.backend.workoutplan.dto.request.WorkoutPlanExerciseRequest;
@@ -311,6 +312,11 @@ public class WorkoutPlanExerciseServiceImpl implements WorkoutPlanExerciseServic
                 .description(exercise.getDescription())
                 .targetMuscles(exercise.getTargetMuscles())
                 .instructions(exercise.getInstructions())
+                .imageUrl(exercise.getImageUrl())
+                .videoUrl(exercise.getVideoUrl())
+                .equipment(exercise.getEquipment())
+                .active(exercise.isActive())
+                .mediaItems(ExerciseMediaMapper.toResponses(exercise))
                 .build();
 
         return WorkoutPlanExerciseResponse.builder()

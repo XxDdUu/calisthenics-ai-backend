@@ -70,6 +70,7 @@ public class ExerciseService {
                 .videoUrl(exercise.getVideoUrl())
                 .equipment(exercise.getEquipment())
                 .active(exercise.isActive())
+                .mediaItems(ExerciseMediaMapper.toResponses(exercise))
                 .build();
     }
 }

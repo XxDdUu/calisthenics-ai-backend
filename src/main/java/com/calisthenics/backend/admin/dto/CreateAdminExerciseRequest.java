@@ -6,7 +6,9 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
+import jakarta.validation.Valid;
 
+import java.util.List;
 public record CreateAdminExerciseRequest(
         @NotBlank(message = "Exercise name is required")
         @Size(max = 100, message = "Exercise name must not exceed 100 characters")
@@ -35,6 +37,9 @@ public record CreateAdminExerciseRequest(
 
         String equipment,
 
-        Boolean active
+        Boolean active,
+
+        @Size(max = 100, message = "An exercise cannot have more than 100 media items")
+        List<@Valid ExerciseMediaItemRequest> mediaItems
 ) {
 }

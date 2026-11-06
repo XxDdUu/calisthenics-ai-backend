@@ -60,7 +60,11 @@ public class SecurityConfig {
                                 "/ws/**",
                                 "/error"
                         ).permitAll()
-                        .requestMatchers(HttpMethod.GET, "/api/v1/exercises/**").permitAll()
+                        .requestMatchers(
+                                HttpMethod.GET,
+                                "/api/v1/storage/exercise-media/**",
+                                "/api/v1/exercises/**"
+                        ).permitAll()
                         .anyRequest().authenticated()
                 );
 

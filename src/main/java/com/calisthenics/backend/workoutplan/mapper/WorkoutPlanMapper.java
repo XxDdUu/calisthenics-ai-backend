@@ -1,6 +1,7 @@
 package com.calisthenics.backend.workoutplan.mapper;
 
 import com.calisthenics.backend.exercise.Exercise;
+import com.calisthenics.backend.exercise.ExerciseMediaMapper;
 import com.calisthenics.backend.exercise.dto.ExerciseResponse;
 import com.calisthenics.backend.workoutplan.dto.response.WorkoutPlanDayResponse;
 import com.calisthenics.backend.workoutplan.dto.response.WorkoutPlanExerciseResponse;
@@ -91,6 +92,11 @@ public class WorkoutPlanMapper {
                 .description(exercise.getDescription())
                 .targetMuscles(exercise.getTargetMuscles())
                 .instructions(exercise.getInstructions())
+                .imageUrl(exercise.getImageUrl())
+                .videoUrl(exercise.getVideoUrl())
+                .equipment(exercise.getEquipment())
+                .active(exercise.isActive())
+                .mediaItems(ExerciseMediaMapper.toResponses(exercise))
                 .build();
     }
 }

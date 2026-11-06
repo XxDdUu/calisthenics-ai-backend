@@ -1,9 +1,11 @@
 package com.calisthenics.backend.admin.dto;
 
+import com.calisthenics.backend.exercise.dto.ExerciseMediaResponse;
 import com.calisthenics.backend.exercise.DifficultyLevel;
 import com.calisthenics.backend.exercise.ExerciseCategory;
 
 import java.time.ZonedDateTime;
+import java.util.List;
 
 public record AdminExerciseResponse(
         Long id,
@@ -21,6 +23,7 @@ public record AdminExerciseResponse(
         ZonedDateTime createdAt,
         long planReferencesCount,
         long sessionReferencesCount,
-        boolean canDelete
+        boolean canDelete,
+        List<ExerciseMediaResponse> mediaItems
 ) {
 }

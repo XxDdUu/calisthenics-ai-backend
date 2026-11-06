@@ -2,6 +2,7 @@ package com.calisthenics.backend.exercise.dto;
 
 import com.calisthenics.backend.exercise.DifficultyLevel;
 import com.calisthenics.backend.exercise.ExerciseCategory;
+import java.util.List;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -25,4 +26,5 @@ public class ExerciseResponse {
     private String videoUrl;
     private String equipment;
     private boolean active;
+    private List<ExerciseMediaResponse> mediaItems;
 }
