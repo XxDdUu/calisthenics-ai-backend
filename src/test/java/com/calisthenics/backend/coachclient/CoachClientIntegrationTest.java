@@ -214,6 +214,24 @@ class CoachClientIntegrationTest {
     }
 
     @Test
+    void discoverReturnsRegularUserAccountIdsAndExcludesAdminAccounts() throws Exception {
+        User currentAdmin = createUser();
+        currentAdmin.setRole(Role.ROLE_ADMIN);
+        currentAdmin = userRepository.saveAndFlush(currentAdmin);
+        User otherAdmin = createUser();
+        otherAdmin.setRole(Role.ROLE_ADMIN);
+        otherAdmin = userRepository.saveAndFlush(otherAdmin);
+        User regularUser = createUser();
+
+        mockMvc.perform(get("/api/v1/coaches").with(authenticatedAs(currentAdmin)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[?(@.id == " + regularUser.getId() + ")]").exists())
+                .andExpect(jsonPath("$[?(@.userId == " + regularUser.getId() + ")]").exists())
+                .andExpect(jsonPath("$[?(@.id == " + currentAdmin.getId() + ")]").doesNotExist())
+                .andExpect(jsonPath("$[?(@.id == " + otherAdmin.getId() + ")]").doesNotExist());
+    }
+
+    @Test
     void unauthenticatedRequestsAreRejected() throws Exception {
         mockMvc.perform(get("/api/v1/coach-client-relationships"))
                 .andExpect(status().isUnauthorized());

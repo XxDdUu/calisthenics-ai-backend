@@ -107,54 +107,79 @@ public class CoachClientRelationshipServiceImpl implements CoachClientRelationsh
     @Transactional
     public CoachClientRelationshipResponse transition(
             Long userId, Long relationshipId, CoachClientRelationshipStatus targetStatus) {
-        CoachClientRelationship relationship = relationshipRepository.findById(relationshipId)
-                .orElseThrow(CoachClientRelationshipNotFoundException::new);
-        Long clientId = relationship.getClient().getId();
-        userRepository.findByIdForUpdate(clientId)
-                .orElseThrow(CoachClientRelationshipNotFoundException::new);
-        relationship = relationshipRepository.findByIdForUpdate(relationshipId)
-                .orElseThrow(CoachClientRelationshipNotFoundException::new);
+        String operation = switch (targetStatus) {
+            case ACTIVE -> "accept";
+            case REJECTED -> "reject";
+            case CANCELLED -> "cancel";
+            default -> "transition";
+        };
+        Long senderId = null;
+        Long receiverId = null;
+        log.info(
+                "Coach-client request operation={} actorId={} relationshipId={} result=started",
+                operation, userId, relationshipId);
+        try {
+            CoachClientRelationship relationship = relationshipRepository.findById(relationshipId)
+                    .orElseThrow(CoachClientRelationshipNotFoundException::new);
+            Long clientId = relationship.getClient().getId();
+            userRepository.findByIdForUpdate(clientId)
+                    .orElseThrow(CoachClientRelationshipNotFoundException::new);
+            relationship = relationshipRepository.findByIdForUpdate(relationshipId)
+                    .orElseThrow(CoachClientRelationshipNotFoundException::new);
 
-        Long coachId = relationship.getCoach().getId();
-        Long requesterId = relationship.getRequestedBy().getId();
-        boolean isCoach = coachId.equals(userId);
-        boolean isClient = relationship.getClient().getId().equals(userId);
-        if (!isCoach && !isClient) {
-            throw new CoachClientRelationshipNotFoundException();
-        }
-
-        if (relationship.getStatus() != CoachClientRelationshipStatus.PENDING
-                && relationship.getStatus() != CoachClientRelationshipStatus.ACTIVE) {
-            throw new CoachClientConflictException();
-        }
-
-        if (targetStatus == CoachClientRelationshipStatus.ACTIVE) {
-            if (!isRespondent(relationship, userId)
-                    || relationship.getStatus() != CoachClientRelationshipStatus.PENDING) {
-                throw new CoachClientForbiddenException();
+            Long coachId = relationship.getCoach().getId();
+            senderId = relationship.getRequestedBy().getId();
+            receiverId = senderId.equals(coachId) ? clientId : coachId;
+            boolean isCoach = coachId.equals(userId);
+            boolean isClient = relationship.getClient().getId().equals(userId);
+            if (!isCoach && !isClient) {
+                throw new CoachClientRelationshipNotFoundException();
             }
-            if (relationshipRepository.existsByClientIdAndStatus(clientId, CoachClientRelationshipStatus.ACTIVE)) {
+
+            if (relationship.getStatus() != CoachClientRelationshipStatus.PENDING
+                    && relationship.getStatus() != CoachClientRelationshipStatus.ACTIVE) {
                 throw new CoachClientConflictException();
             }
-            relationship.setStatus(CoachClientRelationshipStatus.ACTIVE);
-        } else if (targetStatus == CoachClientRelationshipStatus.REJECTED) {
-            if (!isRespondent(relationship, userId)
-                    || relationship.getStatus() != CoachClientRelationshipStatus.PENDING) {
-                throw new CoachClientForbiddenException();
-            }
-            relationship.setStatus(CoachClientRelationshipStatus.REJECTED);
-        } else if (targetStatus == CoachClientRelationshipStatus.CANCELLED) {
-            if (relationship.getStatus() == CoachClientRelationshipStatus.PENDING
-                    && !Objects.equals(requesterId, userId)) {
-                throw new CoachClientForbiddenException();
-            }
-            relationship.setStatus(CoachClientRelationshipStatus.CANCELLED);
-            endActiveAssignments(relationship.getId());
-        } else {
-            throw new IllegalArgumentException("Unsupported relationship state transition");
-        }
 
-        return toResponse(relationshipRepository.save(relationship));
+            if (targetStatus == CoachClientRelationshipStatus.ACTIVE) {
+                if (!isRespondent(relationship, userId)
+                        || relationship.getStatus() != CoachClientRelationshipStatus.PENDING) {
+                    throw new CoachClientForbiddenException();
+                }
+                if (relationshipRepository.existsByClientIdAndStatus(
+                        clientId, CoachClientRelationshipStatus.ACTIVE)) {
+                    throw new CoachClientConflictException();
+                }
+                relationship.setStatus(CoachClientRelationshipStatus.ACTIVE);
+            } else if (targetStatus == CoachClientRelationshipStatus.REJECTED) {
+                if (!isRespondent(relationship, userId)
+                        || relationship.getStatus() != CoachClientRelationshipStatus.PENDING) {
+                    throw new CoachClientForbiddenException();
+                }
+                relationship.setStatus(CoachClientRelationshipStatus.REJECTED);
+            } else if (targetStatus == CoachClientRelationshipStatus.CANCELLED) {
+                if (relationship.getStatus() == CoachClientRelationshipStatus.PENDING
+                        && !Objects.equals(senderId, userId)) {
+                    throw new CoachClientForbiddenException();
+                }
+                relationship.setStatus(CoachClientRelationshipStatus.CANCELLED);
+                endActiveAssignments(relationship.getId());
+            } else {
+                throw new IllegalArgumentException("Unsupported relationship state transition");
+            }
+
+            CoachClientRelationship saved = relationshipRepository.saveAndFlush(relationship);
+            log.info(
+                    "Coach-client request operation={} senderId={} receiverId={} actorId={} relationshipId={} result=updated status={}",
+                    operation, senderId, receiverId, userId, relationshipId, saved.getStatus());
+            return toResponse(saved);
+        } catch (RuntimeException exception) {
+            log.warn(
+                    "Coach-client request operation={} senderId={} receiverId={} actorId={} relationshipId={} result=failed exceptionType={} message={}",
+                    operation, senderId, receiverId, userId, relationshipId,
+                    exception.getClass().getSimpleName(), exception.getMessage());
+            throw exception;
+        }
     }
 
     private boolean isRespondent(CoachClientRelationship relationship, Long userId) {
