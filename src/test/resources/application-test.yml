@@ -10,6 +10,16 @@ spring:
     show-sql: false
   flyway:
     enabled: false
+  mail:
+    host: localhost
+    port: 2525
+    username: test-sender@calisthenics.ai
+    properties:
+      mail:
+        smtp:
+          auth: false
+          starttls:
+            enable: false
 
 app:
   jwt:

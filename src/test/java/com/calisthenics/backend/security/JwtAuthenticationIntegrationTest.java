@@ -3,6 +3,8 @@ package com.calisthenics.backend.security;
 import com.calisthenics.backend.security.dto.LoginRequest;
 import com.calisthenics.backend.security.dto.RefreshTokenRequest;
 import com.calisthenics.backend.security.dto.RegisterRequest;
+import com.calisthenics.backend.security.registration.RegistrationEmailService;
+import org.springframework.boot.test.mock.mockito.MockBean;
 import com.calisthenics.backend.user.Role;
 import com.calisthenics.backend.user.User;
 import com.calisthenics.backend.user.UserRepository;
@@ -51,6 +53,9 @@ public class JwtAuthenticationIntegrationTest {
     @Autowired
     private JwtTokenProvider jwtTokenProvider;
 
+    @MockBean
+    private RegistrationEmailService registrationEmailService;
+
     private User testUser;
     private UserPrincipal testUserPrincipal;
     private String testEmail;
@@ -85,9 +90,7 @@ public class JwtAuthenticationIntegrationTest {
         mockMvc.perform(post("/api/v1/auth/register")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(register)))
-                .andExpect(status().isCreated())
-                .andExpect(jsonPath("$.accessToken", notNullValue()))
-                .andExpect(jsonPath("$.refreshToken", notNullValue()))
+                .andExpect(status().isOk())
                 .andExpect(jsonPath("$.email").value(newEmail));
     }
 

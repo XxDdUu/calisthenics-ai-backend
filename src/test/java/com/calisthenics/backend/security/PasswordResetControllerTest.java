@@ -3,6 +3,7 @@ package com.calisthenics.backend.security;
 import com.calisthenics.backend.security.passwordreset.PasswordResetEmailService;
 import com.calisthenics.backend.security.passwordreset.PasswordResetOtp;
 import com.calisthenics.backend.security.passwordreset.PasswordResetOtpRepository;
+import com.calisthenics.backend.user.Role;
 import com.calisthenics.backend.user.User;
 import com.calisthenics.backend.user.UserRepository;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -62,6 +63,9 @@ class PasswordResetControllerTest {
 
     @MockBean
     private PasswordResetEmailService emailService;
+
+    @MockBean
+    private com.calisthenics.backend.security.registration.RegistrationEmailService registrationEmailService;
 
     @BeforeEach
     void clearMailCalls() {
@@ -294,17 +298,15 @@ class PasswordResetControllerTest {
                 .andExpect(jsonPath("$.code").value("RATE_LIMIT_EXCEEDED"));
     }
 
-    private long register(String email) throws Exception {
-        MvcResult result = mockMvc.perform(post("/api/v1/auth/register")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(json(
-                                "email", email,
-                                "password", OLD_PASSWORD,
-                                "fullName", "Reset Test"
-                        )))
-                .andExpect(status().isCreated())
-                .andReturn();
-        return objectMapper.readTree(result.getResponse().getContentAsString()).get("userId").asLong();
+    private long register(String email) {
+        User user = User.builder()
+                .email(email)
+                .passwordHash(passwordEncoder.encode(OLD_PASSWORD))
+                .fullName("Reset Test")
+                .role(Role.ROLE_USER)
+                .experienceLevel("INTERMEDIATE")
+                .build();
+        return userRepository.save(user).getId();
     }
 
     private ResetCredentials prepareReset(String email) throws Exception {

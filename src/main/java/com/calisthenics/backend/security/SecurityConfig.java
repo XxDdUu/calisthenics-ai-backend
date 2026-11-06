@@ -56,6 +56,7 @@ public class SecurityConfig {
                                 "/swagger-ui.html",
                                 "/actuator/**",
                                 "/api/v1/storage/files/**",
+                                "/api/v1/storage/avatars/**",
                                 "/ws/**",
                                 "/error"
                         ).permitAll()

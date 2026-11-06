@@ -1,15 +1,21 @@
 package com.calisthenics.backend.security;
 
-import com.calisthenics.backend.security.dto.RegisterRequest;
 import com.calisthenics.backend.security.dto.LoginRequest;
+import com.calisthenics.backend.security.dto.RegisterRequest;
+import com.calisthenics.backend.security.registration.RegistrationEmailService;
+import com.calisthenics.backend.user.Role;
+import com.calisthenics.backend.user.User;
+import com.calisthenics.backend.user.UserRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.mock.mockito.SpyBean;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.boot.test.mock.mockito.SpyBean;
 import org.springframework.http.MediaType;
 import org.springframework.security.core.Authentication;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.transaction.annotation.Transactional;
@@ -33,6 +39,15 @@ public class AuthControllerTest {
     @Autowired
     private ObjectMapper objectMapper;
 
+    @Autowired
+    private UserRepository userRepository;
+
+    @Autowired
+    private PasswordEncoder passwordEncoder;
+
+    @MockBean
+    private RegistrationEmailService registrationEmailService;
+
     @SpyBean
     private JwtTokenProvider tokenProvider;
 
@@ -46,9 +61,10 @@ public class AuthControllerTest {
         mockMvc.perform(post("/api/v1/auth/register")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(registerRequest)))
-                .andExpect(status().isCreated())
-                .andExpect(jsonPath("$.accessToken").exists())
-                .andExpect(jsonPath("$.email").value("testuser@calisthenics.ai"));
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value(200))
+                .andExpect(jsonPath("$.email").value("testuser@calisthenics.ai"))
+                .andExpect(jsonPath("$.message").exists());
     }
 
     @Test
@@ -134,16 +150,14 @@ public class AuthControllerTest {
                 .andExpect(jsonPath("$.message").value("Đã xảy ra lỗi hệ thống. Vui lòng thử lại sau."));
     }
 
-    private void registerUser(String email, String password) throws Exception {
-        RegisterRequest request = new RegisterRequest();
-        request.setEmail(email);
-        request.setPassword(password);
-        request.setFullName("Test Athlete");
-
-        mockMvc.perform(post("/api/v1/auth/register")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(request)))
-                .andExpect(status().isCreated());
+    private void registerUser(String email, String password) {
+        userRepository.save(User.builder()
+                .email(email)
+                .passwordHash(passwordEncoder.encode(password))
+                .fullName("Test Athlete")
+                .experienceLevel("INTERMEDIATE")
+                .role(Role.ROLE_USER)
+                .build());
     }
 
     private LoginRequest loginRequest(String email, String password) {

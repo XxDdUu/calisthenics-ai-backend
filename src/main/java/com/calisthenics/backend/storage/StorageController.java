@@ -8,12 +8,15 @@ import org.springframework.core.io.Resource;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.CacheControl;
+import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
 
 import jakarta.servlet.http.HttpServletRequest;
 import java.io.IOException;
+import java.util.concurrent.TimeUnit;
 
 @RestController
 @RequestMapping("/api/v1/storage")
@@ -22,6 +25,7 @@ import java.io.IOException;
 public class StorageController {
 
     private final StorageService storageService;
+    private final MinioAvatarStorageService avatarStorageService;
 
     @PostMapping("/upload")
     @Operation(summary = "Upload image or video media file")
@@ -63,5 +67,20 @@ public class StorageController {
                 .contentType(MediaType.parseMediaType(contentType))
                 .header(HttpHeaders.CONTENT_DISPOSITION, "inline; filename=\"" + resource.getFilename() + "\"")
                 .body(resource);
+    }
+
+    @GetMapping("/avatars/{objectName:.+}")
+    @Operation(summary = "Download a public avatar image")
+    public ResponseEntity<StreamingResponseBody> getAvatar(@PathVariable String objectName) {
+        StreamingResponseBody body = outputStream -> {
+            try (var inputStream = avatarStorageService.open(objectName)) {
+                inputStream.transferTo(outputStream);
+            }
+        };
+        return ResponseEntity.ok()
+                .contentType(MediaType.IMAGE_JPEG)
+                .cacheControl(CacheControl.maxAge(365, TimeUnit.DAYS).cachePublic())
+                .header(HttpHeaders.CONTENT_DISPOSITION, "inline")
+                .body(body);
     }
 }

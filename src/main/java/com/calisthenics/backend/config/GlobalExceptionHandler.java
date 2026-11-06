@@ -9,6 +9,9 @@ import com.calisthenics.backend.coachclient.exception.CoachClientRelationshipNot
 import com.calisthenics.backend.coachclient.exception.WorkoutPlanAssignmentConflictException;
 import com.calisthenics.backend.coachclient.exception.WorkoutPlanAssignmentNotFoundException;
 import com.calisthenics.backend.security.passwordreset.PasswordResetException;
+import com.calisthenics.backend.security.registration.AddressField;
+import com.calisthenics.backend.security.registration.EmailAddressException;
+import com.calisthenics.backend.security.registration.RegistrationException;
 import com.calisthenics.backend.workoutplan.exception.ExerciseCatalogEntryNotFoundException;
 import com.calisthenics.backend.workoutplan.exception.WorkoutPlanExerciseNotFoundException;
 import com.calisthenics.backend.workoutplan.exception.WorkoutPlanExerciseOrderConflictException;
@@ -49,6 +52,21 @@ public class GlobalExceptionHandler {
         body.put("error", "Validation Failed");
         body.put("details", errors);
 
+        return ResponseEntity.badRequest().body(body);
+    }
+
+    @ExceptionHandler(EmailAddressException.class)
+    public ResponseEntity<Map<String, Object>> handleEmailAddressException(EmailAddressException ex) {
+        Map<String, Object> body = new HashMap<>();
+        if (ex.getField() == AddressField.FROM) {
+            body.put("status", HttpStatus.INTERNAL_SERVER_ERROR.value());
+            body.put("error", "Internal Server Error");
+            body.put("message", "Hệ thống email chưa được cấu hình chính xác. Vui lòng liên hệ quản trị viên.");
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(body);
+        }
+        body.put("status", HttpStatus.BAD_REQUEST.value());
+        body.put("error", "Bad Request");
+        body.put("message", ex.getMessage());
         return ResponseEntity.badRequest().body(body);
     }
 
@@ -147,6 +165,16 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(PasswordResetException.class)
     public ResponseEntity<Map<String, Object>> handlePasswordResetException(PasswordResetException ex) {
+        Map<String, Object> body = new HashMap<>();
+        body.put("status", ex.getStatus().value());
+        body.put("error", ex.getStatus().getReasonPhrase());
+        body.put("code", ex.getCode());
+        body.put("message", ex.getMessage());
+        return ResponseEntity.status(ex.getStatus()).body(body);
+    }
+
+    @ExceptionHandler(RegistrationException.class)
+    public ResponseEntity<Map<String, Object>> handleRegistrationException(RegistrationException ex) {
         Map<String, Object> body = new HashMap<>();
         body.put("status", ex.getStatus().value());
         body.put("error", ex.getStatus().getReasonPhrase());

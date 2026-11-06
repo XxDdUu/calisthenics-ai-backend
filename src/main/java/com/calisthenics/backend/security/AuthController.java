@@ -2,6 +2,7 @@ package com.calisthenics.backend.security;
 
 import com.calisthenics.backend.security.dto.*;
 import com.calisthenics.backend.security.passwordreset.PasswordResetService;
+import com.calisthenics.backend.security.registration.RegistrationOtpService;
 import com.calisthenics.backend.user.Role;
 import com.calisthenics.backend.user.User;
 import com.calisthenics.backend.user.UserRepository;
@@ -37,6 +38,7 @@ public class AuthController {
     private final FirebaseAuthService firebaseAuthService;
     private final GoogleAuthService googleAuthService;
     private final PasswordResetService passwordResetService;
+    private final RegistrationOtpService registrationOtpService;
 
     @PostMapping("/forgot-password")
     @Operation(summary = "Request a password reset OTP")
@@ -69,40 +71,26 @@ public class AuthController {
     }
 
     @PostMapping({"/register", "/register/"})
-    @Operation(summary = "Register a new user account")
-    public ResponseEntity<?> registerUser(@Valid @RequestBody RegisterRequest registerRequest) {
-        if (userRepository.existsByEmail(registerRequest.getEmail())) {
-            Map<String, Object> error = new HashMap<>();
-            error.put("status", HttpStatus.BAD_REQUEST.value());
-            error.put("error", "Bad Request");
-            error.put("message", "Error: Email is already registered!");
-            return ResponseEntity.badRequest().body(error);
-        }
+    @Operation(summary = "Initiate user registration by validating input and sending OTP email")
+    public ResponseEntity<RegisterInitiationResponse> registerUser(@Valid @RequestBody RegisterRequest registerRequest) {
+        return ResponseEntity.ok(registrationOtpService.initiateRegistration(registerRequest));
+    }
 
-        User user = User.builder()
-                .email(registerRequest.getEmail())
-                .passwordHash(passwordEncoder.encode(registerRequest.getPassword()))
-                .fullName(registerRequest.getFullName())
-                .experienceLevel(registerRequest.getExperienceLevel())
-                .role(Role.ROLE_USER)
-                .build();
+    @PostMapping({"/register/verify-otp", "/register/verify-otp/"})
+    @Operation(summary = "Verify OTP and complete user registration")
+    public ResponseEntity<AuthResponse> verifyRegistrationOtp(
+            @Valid @RequestBody VerifyRegistrationOtpRequest request
+    ) {
+        AuthResponse response = registrationOtpService.verifyOtpAndCompleteRegistration(request);
+        return ResponseEntity.status(HttpStatus.CREATED).body(response);
+    }
 
-        User savedUser = userRepository.save(user);
-        UserPrincipal userPrincipal = UserPrincipal.create(savedUser);
-
-        String accessToken = tokenProvider.generateAccessTokenFromUserPrincipal(userPrincipal);
-        String refreshToken = tokenProvider.generateRefreshToken(userPrincipal);
-
-        AuthResponse authResponse = AuthResponse.builder()
-                .accessToken(accessToken)
-                .refreshToken(refreshToken)
-                .userId(savedUser.getId())
-                .email(savedUser.getEmail())
-                .fullName(savedUser.getFullName())
-                .role(savedUser.getRole().name())
-                .build();
-
-        return ResponseEntity.status(HttpStatus.CREATED).body(authResponse);
+    @PostMapping({"/register/resend-otp", "/register/resend-otp/"})
+    @Operation(summary = "Resend registration verification OTP")
+    public ResponseEntity<RegisterInitiationResponse> resendRegistrationOtp(
+            @Valid @RequestBody ResendRegistrationOtpRequest request
+    ) {
+        return ResponseEntity.ok(registrationOtpService.resendRegistrationOtp(request.getEmail()));
     }
 
     @PostMapping({"/login", "/login/"})
