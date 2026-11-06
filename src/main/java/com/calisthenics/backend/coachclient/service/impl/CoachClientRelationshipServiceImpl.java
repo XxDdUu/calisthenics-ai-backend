@@ -17,6 +17,8 @@ import com.calisthenics.backend.user.Role;
 import com.calisthenics.backend.user.User;
 import com.calisthenics.backend.user.UserRepository;
 import lombok.RequiredArgsConstructor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -28,6 +30,7 @@ import java.util.Objects;
 @RequiredArgsConstructor
 public class CoachClientRelationshipServiceImpl implements CoachClientRelationshipService {
 
+    private static final Logger log = LoggerFactory.getLogger(CoachClientRelationshipServiceImpl.class);
     private static final List<CoachClientRelationshipStatus> DUPLICATE_BLOCKING_STATUSES =
             List.of(CoachClientRelationshipStatus.PENDING, CoachClientRelationshipStatus.ACTIVE);
 
@@ -48,33 +51,48 @@ public class CoachClientRelationshipServiceImpl implements CoachClientRelationsh
     }
 
     private CoachClientRelationshipResponse createRequest(
-            Long coachId, Long clientId, Long requesterId, boolean requireRegularUsers) {
-        if (coachId.equals(clientId)) {
-            throw new IllegalArgumentException("A user cannot connect with themselves");
-        }
+            Long coachId, Long clientId, Long requesterId, boolean requireRegularCoach) {
+        String operation = requesterId.equals(coachId) ? "coach_to_client" : "client_to_coach";
+        Long receiverId = requesterId.equals(coachId) ? clientId : coachId;
+        log.info(
+                "Coach-client request operation={} senderId={} receiverId={} result=started",
+                operation, requesterId, receiverId);
+        try {
+            if (coachId.equals(clientId)) {
+                throw new IllegalArgumentException("A user cannot connect with themselves");
+            }
 
-        User coach = userRepository.findById(coachId)
-                .orElseThrow(CoachClientRelationshipNotFoundException::new);
-        User client = userRepository.findByIdForUpdate(clientId)
-                .orElseThrow(CoachClientRelationshipNotFoundException::new);
-        if (requireRegularUsers
-                && (coach.getRole() != Role.ROLE_USER || client.getRole() != Role.ROLE_USER)) {
-            throw new CoachClientRelationshipNotFoundException();
-        }
+            User coach = userRepository.findById(coachId)
+                    .orElseThrow(CoachClientRelationshipNotFoundException::new);
+            User client = userRepository.findByIdForUpdate(clientId)
+                    .orElseThrow(CoachClientRelationshipNotFoundException::new);
+            if (requireRegularCoach && coach.getRole() != Role.ROLE_USER) {
+                throw new CoachClientRelationshipNotFoundException();
+            }
 
-        if (relationshipRepository.existsByCoachIdAndClientIdAndStatusIn(
-                coachId, clientId, DUPLICATE_BLOCKING_STATUSES)) {
-            throw new CoachClientConflictException();
-        }
+            if (relationshipRepository.existsByCoachIdAndClientIdAndStatusIn(
+                    coachId, clientId, DUPLICATE_BLOCKING_STATUSES)) {
+                throw new CoachClientConflictException();
+            }
 
-        User requester = requesterId.equals(coachId) ? coach : client;
-        CoachClientRelationship relationship = CoachClientRelationship.builder()
-                .coach(coach)
-                .client(client)
-                .requestedBy(requester)
-                .status(CoachClientRelationshipStatus.PENDING)
-                .build();
-        return toResponse(relationshipRepository.save(relationship));
+            User requester = requesterId.equals(coachId) ? coach : client;
+            CoachClientRelationship relationship = CoachClientRelationship.builder()
+                    .coach(coach)
+                    .client(client)
+                    .requestedBy(requester)
+                    .status(CoachClientRelationshipStatus.PENDING)
+                    .build();
+            CoachClientRelationship saved = relationshipRepository.saveAndFlush(relationship);
+            log.info(
+                    "Coach-client request operation={} senderId={} receiverId={} result=created relationshipId={}",
+                    operation, requesterId, receiverId, saved.getId());
+            return toResponse(saved);
+        } catch (RuntimeException exception) {
+            log.warn(
+                    "Coach-client request operation={} senderId={} receiverId={} result=failed exceptionType={} message={}",
+                    operation, requesterId, receiverId, exception.getClass().getSimpleName(), exception.getMessage());
+            throw exception;
+        }
     }
 
     @Override

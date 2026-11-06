@@ -161,6 +161,59 @@ class CoachClientIntegrationTest {
     }
 
     @Test
+    void adminCanRequestMultipleConnectionsAndRegularUsersCanRespond() throws Exception {
+        User admin = createUser();
+        admin.setRole(Role.ROLE_ADMIN);
+        admin = userRepository.saveAndFlush(admin);
+        User firstCoach = createUser();
+        User secondCoach = createUser();
+
+        String firstRequest = mockMvc.perform(post("/api/v1/coach-client-relationships/requests")
+                        .with(authenticatedAs(admin))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"coachId\":" + firstCoach.getId() + "}"))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.coachId").value(firstCoach.getId()))
+                .andExpect(jsonPath("$.clientId").value(admin.getId()))
+                .andExpect(jsonPath("$.requestedBy").value(admin.getId()))
+                .andExpect(jsonPath("$.status").value("PENDING"))
+                .andReturn().getResponse().getContentAsString();
+        Long firstRelationshipId = objectMapper.readTree(firstRequest).get("id").asLong();
+
+        mockMvc.perform(get("/api/v1/coach-client-relationships").with(authenticatedAs(firstCoach)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].id").value(firstRelationshipId))
+                .andExpect(jsonPath("$[0].requestedBy").value(admin.getId()));
+
+        mockMvc.perform(post("/api/v1/coach-client-relationships/" + firstRelationshipId + "/accept")
+                        .with(authenticatedAs(firstCoach)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("ACTIVE"));
+
+        String secondRequest = mockMvc.perform(post("/api/v1/coach-client-relationships/requests")
+                        .with(authenticatedAs(admin))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"coachId\":" + secondCoach.getId() + "}"))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.status").value("PENDING"))
+                .andReturn().getResponse().getContentAsString();
+        Long secondRelationshipId = objectMapper.readTree(secondRequest).get("id").asLong();
+
+        mockMvc.perform(post("/api/v1/coach-client-relationships/" + secondRelationshipId + "/reject")
+                        .with(authenticatedAs(secondCoach)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("REJECTED"));
+
+        mockMvc.perform(get("/api/v1/coach-client-relationships").with(authenticatedAs(admin)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(2));
+        assertThat(relationshipRepository.findById(firstRelationshipId).orElseThrow().getStatus())
+                .isEqualTo(CoachClientRelationshipStatus.ACTIVE);
+        assertThat(relationshipRepository.findById(secondRelationshipId).orElseThrow().getStatus())
+                .isEqualTo(CoachClientRelationshipStatus.REJECTED);
+    }
+
+    @Test
     void unauthenticatedRequestsAreRejected() throws Exception {
         mockMvc.perform(get("/api/v1/coach-client-relationships"))
                 .andExpect(status().isUnauthorized());
