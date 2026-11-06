@@ -6,6 +6,7 @@ import com.calisthenics.backend.bodymetrics.entity.ClientBodyMeasurement;
 import com.calisthenics.backend.bodymetrics.repository.ClientBodyMeasurementRepository;
 import com.calisthenics.backend.coachclient.entity.CoachClientRelationship;
 import com.calisthenics.backend.coachclient.repository.CoachClientRelationshipRepository;
+import com.calisthenics.backend.coachclient.repository.WorkoutPlanAssignmentRepository;
 import com.calisthenics.backend.coachclient.type.CoachClientRelationshipStatus;
 import com.calisthenics.backend.profile.entity.ClientProfile;
 import com.calisthenics.backend.profile.repository.ClientProfileRepository;
@@ -60,6 +61,9 @@ class BodyMetricsIntegrationTest {
     @Autowired
     private CoachClientRelationshipRepository relationshipRepository;
 
+    @Autowired
+    private WorkoutPlanAssignmentRepository assignmentRepository;
+
     private User clientUser;
     private User assignedCoach;
     private User unassignedCoach;
@@ -67,6 +71,7 @@ class BodyMetricsIntegrationTest {
     @BeforeEach
     void setUp() {
         measurementRepository.deleteAll();
+        assignmentRepository.deleteAll();
         relationshipRepository.deleteAll();
         clientProfileRepository.deleteAll();
 
