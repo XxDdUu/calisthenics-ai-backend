@@ -3,9 +3,11 @@ package com.calisthenics.backend.storage;
 import io.minio.GetObjectArgs;
 import io.minio.MinioClient;
 import io.minio.PutObjectArgs;
+import io.minio.RemoveObjectArgs;
 import io.minio.StatObjectArgs;
 import io.minio.StatObjectResponse;
 import io.minio.errors.ErrorResponseException;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -18,6 +20,7 @@ import java.util.Locale;
 import java.util.UUID;
 
 @Service
+@Slf4j
 public class MinioExerciseMediaStorageService {
 
     private final MinioClient client;
@@ -66,11 +69,33 @@ public class MinioExerciseMediaStorageService {
                     .build());
             return objectName;
         } catch (Exception exception) {
+            try {
+                minio.removeObject(RemoveObjectArgs.builder()
+                        .bucket(bucket)
+                        .object(objectName)
+                        .build());
+            } catch (Exception cleanupException) {
+                exception.addSuppressed(cleanupException);
+                log.error("Failed to clean up exercise media after storage failure: objectName={}",
+                        objectName, cleanupException);
+            }
             throw new ResponseStatusException(
                     HttpStatus.SERVICE_UNAVAILABLE,
                     "Exercise media storage is unavailable.",
                     exception
             );
+        }
+    }
+
+    public void delete(String objectName) {
+        String validName = validateObjectName(objectName);
+        try {
+            requireClient().removeObject(RemoveObjectArgs.builder()
+                    .bucket(bucket)
+                    .object(validName)
+                    .build());
+        } catch (Exception exception) {
+            throw new IllegalStateException("Could not remove an uncommitted exercise media object.", exception);
         }
     }
 

@@ -1,9 +1,12 @@
 package com.calisthenics.backend.storage;
 
+import com.calisthenics.backend.exercise.ExerciseMediaService;
+import com.calisthenics.backend.exercise.ExerciseMediaType;
 import com.calisthenics.backend.storage.dto.FileUploadResponse;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.Resource;
 import org.springframework.http.HttpStatus;
@@ -26,12 +29,14 @@ import java.util.concurrent.TimeUnit;
 @RestController
 @RequestMapping("/api/v1/storage")
 @RequiredArgsConstructor
+@Slf4j
 @Tag(name = "Storage", description = "Endpoints for uploading and serving media files")
 public class StorageController {
 
     private final StorageService storageService;
     private final MinioAvatarStorageService avatarStorageService;
     private final MinioExerciseMediaStorageService exerciseMediaStorageService;
+    private final ExerciseMediaService exerciseMediaService;
 
     @Value("${STORAGE_PROVIDER:local}")
     private String storageProvider;
@@ -59,12 +64,23 @@ public class StorageController {
     @PostMapping("/exercise-media/upload")
     @PreAuthorize("hasRole('ADMIN')")
     @Operation(summary = "Upload an exercise image or video file")
-    public ResponseEntity<FileUploadResponse> uploadExerciseMedia(@RequestParam("file") MultipartFile file) {
+    public ResponseEntity<FileUploadResponse> uploadExerciseMedia(
+            @RequestParam("file") MultipartFile file,
+            @RequestParam(required = false) Long exerciseId,
+            @RequestParam(required = false) Integer displayOrder
+    ) {
         String contentType = file.getContentType();
         if (file.isEmpty() || contentType == null ||
                 !(contentType.startsWith("image/") || contentType.startsWith("video/"))) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Select a non-empty image or video file.");
         }
+        if ((exerciseId == null && displayOrder != null) || (displayOrder != null && displayOrder < 0)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "A non-negative display order requires an exercise ID.");
+        }
+        if (exerciseId != null) {
+            exerciseMediaService.requireExercise(exerciseId);
+        }
+
         boolean useMinio = "minio".equalsIgnoreCase(storageProvider);
         String fileName = useMinio ? exerciseMediaStorageService.store(file) : storageService.store(file);
         String mediaPath = useMinio
@@ -75,12 +91,45 @@ public class StorageController {
                 .path(fileName)
                 .toUriString();
 
-        return ResponseEntity.ok(FileUploadResponse.builder()
+        FileUploadResponse.FileUploadResponseBuilder response = FileUploadResponse.builder()
                 .fileName(fileName)
                 .fileDownloadUri(fileDownloadUri)
                 .fileType(file.getContentType())
-                .size(file.getSize())
-                .build());
+                .size(file.getSize());
+
+        if (exerciseId != null) {
+            try {
+                ExerciseMediaType mediaType = contentType.startsWith("image/")
+                        ? ExerciseMediaType.IMAGE
+                        : ExerciseMediaType.VIDEO;
+                var mediaItem = exerciseMediaService.addMedia(
+                        exerciseId,
+                        mediaType,
+                        fileDownloadUri,
+                        displayOrder == null ? 0 : displayOrder
+                );
+                response.mediaItem(mediaItem);
+                log.info("Exercise media upload completed: exerciseId={}, mediaId={}, type={}, displayOrder={}",
+                        exerciseId, mediaItem.id(), mediaItem.type(), mediaItem.displayOrder());
+            } catch (RuntimeException persistenceFailure) {
+                try {
+                    if (useMinio) {
+                        exerciseMediaStorageService.delete(fileName);
+                    } else {
+                        storageService.delete(fileName);
+                    }
+                } catch (RuntimeException cleanupFailure) {
+                    persistenceFailure.addSuppressed(cleanupFailure);
+                    log.error("Failed to clean up exercise media after metadata persistence failed: exerciseId={}, objectName={}",
+                            exerciseId, fileName, cleanupFailure);
+                }
+                log.error("Exercise media metadata persistence failed: exerciseId={}, objectName={}",
+                        exerciseId, fileName, persistenceFailure);
+                throw persistenceFailure;
+            }
+        }
+
+        return ResponseEntity.ok(response.build());
     }
 
     @GetMapping("/files/{fileName:.+}")
