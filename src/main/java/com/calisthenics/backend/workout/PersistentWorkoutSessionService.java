@@ -66,7 +66,7 @@ public class PersistentWorkoutSessionService {
         if (day.getDayOfWeek().getOrder() != request.workoutDate().getDayOfWeek().getValue()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Workout date does not match the scheduled day");
         }
-        if (day.getSessionType() == WorkoutSessionType.REST) {
+        if (day.isRestDay() || day.getSessionType() == WorkoutSessionType.REST) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "A rest day cannot be started as a workout");
         }
 
@@ -103,7 +103,7 @@ public class PersistentWorkoutSessionService {
                 .workoutPlanAssignment(assignment)
                 .source(selectedWorkout.source())
                 .workoutDate(request.workoutDate())
-                .title(plan.getName() + " - " + day.getSessionType().name().replace('_', ' '))
+                .title(plan.getName() + " - " + workoutDayTitle(day))
                 .status(WorkoutSessionStatus.IN_PROGRESS)
                 .startedAt(now)
                 .lastSavedAt(now)
@@ -246,6 +246,13 @@ public class PersistentWorkoutSessionService {
         sessionRepository.flush();
         personalRecordService.detectAndSavePRs(session);
         return map(session);
+    }
+
+    private String workoutDayTitle(WorkoutPlanDay day) {
+        if (day.getName() != null && !day.getName().isBlank()) {
+            return day.getName();
+        }
+        return day.getSessionType() == null ? "Workout" : day.getSessionType().name().replace('_', ' ');
     }
 
     private WorkoutSession ownedSession(Long userId, Long sessionId) {

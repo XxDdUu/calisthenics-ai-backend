@@ -8,23 +8,31 @@ import com.calisthenics.backend.workoutplan.dto.response.WorkoutPlanResponse;
 import com.calisthenics.backend.workoutplan.entity.WorkoutPlan;
 import com.calisthenics.backend.workoutplan.entity.WorkoutPlanDay;
 import com.calisthenics.backend.workoutplan.entity.WorkoutPlanExercise;
+import com.calisthenics.backend.workoutplan.type.WorkoutSessionType;
 import org.springframework.stereotype.Component;
 
 import java.util.Comparator;
+import java.util.stream.StreamSupport;
 
 @Component
 public class WorkoutPlanMapper {
 
     public WorkoutPlanResponse toResponse(WorkoutPlan plan) {
+        return toResponse(plan, plan.getDays());
+    }
+
+    public WorkoutPlanResponse toResponse(WorkoutPlan plan, Iterable<WorkoutPlanDay> days) {
         return WorkoutPlanResponse.builder()
                 .id(plan.getId())
                 .name(plan.getName())
+                .description(plan.getDescription())
                 .splitType(plan.getSplitType())
+                .active(plan.isActive())
                 .createdAt(plan.getCreatedAt())
                 .updatedAt(plan.getUpdatedAt())
-                .days(plan.getDays().stream()
+                .days(StreamSupport.stream(days.spliterator(), false)
                         .map(this::toDayResponse)
-                        .sorted(Comparator.comparing(day -> day.getDayOfWeek().getOrder()))
+                        .sorted(Comparator.comparing(WorkoutPlanDayResponse::getDisplayOrder))
                         .toList())
                 .build();
     }
@@ -34,12 +42,28 @@ public class WorkoutPlanMapper {
                 .id(day.getId())
                 .dayOfWeek(day.getDayOfWeek())
                 .sessionType(day.getSessionType())
+                .workoutType(day.getSessionType())
                 .name(day.getName())
+                .customWorkoutName(day.getName())
+                .workoutName(displayName(day))
+                .description(day.getDescription())
+                .restDay(day.isRestDay())
+                .displayOrder(day.getDisplayOrder())
                 .exercises(day.getExercises().stream()
                         .map(this::toExerciseResponse)
                         .sorted(Comparator.comparing(WorkoutPlanExerciseResponse::getDisplayOrder))
                         .toList())
                 .build();
+    }
+
+    private String displayName(WorkoutPlanDay day) {
+        if (day.isRestDay() || day.getSessionType() == WorkoutSessionType.REST) {
+            return "Rest Day";
+        }
+        if (day.getName() != null && !day.getName().isBlank()) {
+            return day.getName();
+        }
+        return day.getSessionType() == null ? null : day.getSessionType().name().replace('_', ' ');
     }
 
     private WorkoutPlanExerciseResponse toExerciseResponse(WorkoutPlanExercise assignment) {

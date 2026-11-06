@@ -80,17 +80,27 @@ public class TodayWorkoutResolver {
             }
         }
 
+        // A saved active personal plan is the default weekly split. The former "all personal
+        // plans are candidates" behavior is retained only as a fallback for legacy users who
+        // have no active plan yet.
         List<ResolvedWorkout> personalPlans = new ArrayList<>();
-        for (WorkoutPlan plan : planRepository.findByUserIdOrderByCreatedAtDesc(clientId)) {
-            plan.getDays().stream()
-                    .filter(day -> day.getDayOfWeek().getOrder() == date.getDayOfWeek().getValue())
-                    .findFirst()
-                    .ifPresent(day -> personalPlans.add(new ResolvedWorkout(plan, day, null)));
-        }
+        planRepository.findFirstByUserIdAndActiveTrueOrderByUpdatedAtDesc(clientId)
+                .ifPresentOrElse(activePlan -> addDayForDate(personalPlans, activePlan, date), () -> {
+                    for (WorkoutPlan plan : planRepository.findByUserIdOrderByCreatedAtDesc(clientId)) {
+                        addDayForDate(personalPlans, plan, date);
+                    }
+                });
         return new ResolutionCandidates(
                 activeCoach != null,
                 personalPlans.isEmpty() ? WorkoutSessionSource.NONE : WorkoutSessionSource.PERSONAL,
                 List.copyOf(personalPlans));
+    }
+
+    private void addDayForDate(List<ResolvedWorkout> results, WorkoutPlan plan, LocalDate date) {
+        plan.getDays().stream()
+                .filter(day -> day.getDayOfWeek().getOrder() == date.getDayOfWeek().getValue())
+                .findFirst()
+                .ifPresent(day -> results.add(new ResolvedWorkout(plan, day, null)));
     }
 
     private TodayWorkoutCandidateResponse toResponse(ResolvedWorkout candidate) {

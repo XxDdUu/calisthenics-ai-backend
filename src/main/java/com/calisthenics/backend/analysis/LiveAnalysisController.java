@@ -13,6 +13,7 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.io.IOException;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 
 @RestController
 @RequestMapping("/api/v1/analysis/live")
@@ -51,10 +52,27 @@ public class LiveAnalysisController {
             byte[] imageBytes = file.getBytes();
             return liveAnalysisService
                     .analyzeFrame(imageBytes, exercise, sessionId, frameSequence, timestampMs, sideView)
-                    .thenApply(ResponseEntity::ok);
+                    .handle(this::toFrameResponse);
         } catch (IOException exception) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Could not read camera frame.", exception);
         }
+    }
+
+    private ResponseEntity<JsonNode> toFrameResponse(JsonNode body, Throwable throwable) {
+        if (throwable == null) {
+            return ResponseEntity.ok(body);
+        }
+        Throwable cause = throwable instanceof CompletionException && throwable.getCause() != null
+                ? throwable.getCause()
+                : throwable;
+        int status = HttpStatus.BAD_GATEWAY.value();
+        if (cause instanceof ResponseStatusException responseStatus) {
+            int upstream = responseStatus.getStatusCode().value();
+            if (upstream != HttpStatus.UNAUTHORIZED.value() && upstream != HttpStatus.FORBIDDEN.value()) {
+                status = upstream;
+            }
+        }
+        return ResponseEntity.status(status).build();
     }
 
     @PostMapping("/session/{sessionId}/reset")

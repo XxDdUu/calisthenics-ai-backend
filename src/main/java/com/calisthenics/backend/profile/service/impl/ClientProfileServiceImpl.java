@@ -122,7 +122,8 @@ public class ClientProfileServiceImpl implements ClientProfileService {
             completedSessions = workoutSessionRepository.countByUserId(clientUserId);
         }
 
-        Optional<WorkoutPlan> currentPlanOpt = workoutPlanRepository.findFirstByUserIdOrderByUpdatedAtDesc(clientUserId);
+        Optional<WorkoutPlan> currentPlanOpt = workoutPlanRepository.findFirstByUserIdAndActiveTrueOrderByUpdatedAtDesc(clientUserId)
+                .or(() -> workoutPlanRepository.findFirstByUserIdOrderByUpdatedAtDesc(clientUserId));
         ConnectedCoachSummary connectedCoach = getConnectedCoachSummary(clientUserId);
 
         List<WorkoutSession> sessions = workoutSessionRepository.findTop5ByUserIdOrderByCreatedAtDesc(clientUserId);
@@ -194,7 +195,8 @@ public class ClientProfileServiceImpl implements ClientProfileService {
             completedSessions = workoutSessionRepository.countByUserId(clientUserId);
         }
 
-        Optional<WorkoutPlan> currentPlanOpt = workoutPlanRepository.findFirstByUserIdOrderByUpdatedAtDesc(clientUserId);
+        Optional<WorkoutPlan> currentPlanOpt = workoutPlanRepository.findFirstByUserIdAndActiveTrueOrderByUpdatedAtDesc(clientUserId)
+                .or(() -> workoutPlanRepository.findFirstByUserIdOrderByUpdatedAtDesc(clientUserId));
         ConnectedCoachSummary connectedCoach = getConnectedCoachSummary(clientUserId);
 
         String displayName = (profile != null && profile.getDisplayName() != null && !profile.getDisplayName().isBlank())

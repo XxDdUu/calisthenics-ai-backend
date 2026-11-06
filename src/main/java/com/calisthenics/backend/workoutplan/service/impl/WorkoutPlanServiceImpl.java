@@ -9,6 +9,7 @@ import com.calisthenics.backend.exercise.ExerciseRepository;
 import com.calisthenics.backend.user.User;
 import com.calisthenics.backend.user.UserRepository;
 import com.calisthenics.backend.workoutplan.dto.request.CreateWorkoutPlanRequest;
+import com.calisthenics.backend.workoutplan.dto.request.DuplicateWorkoutPlanRequest;
 import com.calisthenics.backend.workoutplan.dto.request.UpdateWorkoutPlanRequest;
 import com.calisthenics.backend.workoutplan.dto.request.WorkoutPlanDayRequest;
 import com.calisthenics.backend.workoutplan.dto.request.WorkoutPlanExerciseRequest;
@@ -36,6 +37,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.EnumMap;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
@@ -47,6 +49,7 @@ import java.util.Set;
 @RequiredArgsConstructor
 public class WorkoutPlanServiceImpl implements WorkoutPlanService {
 
+    private static final int DAYS_PER_WEEK = WorkoutDayOfWeek.values().length;
     private static final Map<WorkoutSplitType, List<WorkoutPlanDayResponse>> TEMPLATES = createTemplates();
 
     private final WorkoutPlanRepository workoutPlanRepository;
@@ -58,26 +61,43 @@ public class WorkoutPlanServiceImpl implements WorkoutPlanService {
     @Override
     @Transactional
     public WorkoutPlanResponse create(Long userId, CreateWorkoutPlanRequest request) {
-        List<WorkoutPlanDayRequest> days = validateDays(request);
-        User user = userRepository.findById(userId)
+        List<WorkoutPlanDayRequest> days = validateDays(request, true);
+        // A user-row lock serializes activation changes, including the first-plan case.
+        User user = userRepository.findByIdForUpdate(userId)
                 .orElseThrow(WorkoutPlanNotFoundException::new);
 
+        boolean shouldActivate = Boolean.TRUE.equals(request.getActive())
+                || (request.getActive() == null && !workoutPlanRepository.existsByUserIdAndActiveTrue(userId));
         WorkoutPlan plan = WorkoutPlan.builder()
                 .user(user)
                 .name(request.getName())
+                .description(request.getDescription())
                 .splitType(request.getSplitType())
+                .active(false)
                 .build();
         addDays(plan, days);
+        plan = workoutPlanRepository.save(plan);
 
-        return workoutPlanMapper.toResponse(workoutPlanRepository.save(plan));
+        if (shouldActivate) {
+            activatePlanForLockedUser(userId, plan);
+        }
+        return workoutPlanMapper.toResponse(plan);
     }
 
     @Override
     @Transactional(readOnly = true)
     public List<WorkoutPlanResponse> listForUser(Long userId) {
-        return workoutPlanRepository.findByUserIdOrderByCreatedAtDesc(userId).stream()
+        return workoutPlanRepository.findByUserIdOrderByActiveDescCreatedAtDesc(userId).stream()
                 .map(workoutPlanMapper::toResponse)
                 .toList();
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public WorkoutPlanResponse getActive(Long userId) {
+        WorkoutPlan plan = workoutPlanRepository.findFirstByUserIdAndActiveTrueOrderByUpdatedAtDesc(userId)
+                .orElseThrow(WorkoutPlanNotFoundException::new);
+        return workoutPlanMapper.toResponse(plan);
     }
 
     @Override
@@ -91,42 +111,85 @@ public class WorkoutPlanServiceImpl implements WorkoutPlanService {
     @Override
     @Transactional
     public WorkoutPlanResponse update(Long userId, Long planId, UpdateWorkoutPlanRequest request) {
-        List<WorkoutPlanDayRequest> requestedDays = validateDays(request);
+        List<WorkoutPlanDayRequest> requestedDays = validateDays(request, false);
         WorkoutPlan plan = findOwnedPlan(userId, planId);
         plan.setName(request.getName());
-        if (request.getSplitType() != null) {
-            plan.setSplitType(request.getSplitType());
-        }
+        plan.setDescription(request.getDescription());
+        plan.setSplitType(request.getSplitType());
 
         Map<WorkoutDayOfWeek, WorkoutPlanDay> existingDays = new EnumMap<>(WorkoutDayOfWeek.class);
         for (WorkoutPlanDay day : plan.getDays()) {
             existingDays.put(day.getDayOfWeek(), day);
         }
-        Set<WorkoutDayOfWeek> requestedWeekdays = new HashSet<>();
 
         for (WorkoutPlanDayRequest requestedDay : requestedDays) {
-            requestedWeekdays.add(requestedDay.getDayOfWeek());
             WorkoutPlanDay day = existingDays.get(requestedDay.getDayOfWeek());
             if (day == null) {
                 day = createDay(plan, requestedDay);
                 plan.getDays().add(day);
             } else {
-                day.setSessionType(requestedDay.getSessionType());
-                day.setName(requestedDay.getName());
+                applyDayRequest(day, requestedDay);
                 if (requestedDay.getExercises() != null) {
                     synchronizeExercises(day, requestedDay.getExercises());
                 }
             }
         }
 
-        plan.getDays().removeIf(day -> !requestedWeekdays.contains(day.getDayOfWeek()));
-        return workoutPlanMapper.toResponse(workoutPlanRepository.save(plan));
+        // validateDays has already guaranteed all weekdays, so old/unknown days cannot survive.
+        plan.getDays().removeIf(day -> !existingDays.containsKey(day.getDayOfWeek()));
+        if (request.getActive() != null) {
+            userRepository.findByIdForUpdate(userId).orElseThrow(WorkoutPlanNotFoundException::new);
+            if (request.getActive()) {
+                activatePlanForLockedUser(userId, plan);
+            } else {
+                plan.setActive(false);
+            }
+        }
+        WorkoutPlan savedPlan = workoutPlanRepository.save(plan);
+        if (requestedDays.size() < DAYS_PER_WEEK) {
+            List<WorkoutPlanDay> responseDays = requestedDays.stream()
+                    .map(requestedDay -> savedPlan.getDays().stream()
+                            .filter(day -> day.getDayOfWeek() == requestedDay.getDayOfWeek())
+                            .findFirst()
+                            .orElseThrow())
+                    .toList();
+            return workoutPlanMapper.toResponse(savedPlan, responseDays);
+        }
+        return workoutPlanMapper.toResponse(savedPlan);
+    }
+
+    @Override
+    @Transactional
+    public WorkoutPlanResponse duplicate(Long userId, Long planId, DuplicateWorkoutPlanRequest request) {
+        userRepository.findByIdForUpdate(userId).orElseThrow(WorkoutPlanNotFoundException::new);
+        WorkoutPlan source = findOwnedPlan(userId, planId);
+        WorkoutPlan copy = WorkoutPlan.builder()
+                .user(source.getUser())
+                .name(request.getName() == null ? copyName(source.getName()) : request.getName())
+                .description(source.getDescription())
+                .splitType(source.getSplitType())
+                .active(false)
+                .build();
+        source.getDays().stream()
+                .sorted(Comparator.comparing(WorkoutPlanDay::getDisplayOrder))
+                .forEach(day -> copy.getDays().add(copyDay(copy, day)));
+        return workoutPlanMapper.toResponse(workoutPlanRepository.save(copy));
+    }
+
+    @Override
+    @Transactional
+    public WorkoutPlanResponse activate(Long userId, Long planId) {
+        userRepository.findByIdForUpdate(userId).orElseThrow(WorkoutPlanNotFoundException::new);
+        WorkoutPlan target = findOwnedPlan(userId, planId);
+        activatePlanForLockedUser(userId, target);
+        return workoutPlanMapper.toResponse(workoutPlanRepository.save(target));
     }
 
     @Override
     @Transactional
     public void delete(Long userId, Long planId) {
-        workoutPlanRepository.delete(findOwnedPlan(userId, planId));
+        WorkoutPlan plan = findOwnedPlan(userId, planId);
+        workoutPlanRepository.delete(plan);
     }
 
     @Override
@@ -159,68 +222,226 @@ public class WorkoutPlanServiceImpl implements WorkoutPlanService {
                 && assignment.getRelationship().getStatus() == CoachClientRelationshipStatus.ACTIVE;
     }
 
-    private List<WorkoutPlanDayRequest> validateDays(WorkoutPlanRequest request) {
+    private void activatePlanForLockedUser(Long userId, WorkoutPlan target) {
+        for (WorkoutPlan plan : workoutPlanRepository.findByUserIdForUpdate(userId)) {
+            plan.setActive(plan.getId().equals(target.getId()));
+        }
+        // findByUserIdForUpdate returns the managed target; retain this assignment for clarity when
+        // a persistence provider returns a separate proxy instance.
+        target.setActive(true);
+    }
+
+    private List<WorkoutPlanDayRequest> validateDays(WorkoutPlanRequest request, boolean requireCompleteWeek) {
         List<WorkoutPlanDayRequest> days = request.getDays();
-        if (days == null || days.isEmpty() || days.size() > WorkoutDayOfWeek.values().length) {
+        if (days == null || days.isEmpty() || days.size() > DAYS_PER_WEEK) {
             throw new IllegalArgumentException("A workout plan must contain between one and seven days");
         }
 
-        Set<WorkoutDayOfWeek> weekdays = new HashSet<>();
+        Map<WorkoutDayOfWeek, WorkoutPlanDayRequest> dayMap = new EnumMap<>(WorkoutDayOfWeek.class);
+        Set<Integer> displayOrders = new HashSet<>();
         for (WorkoutPlanDayRequest day : days) {
+            if (day == null) {
+                throw new IllegalArgumentException("Each day configuration may not be null");
+            }
             if (day.getDayOfWeek() == null) {
                 throw new IllegalArgumentException("Each day requires a weekday");
             }
-            if (day.getSessionType() == null) {
-                day.setSessionType(inferSessionType(day.getName()));
-            }
-            if (!weekdays.add(day.getDayOfWeek())) {
+            if (dayMap.putIfAbsent(day.getDayOfWeek(), day) != null) {
                 throw new IllegalArgumentException("Each weekday may appear only once");
             }
+            if (day.getDisplayOrder() == null) {
+                day.setDisplayOrder(day.getDayOfWeek().getOrder());
+            }
+            if (!displayOrders.add(day.getDisplayOrder())) {
+                throw new IllegalArgumentException("Each display order may appear only once");
+            }
+            normalizeDayConfiguration(day);
             validateExercises(day.getExercises());
         }
 
-        if (request.getSplitType() == null) {
-            request.setSplitType(inferSplitType(days));
+        if (requireCompleteWeek) {
+            List<WorkoutPlanDayRequest> normalizedDays = new ArrayList<>(DAYS_PER_WEEK);
+            for (WorkoutDayOfWeek weekday : WorkoutDayOfWeek.values()) {
+                WorkoutPlanDayRequest day = dayMap.get(weekday);
+                if (day == null) {
+                    day = new WorkoutPlanDayRequest();
+                    day.setDayOfWeek(weekday);
+                    day.setDisplayOrder(weekday.getOrder());
+                    day.setSessionType(defaultSessionTypeForWeekday(weekday, request.getName(), request.getSplitType()));
+                    day.setName(defaultWorkoutNameForWeekday(weekday));
+                    dayMap.put(weekday, day);
+                }
+                normalizedDays.add(day);
+            }
+            request.setDays(normalizedDays);
+            if (request.getSplitType() == null) {
+                request.setSplitType(inferSplitType(normalizedDays, request.getName()));
+            }
+            return normalizedDays;
         }
 
+        if (request.getSplitType() == null) {
+            request.setSplitType(inferSplitType(days, request.getName()));
+        }
         return days;
     }
 
-    private WorkoutSessionType inferSessionType(String dayName) {
-        if (dayName == null || dayName.isBlank()) {
-            return WorkoutSessionType.FULL_BODY;
+    private void normalizeDayConfiguration(WorkoutPlanDayRequest day) {
+        if (day.getSessionType() == null) {
+            WorkoutSessionType inferred = inferSessionTypeFromText(day.getName());
+            if (inferred != null) {
+                day.setSessionType(inferred);
+            }
         }
-        String lower = dayName.toLowerCase();
-        if (lower.contains("push")) {
-            return WorkoutSessionType.PUSH;
-        } else if (lower.contains("pull")) {
-            return WorkoutSessionType.PULL;
-        } else if (lower.contains("leg")) {
-            return WorkoutSessionType.LEGS;
-        } else if (lower.contains("upper")) {
-            return WorkoutSessionType.UPPER;
-        } else if (lower.contains("lower")) {
-            return WorkoutSessionType.LOWER;
-        } else if (lower.contains("rest")) {
-            return WorkoutSessionType.REST;
+        boolean restDay = Boolean.TRUE.equals(day.getRestDay()) || day.getSessionType() == WorkoutSessionType.REST;
+        day.setRestDay(restDay);
+        if (restDay) {
+            day.setSessionType(WorkoutSessionType.REST);
+            day.setName(null);
+            return;
         }
-        return WorkoutSessionType.FULL_BODY;
+        if (day.getSessionType() == null && (day.getName() == null || day.getName().isBlank())) {
+            throw new IllegalArgumentException("A non-rest day requires a workout type or custom workout name");
+        }
     }
 
-    private WorkoutSplitType inferSplitType(List<WorkoutPlanDayRequest> days) {
+    private WorkoutSessionType inferSessionTypeFromText(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        String normalized = value.toLowerCase();
+        if (normalized.contains("rest")) return WorkoutSessionType.REST;
+        if (normalized.contains("push")) return WorkoutSessionType.PUSH;
+        if (normalized.contains("pull")) return WorkoutSessionType.PULL;
+        if (normalized.contains("legs")) return WorkoutSessionType.LEGS;
+        if (normalized.contains("upper")) return WorkoutSessionType.UPPER;
+        if (normalized.contains("lower")) return WorkoutSessionType.LOWER;
+        if (normalized.contains("full body")) return WorkoutSessionType.FULL_BODY;
+        if (normalized.contains("bent arm")) return WorkoutSessionType.BENT_ARM;
+        if (normalized.contains("straight arm")) return WorkoutSessionType.STRAIGHT_ARM;
+        if (normalized.contains("planche")) return WorkoutSessionType.PLANCHE;
+        if (normalized.contains("front lever")) return WorkoutSessionType.FRONT_LEVER;
+        if (normalized.contains("handstand")) return WorkoutSessionType.HANDSTAND;
+        if (normalized.contains("skill")) return WorkoutSessionType.SKILL_TRAINING;
+        if (normalized.contains("strength")) return WorkoutSessionType.STRENGTH;
+        if (normalized.contains("hypertrophy")) return WorkoutSessionType.HYPERTROPHY;
+        if (normalized.contains("mobility")) return WorkoutSessionType.MOBILITY;
+        if (normalized.contains("conditioning")) return WorkoutSessionType.CONDITIONING;
+        if (normalized.contains("custom")) return WorkoutSessionType.CUSTOM;
+        return null;
+    }
+
+    private WorkoutSessionType defaultSessionTypeForWeekday(
+            WorkoutDayOfWeek weekday, String planName, WorkoutSplitType splitType) {
+        if (planName != null) {
+            String normalized = planName.toLowerCase();
+            if (normalized.contains("push") && normalized.contains("pull") && normalized.contains("legs")) {
+                return switch (weekday) {
+                    case MONDAY, THURSDAY -> WorkoutSessionType.PUSH;
+                    case TUESDAY, FRIDAY -> WorkoutSessionType.PULL;
+                    case WEDNESDAY, SATURDAY -> WorkoutSessionType.LEGS;
+                    case SUNDAY -> WorkoutSessionType.REST;
+                };
+            }
+            if (normalized.contains("upper") && normalized.contains("lower")) {
+                return switch (weekday) {
+                    case MONDAY, THURSDAY -> WorkoutSessionType.UPPER;
+                    case TUESDAY, FRIDAY -> WorkoutSessionType.LOWER;
+                    case WEDNESDAY, SATURDAY -> WorkoutSessionType.REST;
+                    case SUNDAY -> WorkoutSessionType.REST;
+                };
+            }
+            if (normalized.contains("full body")) {
+                return switch (weekday) {
+                    case MONDAY, WEDNESDAY, FRIDAY, SUNDAY -> WorkoutSessionType.FULL_BODY;
+                    case TUESDAY, THURSDAY, SATURDAY -> WorkoutSessionType.REST;
+                };
+            }
+        }
+        if (splitType != null) {
+            return switch (splitType) {
+                case PPL -> switch (weekday) {
+                    case MONDAY, THURSDAY -> WorkoutSessionType.PUSH;
+                    case TUESDAY, FRIDAY -> WorkoutSessionType.PULL;
+                    case WEDNESDAY, SATURDAY -> WorkoutSessionType.LEGS;
+                    case SUNDAY -> WorkoutSessionType.REST;
+                };
+                case UPPER_LOWER -> switch (weekday) {
+                    case MONDAY, THURSDAY -> WorkoutSessionType.UPPER;
+                    case TUESDAY, FRIDAY -> WorkoutSessionType.LOWER;
+                    case WEDNESDAY, SATURDAY -> WorkoutSessionType.REST;
+                    case SUNDAY -> WorkoutSessionType.REST;
+                };
+                case FULL_BODY -> switch (weekday) {
+                    case MONDAY, WEDNESDAY, FRIDAY, SUNDAY -> WorkoutSessionType.FULL_BODY;
+                    case TUESDAY, THURSDAY, SATURDAY -> WorkoutSessionType.REST;
+                };
+                case CUSTOM -> switch (weekday) {
+                    case MONDAY, THURSDAY -> WorkoutSessionType.PUSH;
+                    case TUESDAY, FRIDAY -> WorkoutSessionType.PULL;
+                    case WEDNESDAY, SATURDAY -> WorkoutSessionType.LEGS;
+                    case SUNDAY -> WorkoutSessionType.REST;
+                };
+            };
+        }
+        return switch (weekday) {
+            case MONDAY, THURSDAY -> WorkoutSessionType.PUSH;
+            case TUESDAY, FRIDAY -> WorkoutSessionType.PULL;
+            case WEDNESDAY, SATURDAY -> WorkoutSessionType.LEGS;
+            case SUNDAY -> WorkoutSessionType.REST;
+        };
+    }
+
+    private String defaultWorkoutNameForWeekday(WorkoutDayOfWeek weekday) {
+        return switch (weekday) {
+            case MONDAY -> "Push Day";
+            case TUESDAY -> "Pull Day";
+            case WEDNESDAY -> "Legs Day";
+            case THURSDAY -> "Push Day";
+            case FRIDAY -> "Pull Day";
+            case SATURDAY -> "Legs Day";
+            case SUNDAY -> "Rest Day";
+        };
+    }
+
+    private WorkoutSplitType inferSplitType(List<WorkoutPlanDayRequest> days, String planName) {
+        if (planName != null) {
+            String normalized = planName.toLowerCase();
+            if (normalized.contains("push") && normalized.contains("pull") && normalized.contains("legs")) {
+                return WorkoutSplitType.PPL;
+            }
+            if (normalized.contains("upper") && normalized.contains("lower")) {
+                return WorkoutSplitType.UPPER_LOWER;
+            }
+            if (normalized.contains("full body")) {
+                return WorkoutSplitType.FULL_BODY;
+            }
+        }
+
         boolean hasPpl = false;
         boolean hasUpperLower = false;
+        boolean hasCustomCategory = false;
         for (WorkoutPlanDayRequest day : days) {
-            WorkoutSessionType st = day.getSessionType();
-            if (st == WorkoutSessionType.PUSH || st == WorkoutSessionType.PULL || st == WorkoutSessionType.LEGS) {
-                hasPpl = true;
-            } else if (st == WorkoutSessionType.UPPER || st == WorkoutSessionType.LOWER) {
-                hasUpperLower = true;
+            WorkoutSessionType type = day.getSessionType();
+            if (type == null) {
+                hasCustomCategory = true;
+                continue;
             }
+            if (type == WorkoutSessionType.PUSH || type == WorkoutSessionType.PULL || type == WorkoutSessionType.LEGS) {
+                hasPpl = true;
+            } else if (type == WorkoutSessionType.UPPER || type == WorkoutSessionType.LOWER) {
+                hasUpperLower = true;
+            } else if (type != WorkoutSessionType.FULL_BODY && type != WorkoutSessionType.REST) {
+                hasCustomCategory = true;
+            }
+        }
+        if (hasCustomCategory || (hasPpl && hasUpperLower)) {
+            return WorkoutSplitType.CUSTOM;
         }
         if (hasPpl) {
             return WorkoutSplitType.PPL;
-        } else if (hasUpperLower) {
+        }
+        if (hasUpperLower) {
             return WorkoutSplitType.UPPER_LOWER;
         }
         return WorkoutSplitType.FULL_BODY;
@@ -268,12 +489,50 @@ public class WorkoutPlanServiceImpl implements WorkoutPlanService {
     private WorkoutPlanDay createDay(WorkoutPlan plan, WorkoutPlanDayRequest request) {
         WorkoutPlanDay day = WorkoutPlanDay.builder()
                 .workoutPlan(plan)
-                .dayOfWeek(request.getDayOfWeek())
-                .sessionType(request.getSessionType())
-                .name(request.getName())
                 .build();
+        applyDayRequest(day, request);
         synchronizeExercises(day, request.getExercises());
         return day;
+    }
+
+    private void applyDayRequest(WorkoutPlanDay day, WorkoutPlanDayRequest request) {
+        day.setDayOfWeek(request.getDayOfWeek());
+        day.setSessionType(request.getSessionType());
+        day.setName(request.getName());
+        day.setDescription(request.getDescription());
+        day.setRestDay(Boolean.TRUE.equals(request.getRestDay()));
+        day.setDisplayOrder(request.getDisplayOrder());
+    }
+
+    private WorkoutPlanDay copyDay(WorkoutPlan targetPlan, WorkoutPlanDay sourceDay) {
+        WorkoutPlanDay copy = WorkoutPlanDay.builder()
+                .workoutPlan(targetPlan)
+                .dayOfWeek(sourceDay.getDayOfWeek())
+                .sessionType(sourceDay.getSessionType())
+                .name(sourceDay.getName())
+                .description(sourceDay.getDescription())
+                .restDay(sourceDay.isRestDay())
+                .displayOrder(sourceDay.getDisplayOrder())
+                .build();
+        sourceDay.getExercises().stream()
+                .sorted(Comparator.comparing(WorkoutPlanExercise::getDisplayOrder))
+                .forEach(sourceExercise -> copy.getExercises().add(WorkoutPlanExercise.builder()
+                        .workoutPlanDay(copy)
+                        .exercise(sourceExercise.getExercise())
+                        .sets(sourceExercise.getSets())
+                        .reps(sourceExercise.getReps())
+                        .durationSeconds(sourceExercise.getDurationSeconds())
+                        .restSeconds(sourceExercise.getRestSeconds())
+                        .displayOrder(sourceExercise.getDisplayOrder())
+                        .notes(sourceExercise.getNotes())
+                        .build()));
+        return copy;
+    }
+
+    private String copyName(String sourceName) {
+        String prefix = "Copy of ";
+        String copy = prefix + sourceName;
+        return copy.length() <= 100 ? copy : copy.substring(0, 100);
     }
 
     /**
@@ -395,11 +654,17 @@ public class WorkoutPlanServiceImpl implements WorkoutPlanService {
     }
 
     private static List<WorkoutPlanDayResponse> sessions(WorkoutSessionType... sessionTypes) {
-        List<WorkoutPlanDayResponse> days = new ArrayList<>(WorkoutDayOfWeek.values().length);
+        List<WorkoutPlanDayResponse> days = new ArrayList<>(DAYS_PER_WEEK);
         for (WorkoutDayOfWeek day : WorkoutDayOfWeek.values()) {
+            WorkoutSessionType type = sessionTypes[day.getOrder() - 1];
+            boolean rest = type == WorkoutSessionType.REST;
             days.add(WorkoutPlanDayResponse.builder()
                     .dayOfWeek(day)
-                    .sessionType(sessionTypes[day.getOrder() - 1])
+                    .sessionType(type)
+                    .workoutType(type)
+                    .workoutName(rest ? "Rest Day" : type.name().replace('_', ' '))
+                    .restDay(rest)
+                    .displayOrder(day.getOrder())
                     .exercises(List.of())
                     .build());
         }

@@ -2,6 +2,7 @@ package com.calisthenics.backend.workoutplan.controller;
 
 import com.calisthenics.backend.security.UserPrincipal;
 import com.calisthenics.backend.workoutplan.dto.request.CreateWorkoutPlanRequest;
+import com.calisthenics.backend.workoutplan.dto.request.DuplicateWorkoutPlanRequest;
 import com.calisthenics.backend.workoutplan.dto.request.UpdateWorkoutPlanRequest;
 import com.calisthenics.backend.workoutplan.dto.response.WorkoutPlanResponse;
 import com.calisthenics.backend.workoutplan.dto.response.WorkoutPlanTemplateResponse;
@@ -39,6 +40,11 @@ public class WorkoutPlanController {
         return ResponseEntity.ok(workoutPlanService.listForUser(currentUser.getId()));
     }
 
+    @GetMapping("/active")
+    public ResponseEntity<WorkoutPlanResponse> active(@AuthenticationPrincipal UserPrincipal currentUser) {
+        return ResponseEntity.ok(workoutPlanService.getActive(currentUser.getId()));
+    }
+
     @GetMapping("/templates")
     public ResponseEntity<List<WorkoutPlanTemplateResponse>> templates() {
         return ResponseEntity.ok(workoutPlanService.getTemplates());
@@ -57,6 +63,22 @@ public class WorkoutPlanController {
             @PathVariable Long id,
             @Valid @RequestBody UpdateWorkoutPlanRequest request) {
         return ResponseEntity.ok(workoutPlanService.update(currentUser.getId(), id, request));
+    }
+
+    @PostMapping("/{id}/duplicate")
+    public ResponseEntity<WorkoutPlanResponse> duplicate(
+            @AuthenticationPrincipal UserPrincipal currentUser,
+            @PathVariable Long id,
+            @Valid @RequestBody(required = false) DuplicateWorkoutPlanRequest request) {
+        return ResponseEntity.status(HttpStatus.CREATED).body(workoutPlanService.duplicate(
+                currentUser.getId(), id, request == null ? new DuplicateWorkoutPlanRequest() : request));
+    }
+
+    @PatchMapping("/{id}/activate")
+    public ResponseEntity<WorkoutPlanResponse> activate(
+            @AuthenticationPrincipal UserPrincipal currentUser,
+            @PathVariable Long id) {
+        return ResponseEntity.ok(workoutPlanService.activate(currentUser.getId(), id));
     }
 
     @DeleteMapping("/{id}")
