@@ -74,14 +74,11 @@ public class TodayWorkoutResolver {
                         .ifPresent(day -> coachPlans.putIfAbsent(
                                 plan.getId(), new ResolvedWorkout(plan, day, assignment)));
             }
-            List<ResolvedWorkout> personalPlans = resolvePersonalPlans(clientId, date);
-            List<ResolvedWorkout> candidates = new ArrayList<>(coachPlans.values());
-            candidates.addAll(personalPlans);
-            if (!candidates.isEmpty()) {
+            if (!coachPlans.isEmpty()) {
                 return new ResolutionCandidates(
                         true,
-                        !coachPlans.isEmpty() ? WorkoutSessionSource.COACH : WorkoutSessionSource.PERSONAL,
-                        List.copyOf(candidates));
+                        WorkoutSessionSource.COACH,
+                        List.copyOf(coachPlans.values()));
             }
         }
 
