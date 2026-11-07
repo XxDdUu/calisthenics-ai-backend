@@ -58,7 +58,7 @@ public class AnalysisService {
 
         AiVideoAnalysisResponseDto aiResult = aiServiceClient.analyzeVideo(file, 5);
 
-        return saveVideoAnalysis(userId, exerciseId, mediaUrl, aiResult);
+        return saveVideoAnalysis(userId, exerciseId, mediaUrl, file.getSize(), aiResult);
     }
 
     @Transactional(readOnly = true)
@@ -135,7 +135,7 @@ public class AnalysisService {
         return mapToResponse(saved);
     }
 
-    private AnalysisResponse saveVideoAnalysis(Long userId, Long exerciseId, String mediaUrl, AiVideoAnalysisResponseDto aiResult) {
+    private AnalysisResponse saveVideoAnalysis(Long userId, Long exerciseId, String mediaUrl, long fileSizeBytes, AiVideoAnalysisResponseDto aiResult) {
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> new RuntimeException("User not found with id: " + userId));
 
@@ -148,12 +148,76 @@ public class AnalysisService {
         BigDecimal holdDurationSeconds = null;
         List<String> feedbackList = new ArrayList<>();
 
+        // Video metadata
+        Long videoDurationMs = null;
+        Integer videoWidth = null;
+        Integer videoHeight = null;
+        BigDecimal originalFps = null;
+        Integer totalFrames = null;
+        Integer analyzedFrames = null;
+        BigDecimal samplingFps = null;
+        BigDecimal processingTimeMs = null;
+
+        // Biomechanical JSON blobs
+        String componentScoresJson = null;
+        String stabilityJson = null;
+        String timelineJson = null;
+
         if (aiResult != null) {
             overallScore = aiResult.getAverageFormScore() != null ? aiResult.getAverageFormScore() : aiResult.getPeakFormScore();
             holdDurationSeconds = aiResult.getValidHoldDurationSec() != null ? aiResult.getValidHoldDurationSec() : aiResult.getTotalHoldDurationSec();
 
             if (aiResult.getSummaryFeedback() != null) feedbackList.addAll(aiResult.getSummaryFeedback());
             if (aiResult.getKeyRecommendations() != null) feedbackList.addAll(aiResult.getKeyRecommendations());
+
+            processingTimeMs = aiResult.getProcessingTimeMs();
+
+            // Extract video metadata from dedicated block if available, fall back to legacy flat fields
+            if (aiResult.getVideoMetadata() != null) {
+                var meta = aiResult.getVideoMetadata();
+                videoDurationMs = meta.getDurationMs();
+                videoWidth = meta.getWidth();
+                videoHeight = meta.getHeight();
+                originalFps = meta.getOriginalFps();
+                totalFrames = meta.getTotalFrames();
+                analyzedFrames = meta.getAnalyzedFrames();
+                samplingFps = meta.getSamplingFps();
+                // file_size_bytes comes from meta if available; we also have it from the actual MultipartFile
+            } else {
+                // Fallback to legacy flat fields
+                if (aiResult.getDurationSec() != null) {
+                    videoDurationMs = aiResult.getDurationSec().multiply(BigDecimal.valueOf(1000)).longValue();
+                }
+                originalFps = aiResult.getFps();
+                totalFrames = aiResult.getTotalFrames();
+            }
+
+            // Serialize component scores map to JSON
+            if (aiResult.getComponentScores() != null && !aiResult.getComponentScores().isEmpty()) {
+                try {
+                    componentScoresJson = objectMapper.writeValueAsString(aiResult.getComponentScores());
+                } catch (JsonProcessingException e) {
+                    log.error("Error serializing component scores to JSON", e);
+                }
+            }
+
+            // Serialize stability metrics to JSON
+            if (aiResult.getStability() != null) {
+                try {
+                    stabilityJson = objectMapper.writeValueAsString(aiResult.getStability());
+                } catch (JsonProcessingException e) {
+                    log.error("Error serializing stability metrics to JSON", e);
+                }
+            }
+
+            // Serialize timeline to JSON (may be large; store as TEXT)
+            if (aiResult.getTimeline() != null && !aiResult.getTimeline().isEmpty()) {
+                try {
+                    timelineJson = objectMapper.writeValueAsString(aiResult.getTimeline());
+                } catch (JsonProcessingException e) {
+                    log.error("Error serializing timeline to JSON", e);
+                }
+            }
         }
 
         String formFeedback = feedbackList.isEmpty() ? null : String.join("; ", feedbackList);
@@ -170,6 +234,20 @@ public class AnalysisService {
                 .bodyLineAngle(null)
                 .shoulderLeanAngle(null)
                 .rawKeypointsJson(null)
+                // Video metadata
+                .videoDurationMs(videoDurationMs)
+                .videoWidth(videoWidth)
+                .videoHeight(videoHeight)
+                .originalFps(originalFps)
+                .totalFrames(totalFrames)
+                .analyzedFrames(analyzedFrames)
+                .samplingFps(samplingFps)
+                .fileSizeBytes(fileSizeBytes)
+                .processingTimeMs(processingTimeMs)
+                // Biomechanical data blobs
+                .componentScoresJson(componentScoresJson)
+                .stabilityJson(stabilityJson)
+                .timelineJson(timelineJson)
                 .build();
 
         Analysis saved = analysisRepository.save(analysis);
@@ -192,6 +270,20 @@ public class AnalysisService {
                 .shoulderLeanAngle(analysis.getShoulderLeanAngle())
                 .rawKeypointsJson(analysis.getRawKeypointsJson())
                 .createdAt(analysis.getCreatedAt())
+                // Video metadata
+                .videoDurationMs(analysis.getVideoDurationMs())
+                .videoWidth(analysis.getVideoWidth())
+                .videoHeight(analysis.getVideoHeight())
+                .originalFps(analysis.getOriginalFps())
+                .totalFrames(analysis.getTotalFrames())
+                .analyzedFrames(analysis.getAnalyzedFrames())
+                .samplingFps(analysis.getSamplingFps())
+                .fileSizeBytes(analysis.getFileSizeBytes())
+                .processingTimeMs(analysis.getProcessingTimeMs())
+                // Biomechanical JSON blobs
+                .componentScoresJson(analysis.getComponentScoresJson())
+                .stabilityJson(analysis.getStabilityJson())
+                .timelineJson(analysis.getTimelineJson())
                 .build();
         return "IMAGE".equals(analysis.getMediaType()) ? ImageAnalysisResponse.from(response) : response;
     }
