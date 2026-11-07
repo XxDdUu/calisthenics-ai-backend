@@ -2,6 +2,7 @@ package com.calisthenics.backend.workoutplan.service.impl;
 
 import com.calisthenics.backend.coachclient.entity.WorkoutPlanAssignment;
 import com.calisthenics.backend.coachclient.repository.WorkoutPlanAssignmentRepository;
+import com.calisthenics.backend.coachclient.repository.CoachClientRelationshipRepository;
 import com.calisthenics.backend.coachclient.type.CoachClientRelationshipStatus;
 import com.calisthenics.backend.coachclient.type.WorkoutPlanAssignmentStatus;
 import com.calisthenics.backend.exercise.Exercise;
@@ -57,6 +58,7 @@ public class WorkoutPlanServiceImpl implements WorkoutPlanService {
     private final ExerciseRepository exerciseRepository;
     private final WorkoutPlanMapper workoutPlanMapper;
     private final WorkoutPlanAssignmentRepository assignmentRepository;
+    private final CoachClientRelationshipRepository relationshipRepository;
 
     @Override
     @Transactional
@@ -90,6 +92,15 @@ public class WorkoutPlanServiceImpl implements WorkoutPlanService {
         return workoutPlanRepository.findByUserIdOrderByActiveDescCreatedAtDesc(userId).stream()
                 .map(workoutPlanMapper::toResponse)
                 .toList();
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public List<WorkoutPlanResponse> listForAuthorizedClient(Long coachId, Long clientId) {
+        if (relationshipRepository.findActiveRelationshipForUsers(coachId, clientId).isEmpty()) {
+            throw new WorkoutPlanNotFoundException();
+        }
+        return listForUser(clientId);
     }
 
     @Override

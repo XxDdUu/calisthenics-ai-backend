@@ -85,6 +85,14 @@ public class WorkoutPlanAssignmentServiceImpl implements WorkoutPlanAssignmentSe
     }
 
     @Override
+    @Transactional(readOnly = true)
+    public List<WorkoutPlanAssignmentResponse> listForCoach(Long coachId) {
+        return assignmentRepository.findByCoachIdOrderByCreatedAtDesc(coachId).stream()
+                .map(this::toResponse)
+                .toList();
+    }
+
+    @Override
     @Transactional
     public WorkoutPlanAssignmentResponse update(
             Long coachId, Long relationshipId, Long assignmentId,

@@ -14,6 +14,8 @@ public interface WorkoutPlanService {
 
     List<WorkoutPlanResponse> listForUser(Long userId);
 
+    List<WorkoutPlanResponse> listForAuthorizedClient(Long coachId, Long clientId);
+
     WorkoutPlanResponse getActive(Long userId);
 
     WorkoutPlanResponse get(Long userId, Long planId);

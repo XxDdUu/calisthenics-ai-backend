@@ -15,6 +15,8 @@ public interface WorkoutPlanAssignmentService {
 
     List<WorkoutPlanAssignmentResponse> listForClient(Long clientId);
 
+    List<WorkoutPlanAssignmentResponse> listForCoach(Long coachId);
+
     WorkoutPlanAssignmentResponse update(
             Long coachId, Long relationshipId, Long assignmentId, UpdateWorkoutPlanAssignmentRequest request);
 }

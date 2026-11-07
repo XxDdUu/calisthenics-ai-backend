@@ -20,6 +20,22 @@ public interface WorkoutPlanAssignmentRepository extends JpaRepository<WorkoutPl
     List<WorkoutPlanAssignment> findByClientIdOrderByCreatedAtDesc(Long clientId);
 
     @EntityGraph(attributePaths = {"workoutPlan", "workoutPlan.days", "coach", "client", "relationship"})
+    List<WorkoutPlanAssignment> findByCoachIdOrderByCreatedAtDesc(Long coachId);
+
+    @EntityGraph(attributePaths = {"workoutPlan", "workoutPlan.days", "coach", "client", "relationship"})
+    List<WorkoutPlanAssignment> findByCoachIdAndClientIdOrderByCreatedAtDesc(Long coachId, Long clientId);
+
+    @EntityGraph(attributePaths = {"workoutPlan", "workoutPlan.days", "coach", "client", "relationship"})
+    Optional<WorkoutPlanAssignment> findByIdAndCoachId(Long id, Long coachId);
+
+    @EntityGraph(attributePaths = {"workoutPlan", "workoutPlan.days", "coach", "client", "relationship"})
+    Optional<WorkoutPlanAssignment> findByIdAndClientId(Long id, Long clientId);
+
+    @EntityGraph(attributePaths = {"workoutPlan", "workoutPlan.days", "coach", "client", "relationship"})
+    Optional<WorkoutPlanAssignment> findFirstByClientIdAndStatusOrderByCreatedAtDesc(
+            Long clientId, WorkoutPlanAssignmentStatus status);
+
+    @EntityGraph(attributePaths = {"workoutPlan", "workoutPlan.days", "coach", "client", "relationship"})
     List<WorkoutPlanAssignment> findByRelationshipIdOrderByCreatedAtDesc(Long relationshipId);
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)

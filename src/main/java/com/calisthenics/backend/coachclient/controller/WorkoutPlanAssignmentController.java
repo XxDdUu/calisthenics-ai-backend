@@ -52,4 +52,10 @@ public class WorkoutPlanAssignmentController {
             @AuthenticationPrincipal UserPrincipal currentUser) {
         return ResponseEntity.ok(assignmentService.listForClient(currentUser.getId()));
     }
+
+    @GetMapping("/coach/me/workout-plan-assignments")
+    public ResponseEntity<List<WorkoutPlanAssignmentResponse>> listForCurrentCoach(
+            @AuthenticationPrincipal UserPrincipal currentUser) {
+        return ResponseEntity.ok(assignmentService.listForCoach(currentUser.getId()));
+    }
 }

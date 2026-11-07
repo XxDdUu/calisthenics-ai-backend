@@ -40,6 +40,18 @@ public class WorkoutPlanController {
         return ResponseEntity.ok(workoutPlanService.listForUser(currentUser.getId()));
     }
 
+    @GetMapping("/personal")
+    public ResponseEntity<List<WorkoutPlanResponse>> personal(@AuthenticationPrincipal UserPrincipal currentUser) {
+        return ResponseEntity.ok(workoutPlanService.listForUser(currentUser.getId()));
+    }
+
+    @GetMapping("/clients/{clientId}/personal")
+    public ResponseEntity<List<WorkoutPlanResponse>> clientPersonal(
+            @AuthenticationPrincipal UserPrincipal currentUser,
+            @PathVariable Long clientId) {
+        return ResponseEntity.ok(workoutPlanService.listForAuthorizedClient(currentUser.getId(), clientId));
+    }
+
     @GetMapping("/active")
     public ResponseEntity<WorkoutPlanResponse> active(@AuthenticationPrincipal UserPrincipal currentUser) {
         return ResponseEntity.ok(workoutPlanService.getActive(currentUser.getId()));

@@ -20,8 +20,10 @@ public class WorkoutPlanAssignmentResponse {
     private Long relationshipId;
     private Long coachId;
     private String coachName;
+    private String coachAvatarUrl;
     private Long clientId;
     private String clientName;
+    private String clientAvatarUrl;
     private WorkoutPlanAssignmentStatus status;
     private LocalDate startDate;
     private LocalDate endDate;
