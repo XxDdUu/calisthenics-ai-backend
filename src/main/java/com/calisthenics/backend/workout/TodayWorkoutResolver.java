@@ -74,12 +74,25 @@ public class TodayWorkoutResolver {
                         .ifPresent(day -> coachPlans.putIfAbsent(
                                 plan.getId(), new ResolvedWorkout(plan, day, assignment)));
             }
-            if (!coachPlans.isEmpty()) {
+            List<ResolvedWorkout> personalPlans = resolvePersonalPlans(clientId, date);
+            List<ResolvedWorkout> candidates = new ArrayList<>(coachPlans.values());
+            candidates.addAll(personalPlans);
+            if (!candidates.isEmpty()) {
                 return new ResolutionCandidates(
-                        true, WorkoutSessionSource.COACH, List.copyOf(coachPlans.values()));
+                        true,
+                        !coachPlans.isEmpty() ? WorkoutSessionSource.COACH : WorkoutSessionSource.PERSONAL,
+                        List.copyOf(candidates));
             }
         }
 
+        List<ResolvedWorkout> personalPlans = resolvePersonalPlans(clientId, date);
+        return new ResolutionCandidates(
+                activeCoach != null,
+                personalPlans.isEmpty() ? WorkoutSessionSource.NONE : WorkoutSessionSource.PERSONAL,
+                List.copyOf(personalPlans));
+    }
+
+    private List<ResolvedWorkout> resolvePersonalPlans(Long clientId, LocalDate date) {
         // A saved active personal plan is the default weekly split. The former "all personal
         // plans are candidates" behavior is retained only as a fallback for legacy users who
         // have no active plan yet.
@@ -90,10 +103,7 @@ public class TodayWorkoutResolver {
                         addDayForDate(personalPlans, plan, date);
                     }
                 });
-        return new ResolutionCandidates(
-                activeCoach != null,
-                personalPlans.isEmpty() ? WorkoutSessionSource.NONE : WorkoutSessionSource.PERSONAL,
-                List.copyOf(personalPlans));
+        return personalPlans;
     }
 
     private void addDayForDate(List<ResolvedWorkout> results, WorkoutPlan plan, LocalDate date) {
