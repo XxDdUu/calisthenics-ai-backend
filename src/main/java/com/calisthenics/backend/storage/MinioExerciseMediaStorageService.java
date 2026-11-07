@@ -100,9 +100,37 @@ public class MinioExerciseMediaStorageService {
     }
 
     public InputStream open(String objectName) {
+        return open(objectName, null, null);
+    }
+
+    public InputStream open(String objectName, Long offset, Long length) {
         String validName = validateObjectName(objectName);
         try {
-            return requireClient().getObject(GetObjectArgs.builder()
+            GetObjectArgs.Builder builder = GetObjectArgs.builder()
+                    .bucket(bucket)
+                    .object(validName);
+            if (offset != null) {
+                builder.offset(offset);
+            }
+            if (length != null) {
+                builder.length(length);
+            }
+            return requireClient().getObject(builder.build());
+        } catch (ErrorResponseException exception) {
+            if (exception.errorResponse() != null
+                    && "NoSuchKey".equals(exception.errorResponse().code())) {
+                throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Exercise media was not found.");
+            }
+            throw unavailable(exception);
+        } catch (Exception exception) {
+            throw unavailable(exception);
+        }
+    }
+
+    public StatObjectResponse stat(String objectName) {
+        String validName = validateObjectName(objectName);
+        try {
+            return requireClient().statObject(StatObjectArgs.builder()
                     .bucket(bucket)
                     .object(validName)
                     .build());
@@ -118,22 +146,7 @@ public class MinioExerciseMediaStorageService {
     }
 
     public String contentType(String objectName) {
-        String validName = validateObjectName(objectName);
-        try {
-            StatObjectResponse metadata = requireClient().statObject(StatObjectArgs.builder()
-                    .bucket(bucket)
-                    .object(validName)
-                    .build());
-            return metadata.contentType();
-        } catch (ErrorResponseException exception) {
-            if (exception.errorResponse() != null
-                    && "NoSuchKey".equals(exception.errorResponse().code())) {
-                throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Exercise media was not found.");
-            }
-            throw unavailable(exception);
-        } catch (Exception exception) {
-            throw unavailable(exception);
-        }
+        return stat(objectName).contentType();
     }
 
     private MinioClient requireClient() {

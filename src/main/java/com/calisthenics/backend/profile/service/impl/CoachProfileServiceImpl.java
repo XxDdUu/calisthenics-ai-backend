@@ -141,7 +141,10 @@ public class CoachProfileServiceImpl implements CoachProfileService {
 
         long activeClients = relationshipRepository.countByCoachIdAndStatus(coachId, CoachClientRelationshipStatus.ACTIVE);
         long completedClients = relationshipRepository.countByCoachIdAndStatusIn(
-                coachId, List.of(CoachClientRelationshipStatus.CANCELLED, CoachClientRelationshipStatus.REJECTED));
+                coachId, List.of(
+                        CoachClientRelationshipStatus.CANCELLED,
+                        CoachClientRelationshipStatus.REJECTED,
+                        CoachClientRelationshipStatus.TERMINATED));
         long assignedPlans = assignmentRepository.countByCoachIdAndStatus(coachId, WorkoutPlanAssignmentStatus.ACTIVE);
 
         String connectionStatus = null;
@@ -162,6 +165,10 @@ public class CoachProfileServiceImpl implements CoachProfileService {
             if (relOpt.isEmpty()) {
                 relOpt = relationshipRepository.findRelationshipForUsers(
                         coachId, viewerUserId, CoachClientRelationshipStatus.CANCELLED);
+            }
+            if (relOpt.isEmpty()) {
+                relOpt = relationshipRepository.findRelationshipForUsers(
+                        coachId, viewerUserId, CoachClientRelationshipStatus.TERMINATED);
             }
 
             if (relOpt.isPresent()) {

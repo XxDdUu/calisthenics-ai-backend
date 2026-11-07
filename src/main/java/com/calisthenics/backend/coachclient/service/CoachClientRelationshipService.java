@@ -17,4 +17,6 @@ public interface CoachClientRelationshipService {
 
     CoachClientRelationshipResponse transition(
             Long userId, Long relationshipId, CoachClientRelationshipStatus targetStatus);
+
+    CoachClientRelationshipResponse terminate(Long userId, Long relationshipId);
 }

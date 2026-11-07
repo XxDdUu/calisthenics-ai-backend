@@ -170,14 +170,14 @@ public class StorageController {
     }
 
     @GetMapping("/exercise-media/{objectName:.+}")
-    @Operation(summary = "Download or stream an exercise media object from MinIO")
-    public ResponseEntity<StreamingResponseBody> getExerciseMedia(@PathVariable String objectName) {
-        String contentType = exerciseMediaStorageService.contentType(objectName);
-        StreamingResponseBody body = outputStream -> {
-            try (var inputStream = exerciseMediaStorageService.open(objectName)) {
-                inputStream.transferTo(outputStream);
-            }
-        };
+    @Operation(summary = "Download or stream an exercise media object from MinIO with HTTP Range support")
+    public ResponseEntity<StreamingResponseBody> getExerciseMedia(
+            @PathVariable String objectName,
+            @RequestHeader(value = HttpHeaders.RANGE, required = false) String rangeHeader
+    ) {
+        var stat = exerciseMediaStorageService.stat(objectName);
+        long fileSize = stat.size();
+        String contentType = stat.contentType();
         if (contentType == null || contentType.isBlank()) {
             contentType = URLConnection.guessContentTypeFromName(objectName);
         }
@@ -185,10 +185,77 @@ public class StorageController {
             contentType = MediaType.APPLICATION_OCTET_STREAM_VALUE;
         }
 
-        return ResponseEntity.ok()
+        // Full content request (no Range header)
+        if (rangeHeader == null || !rangeHeader.startsWith("bytes=")) {
+            StreamingResponseBody body = outputStream -> {
+                try (var inputStream = exerciseMediaStorageService.open(objectName)) {
+                    inputStream.transferTo(outputStream);
+                }
+            };
+            return ResponseEntity.ok()
+                    .contentType(MediaType.parseMediaType(contentType))
+                    .contentLength(fileSize)
+                    .header(HttpHeaders.ACCEPT_RANGES, "bytes")
+                    .cacheControl(CacheControl.maxAge(1, TimeUnit.DAYS).cachePublic())
+                    .header(HttpHeaders.CONTENT_DISPOSITION, "inline; filename=\"" + objectName + "\"")
+                    .body(body);
+        }
+
+        // Range request handling
+        String rangeValue = rangeHeader.substring(6).trim();
+        long start;
+        long end;
+
+        try {
+            if (rangeValue.startsWith("-")) {
+                // Suffix byte range: "-500" means last 500 bytes
+                long suffixLength = Long.parseLong(rangeValue.substring(1));
+                if (suffixLength <= 0) {
+                    return rangeNotSatisfiable(fileSize);
+                }
+                start = Math.max(0, fileSize - suffixLength);
+                end = fileSize - 1;
+            } else {
+                String[] parts = rangeValue.split("-", 2);
+                start = Long.parseLong(parts[0].trim());
+                if (parts.length > 1 && !parts[1].trim().isEmpty()) {
+                    end = Long.parseLong(parts[1].trim());
+                } else {
+                    end = fileSize - 1;
+                }
+            }
+
+            if (start < 0 || start > end || start >= fileSize) {
+                return rangeNotSatisfiable(fileSize);
+            }
+            if (end >= fileSize) {
+                end = fileSize - 1;
+            }
+        } catch (NumberFormatException nfe) {
+            return rangeNotSatisfiable(fileSize);
+        }
+
+        long contentLength = end - start + 1;
+        StreamingResponseBody body = outputStream -> {
+            try (var inputStream = exerciseMediaStorageService.open(objectName, start, contentLength)) {
+                inputStream.transferTo(outputStream);
+            }
+        };
+
+        return ResponseEntity.status(HttpStatus.PARTIAL_CONTENT)
                 .contentType(MediaType.parseMediaType(contentType))
+                .contentLength(contentLength)
+                .header(HttpHeaders.ACCEPT_RANGES, "bytes")
+                .header(HttpHeaders.CONTENT_RANGE, "bytes " + start + "-" + end + "/" + fileSize)
                 .cacheControl(CacheControl.maxAge(1, TimeUnit.DAYS).cachePublic())
                 .header(HttpHeaders.CONTENT_DISPOSITION, "inline; filename=\"" + objectName + "\"")
                 .body(body);
+    }
+
+    private ResponseEntity<StreamingResponseBody> rangeNotSatisfiable(long fileSize) {
+        return ResponseEntity.status(HttpStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                .header(HttpHeaders.CONTENT_RANGE, "bytes */" + fileSize)
+                .header(HttpHeaders.ACCEPT_RANGES, "bytes")
+                .build();
     }
 }

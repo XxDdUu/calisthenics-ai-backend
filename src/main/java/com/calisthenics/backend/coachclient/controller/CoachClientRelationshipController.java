@@ -67,4 +67,18 @@ public class CoachClientRelationshipController {
         return ResponseEntity.ok(relationshipService.transition(
                 currentUser.getId(), id, CoachClientRelationshipStatus.CANCELLED));
     }
+
+    @DeleteMapping("/{id}")
+    public ResponseEntity<CoachClientRelationshipResponse> terminate(
+            @AuthenticationPrincipal UserPrincipal currentUser,
+            @PathVariable Long id) {
+        return ResponseEntity.ok(relationshipService.terminate(currentUser.getId(), id));
+    }
+
+    @PostMapping("/{id}/terminate")
+    public ResponseEntity<CoachClientRelationshipResponse> terminatePost(
+            @AuthenticationPrincipal UserPrincipal currentUser,
+            @PathVariable Long id) {
+        return ResponseEntity.ok(relationshipService.terminate(currentUser.getId(), id));
+    }
 }

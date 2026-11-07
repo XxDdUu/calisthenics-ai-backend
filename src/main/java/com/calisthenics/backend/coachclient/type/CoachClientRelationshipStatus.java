@@ -4,5 +4,6 @@ public enum CoachClientRelationshipStatus {
     PENDING,
     ACTIVE,
     REJECTED,
-    CANCELLED
+    CANCELLED,
+    TERMINATED
 }

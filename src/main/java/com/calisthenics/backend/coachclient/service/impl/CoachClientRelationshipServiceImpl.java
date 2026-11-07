@@ -107,6 +107,9 @@ public class CoachClientRelationshipServiceImpl implements CoachClientRelationsh
     @Transactional
     public CoachClientRelationshipResponse transition(
             Long userId, Long relationshipId, CoachClientRelationshipStatus targetStatus) {
+        if (targetStatus == CoachClientRelationshipStatus.TERMINATED) {
+            return terminate(userId, relationshipId);
+        }
         String operation = switch (targetStatus) {
             case ACTIVE -> "accept";
             case REJECTED -> "reject";
@@ -178,6 +181,48 @@ public class CoachClientRelationshipServiceImpl implements CoachClientRelationsh
                     "Coach-client request operation={} senderId={} receiverId={} actorId={} relationshipId={} result=failed exceptionType={} message={}",
                     operation, senderId, receiverId, userId, relationshipId,
                     exception.getClass().getSimpleName(), exception.getMessage());
+            throw exception;
+        }
+    }
+
+    @Override
+    @Transactional
+    public CoachClientRelationshipResponse terminate(Long userId, Long relationshipId) {
+        log.info(
+                "Coach-client request operation=terminate actorId={} relationshipId={} result=started",
+                userId, relationshipId);
+        try {
+            CoachClientRelationship relationship = relationshipRepository.findById(relationshipId)
+                    .orElseThrow(CoachClientRelationshipNotFoundException::new);
+            Long clientId = relationship.getClient().getId();
+            userRepository.findByIdForUpdate(clientId)
+                    .orElseThrow(CoachClientRelationshipNotFoundException::new);
+            relationship = relationshipRepository.findByIdForUpdate(relationshipId)
+                    .orElseThrow(CoachClientRelationshipNotFoundException::new);
+
+            Long coachId = relationship.getCoach().getId();
+            boolean isCoach = coachId.equals(userId);
+            boolean isClient = relationship.getClient().getId().equals(userId);
+            if (!isCoach && !isClient) {
+                throw new CoachClientForbiddenException();
+            }
+
+            if (relationship.getStatus() != CoachClientRelationshipStatus.ACTIVE) {
+                throw new CoachClientConflictException();
+            }
+
+            relationship.setStatus(CoachClientRelationshipStatus.TERMINATED);
+            endActiveAssignments(relationship.getId());
+
+            CoachClientRelationship saved = relationshipRepository.saveAndFlush(relationship);
+            log.info(
+                    "Coach-client request operation=terminate actorId={} relationshipId={} coachId={} clientId={} result=updated status={}",
+                    userId, relationshipId, coachId, clientId, saved.getStatus());
+            return toResponse(saved);
+        } catch (RuntimeException exception) {
+            log.warn(
+                    "Coach-client request operation=terminate actorId={} relationshipId={} result=failed exceptionType={} message={}",
+                    userId, relationshipId, exception.getClass().getSimpleName(), exception.getMessage());
             throw exception;
         }
     }

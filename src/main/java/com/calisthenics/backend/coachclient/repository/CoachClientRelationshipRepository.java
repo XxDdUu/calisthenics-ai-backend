@@ -30,11 +30,18 @@ public interface CoachClientRelationshipRepository extends JpaRepository<CoachCl
 
     @Query("select r from CoachClientRelationship r join fetch r.coach join fetch r.client where " +
             "((r.coach.id = :firstUserId and r.client.id = :secondUserId) or " +
-            "(r.coach.id = :secondUserId and r.client.id = :firstUserId)) and r.status = :status")
-    Optional<CoachClientRelationship> findRelationshipForUsers(
+            "(r.coach.id = :secondUserId and r.client.id = :firstUserId)) and r.status = :status " +
+            "order by r.updatedAt desc, r.id desc")
+    List<CoachClientRelationship> findRelationshipsForUsers(
             @Param("firstUserId") Long firstUserId,
             @Param("secondUserId") Long secondUserId,
             @Param("status") CoachClientRelationshipStatus status);
+
+    default Optional<CoachClientRelationship> findRelationshipForUsers(
+            Long firstUserId, Long secondUserId, CoachClientRelationshipStatus status) {
+        List<CoachClientRelationship> relationships = findRelationshipsForUsers(firstUserId, secondUserId, status);
+        return relationships.isEmpty() ? Optional.empty() : Optional.of(relationships.get(0));
+    }
 
     default Optional<CoachClientRelationship> findActiveRelationshipForUsers(Long firstUserId, Long secondUserId) {
         return findRelationshipForUsers(firstUserId, secondUserId, CoachClientRelationshipStatus.ACTIVE);

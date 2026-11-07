@@ -44,6 +44,7 @@ import java.util.concurrent.Future;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -367,6 +368,193 @@ class CoachClientIntegrationTest {
 
         assertThatThrownBy(() -> assignmentService.assign(coach.getId(), relationship.getId(), request))
                 .isInstanceOf(com.calisthenics.backend.workoutplan.exception.WorkoutPlanNotFoundException.class);
+    }
+
+    @Test
+    void coachCanTerminateActiveRelationship() throws Exception {
+        User coach = createUser();
+        User client = createUser();
+        CoachClientRelationship relationship = request(coach, client);
+        accept(client, relationship);
+
+        mockMvc.perform(delete("/api/v1/coach-client-relationships/" + relationship.getId())
+                        .with(authenticatedAs(coach)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value(relationship.getId()))
+                .andExpect(jsonPath("$.status").value("TERMINATED"));
+
+        CoachClientRelationship updated = relationshipRepository.findById(relationship.getId()).orElseThrow();
+        assertThat(updated.getStatus()).isEqualTo(CoachClientRelationshipStatus.TERMINATED);
+    }
+
+    @Test
+    void clientCanTerminateActiveRelationship() throws Exception {
+        User coach = createUser();
+        User client = createUser();
+        CoachClientRelationship relationship = request(coach, client);
+        accept(client, relationship);
+
+        mockMvc.perform(delete("/api/v1/coach-client-relationships/" + relationship.getId())
+                        .with(authenticatedAs(client)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value(relationship.getId()))
+                .andExpect(jsonPath("$.status").value("TERMINATED"));
+
+        CoachClientRelationship updated = relationshipRepository.findById(relationship.getId()).orElseThrow();
+        assertThat(updated.getStatus()).isEqualTo(CoachClientRelationshipStatus.TERMINATED);
+    }
+
+    @Test
+    void legacyEndpointAllowsTermination() throws Exception {
+        User coach = createUser();
+        User client = createUser();
+        CoachClientRelationship relationship = request(coach, client);
+        accept(client, relationship);
+
+        mockMvc.perform(delete("/api/coach-relationships/" + relationship.getId())
+                        .with(authenticatedAs(coach)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("TERMINATED"));
+    }
+
+    @Test
+    void unrelatedUserCannotTerminateRelationship() throws Exception {
+        User coach = createUser();
+        User client = createUser();
+        User stranger = createUser();
+        CoachClientRelationship relationship = request(coach, client);
+        accept(client, relationship);
+
+        mockMvc.perform(delete("/api/v1/coach-client-relationships/" + relationship.getId())
+                        .with(authenticatedAs(stranger)))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void terminatingNonExistentRelationshipReturnsNotFound() throws Exception {
+        User user = createUser();
+
+        mockMvc.perform(delete("/api/v1/coach-client-relationships/999999")
+                        .with(authenticatedAs(user)))
+                .andExpect(status().isNotFound());
+    }
+
+    @Test
+    void cannotTerminatePendingOrAlreadyTerminatedRelationship() throws Exception {
+        User coach = createUser();
+        User client = createUser();
+        CoachClientRelationship relationship = request(coach, client);
+
+        // Terminating pending relationship fails with 409 Conflict
+        mockMvc.perform(delete("/api/v1/coach-client-relationships/" + relationship.getId())
+                        .with(authenticatedAs(coach)))
+                .andExpect(status().isConflict());
+
+        accept(client, relationship);
+
+        // First termination succeeds
+        mockMvc.perform(delete("/api/v1/coach-client-relationships/" + relationship.getId())
+                        .with(authenticatedAs(coach)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("TERMINATED"));
+
+        // Second termination fails with 409 Conflict
+        mockMvc.perform(delete("/api/v1/coach-client-relationships/" + relationship.getId())
+                        .with(authenticatedAs(coach)))
+                .andExpect(status().isConflict());
+    }
+
+    @Test
+    void unauthenticatedTerminationReturnsUnauthorized() throws Exception {
+        mockMvc.perform(delete("/api/v1/coach-client-relationships/123"))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void canEstablishNewRelationshipAfterTermination() throws Exception {
+        User coach = createUser();
+        User client = createUser();
+        CoachClientRelationship first = request(coach, client);
+        accept(client, first);
+
+        mockMvc.perform(delete("/api/v1/coach-client-relationships/" + first.getId())
+                        .with(authenticatedAs(client)))
+                .andExpect(status().isOk());
+
+        // A new request can be created and accepted
+        CoachClientRelationship second = request(coach, client);
+        assertThat(second.getId()).isNotEqualTo(first.getId());
+        assertThat(second.getStatus()).isEqualTo(CoachClientRelationshipStatus.PENDING);
+
+        accept(client, second);
+        assertThat(relationshipRepository.findById(second.getId()).orElseThrow().getStatus())
+                .isEqualTo(CoachClientRelationshipStatus.ACTIVE);
+    }
+
+    @Test
+    void concurrentTerminationAllowsOnlyOneSuccess() throws Exception {
+        User coach = createUser();
+        User client = createUser();
+        CoachClientRelationship relationship = request(coach, client);
+        accept(client, relationship);
+
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            Future<Boolean> termCoach = executor.submit(() -> {
+                ready.countDown();
+                start.await();
+                try {
+                    relationshipService.terminate(coach.getId(), relationship.getId());
+                    return true;
+                } catch (Exception e) {
+                    return false;
+                }
+            });
+            Future<Boolean> termClient = executor.submit(() -> {
+                ready.countDown();
+                start.await();
+                try {
+                    relationshipService.terminate(client.getId(), relationship.getId());
+                    return true;
+                } catch (Exception e) {
+                    return false;
+                }
+            });
+            ready.await();
+            start.countDown();
+            int succeeded = (termCoach.get() ? 1 : 0) + (termClient.get() ? 1 : 0);
+            assertThat(succeeded).isEqualTo(1);
+            assertThat(relationshipRepository.findById(relationship.getId()).orElseThrow().getStatus())
+                    .isEqualTo(CoachClientRelationshipStatus.TERMINATED);
+        }
+    }
+
+    @Test
+    void terminationEndsActiveAssignmentsAndPreservesHistoricalData() {
+        User coach = createUser();
+        User client = createUser();
+        WorkoutPlan plan = createPlan(coach);
+        WorkoutPlanAssignmentRequestBody assignmentRequest = new WorkoutPlanAssignmentRequestBody(plan.getId());
+        CoachClientRelationship relationship = request(coach, client);
+        accept(client, relationship);
+
+        WorkoutPlanAssignmentResponse assignment = assignmentService.assign(
+                coach.getId(), relationship.getId(), assignmentRequest.toRequest());
+
+        relationshipService.terminate(coach.getId(), relationship.getId());
+
+        // Status is TERMINATED
+        assertThat(relationshipRepository.findById(relationship.getId()).orElseThrow().getStatus())
+                .isEqualTo(CoachClientRelationshipStatus.TERMINATED);
+        // Workout plan assignment is ended
+        assertThat(assignmentRepository.findById(assignment.getId()).orElseThrow().getStatus())
+                .isEqualTo(WorkoutPlanAssignmentStatus.ENDED);
+        // Historical plan still exists in repository
+        assertThat(workoutPlanRepository.findById(plan.getId())).isPresent();
+        // User accounts still exist
+        assertThat(userRepository.findById(coach.getId())).isPresent();
+        assertThat(userRepository.findById(client.getId())).isPresent();
     }
 
     private boolean attemptAccept(
