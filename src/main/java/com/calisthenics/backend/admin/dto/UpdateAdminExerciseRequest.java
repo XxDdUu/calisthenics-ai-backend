@@ -40,6 +40,38 @@ public record UpdateAdminExerciseRequest(
         Boolean active,
 
         @Size(max = 100, message = "An exercise cannot have more than 100 media items")
-        List<@Valid ExerciseMediaItemRequest> mediaItems
+        List<@Valid ExerciseMediaItemRequest> mediaItems,
+
+        Boolean replaceMediaItems
 ) {
+    public UpdateAdminExerciseRequest(
+            String name,
+            String code,
+            ExerciseCategory category,
+            DifficultyLevel difficulty,
+            String description,
+            String targetMuscles,
+            String instructions,
+            String imageUrl,
+            String videoUrl,
+            String equipment,
+            Boolean active,
+            List<ExerciseMediaItemRequest> mediaItems
+    ) {
+        this(
+                name,
+                code,
+                category,
+                difficulty,
+                description,
+                targetMuscles,
+                instructions,
+                imageUrl,
+                videoUrl,
+                equipment,
+                active,
+                mediaItems,
+                null
+        );
+    }
 }

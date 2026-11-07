@@ -12,6 +12,7 @@ import com.calisthenics.backend.exercise.DifficultyLevel;
 import com.calisthenics.backend.exercise.Exercise;
 import com.calisthenics.backend.exercise.ExerciseMediaItem;
 import com.calisthenics.backend.exercise.ExerciseMediaMapper;
+import com.calisthenics.backend.exercise.ExerciseMediaType;
 import com.calisthenics.backend.exercise.ExerciseCategory;
 import com.calisthenics.backend.exercise.ExerciseRepository;
 import com.calisthenics.backend.workout.WorkoutSessionExerciseRepository;
@@ -29,7 +30,9 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 @Service
@@ -102,7 +105,7 @@ public class AdminExerciseService {
                 .active(request.active() != null ? request.active() : true)
                 .build();
 
-        replaceMediaItems(exercise, request.mediaItems());
+        normalizeMediaItems(exercise, request.imageUrl(), request.videoUrl(), request.mediaItems(), true);
         Exercise saved = exerciseRepository.save(exercise);
         return mapToAdminResponse(saved);
     }
@@ -135,7 +138,13 @@ public class AdminExerciseService {
         exercise.setImageUrl(normalizeUrl(request.imageUrl()));
         exercise.setVideoUrl(normalizeUrl(request.videoUrl()));
         exercise.setEquipment(request.equipment());
-        replaceMediaItems(exercise, request.mediaItems());
+        normalizeMediaItems(
+                exercise,
+                request.imageUrl(),
+                request.videoUrl(),
+                request.mediaItems(),
+                Boolean.TRUE.equals(request.replaceMediaItems())
+        );
         if (request.active() != null) {
             exercise.setActive(request.active());
         }
@@ -218,21 +227,83 @@ public class AdminExerciseService {
         );
     }
 
-    private void replaceMediaItems(Exercise exercise, List<ExerciseMediaItemRequest> mediaItems) {
-        if (mediaItems == null) {
+    private void normalizeMediaItems(
+            Exercise exercise,
+            String imageUrl,
+            String videoUrl,
+            List<ExerciseMediaItemRequest> requestedItems,
+            boolean replaceExisting
+    ) {
+        List<ExerciseMediaItem> existingItems = replaceExisting
+                ? List.of()
+                : new ArrayList<>(exercise.getMediaItems());
+        Map<String, ExerciseMediaItem> normalizedItems = new LinkedHashMap<>();
+
+        for (ExerciseMediaItem item : existingItems) {
+            addMediaItem(normalizedItems, item.getType(), item.getUrl(), item.getThumbnailUrl(), item.getDisplayOrder());
+        }
+
+        if (replaceExisting) {
+            exercise.getMediaItems().clear();
+        }
+
+        int nextDisplayOrder = normalizedItems.values().stream()
+                .mapToInt(ExerciseMediaItem::getDisplayOrder)
+                .max()
+                .orElse(-1) + 1;
+        if (requestedItems != null) {
+            for (ExerciseMediaItemRequest item : requestedItems) {
+                if (item == null) {
+                    continue;
+                }
+                String url = normalizeMediaUrl(item.url());
+                if (url == null) {
+                    continue;
+                }
+                if (item.type() == null) {
+                    throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Media type is required.");
+                }
+                int displayOrder = item.displayOrder() != null
+                        ? item.displayOrder()
+                        : nextDisplayOrder++;
+                addMediaItem(normalizedItems, item.type(), url, item.thumbnailUrl(), displayOrder);
+                nextDisplayOrder = Math.max(nextDisplayOrder, displayOrder + 1);
+            }
+        }
+
+        addMediaItem(normalizedItems, ExerciseMediaType.IMAGE, imageUrl, null, nextDisplayOrder++);
+        addMediaItem(normalizedItems, ExerciseMediaType.VIDEO, videoUrl, null, nextDisplayOrder);
+
+        exercise.getMediaItems().clear();
+        exercise.getMediaItems().addAll(normalizedItems.values());
+        exercise.getMediaItems().forEach(item -> item.setExercise(exercise));
+    }
+
+    private void addMediaItem(
+            Map<String, ExerciseMediaItem> items,
+            ExerciseMediaType type,
+            String url,
+            String thumbnailUrl,
+            int displayOrder
+    ) {
+        String normalizedUrl = normalizeMediaUrl(url);
+        if (normalizedUrl == null) {
             return;
         }
-        exercise.getMediaItems().clear();
-        for (int index = 0; index < mediaItems.size(); index++) {
-            ExerciseMediaItemRequest item = mediaItems.get(index);
-            exercise.getMediaItems().add(ExerciseMediaItem.builder()
-                    .exercise(exercise)
-                    .type(item.type())
-                    .url(item.url().trim())
-                    .thumbnailUrl(normalizeUrl(item.thumbnailUrl()))
-                    .displayOrder(item.displayOrder() != null ? item.displayOrder() : index)
-                    .build());
+        if (type != ExerciseMediaType.IMAGE && type != ExerciseMediaType.VIDEO) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Unsupported media type.");
         }
+        items.putIfAbsent(normalizedUrl, ExerciseMediaItem.builder()
+                .type(type)
+                .url(normalizedUrl)
+                .thumbnailUrl(normalizeUrl(thumbnailUrl))
+                .displayOrder(displayOrder)
+                .build());
+    }
+
+    private String normalizeMediaUrl(String url) {
+        String normalized = normalizeUrl(url);
+        return normalized == null || normalized.isBlank() ? null : normalized;
     }
 
     private String generateCodeFromName(String name) {

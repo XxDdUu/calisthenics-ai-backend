@@ -10,6 +10,7 @@ import com.calisthenics.backend.analytics.repository.PersonalRecordRepository;
 import com.calisthenics.backend.exercise.DifficultyLevel;
 import com.calisthenics.backend.exercise.Exercise;
 import com.calisthenics.backend.exercise.ExerciseCategory;
+import com.calisthenics.backend.exercise.ExerciseMediaItem;
 import com.calisthenics.backend.exercise.ExerciseMediaType;
 import com.calisthenics.backend.exercise.ExerciseRepository;
 import com.calisthenics.backend.workout.WorkoutSessionExerciseRepository;
@@ -196,6 +197,65 @@ class AdminExerciseServiceTest {
     }
 
     @Test
+    void createExercise_WithVideoUrlOnly_PersistsVideoMediaItem() {
+        CreateAdminExerciseRequest request = createRequest(
+                "Video Exercise",
+                null,
+                "https://cdn.example.com/video.mp4",
+                null
+        );
+        stubCreate("Video Exercise", "VIDEO_EXERCISE");
+
+        AdminExerciseResponse response = service.createExercise(request);
+
+        assertEquals(1, response.mediaItems().size());
+        assertEquals(ExerciseMediaType.VIDEO, response.mediaItems().get(0).type());
+        assertEquals("https://cdn.example.com/video.mp4", response.mediaItems().get(0).url());
+    }
+
+    @Test
+    void createExercise_WithImageUrlOnly_PersistsImageMediaItem() {
+        CreateAdminExerciseRequest request = createRequest(
+                "Image Exercise",
+                null,
+                null,
+                "https://cdn.example.com/image.jpg"
+        );
+        stubCreate("Image Exercise", "IMAGE_EXERCISE");
+
+        AdminExerciseResponse response = service.createExercise(request);
+
+        assertEquals(1, response.mediaItems().size());
+        assertEquals(ExerciseMediaType.IMAGE, response.mediaItems().get(0).type());
+        assertEquals("https://cdn.example.com/image.jpg", response.mediaItems().get(0).url());
+    }
+
+    @Test
+    void createExercise_WhenScalarUrlIsExplicitlyListed_DoesNotDuplicateIt() {
+        String videoUrl = "https://cdn.example.com/video.mp4";
+        CreateAdminExerciseRequest request = new CreateAdminExerciseRequest(
+                "Duplicate Video",
+                "DUPLICATE_VIDEO",
+                ExerciseCategory.PUSH,
+                DifficultyLevel.BEGINNER,
+                null,
+                null,
+                null,
+                null,
+                videoUrl,
+                null,
+                true,
+                List.of(new ExerciseMediaItemRequest(ExerciseMediaType.VIDEO, videoUrl, null, 4))
+        );
+        stubCreate("Duplicate Video", "DUPLICATE_VIDEO");
+
+        AdminExerciseResponse response = service.createExercise(request);
+
+        assertEquals(1, response.mediaItems().size());
+        assertEquals(4, response.mediaItems().get(0).displayOrder());
+    }
+
+    @Test
     void createExercise_DuplicateName_ThrowsConflict() {
         CreateAdminExerciseRequest request = new CreateAdminExerciseRequest(
                 "Handstand",
@@ -244,6 +304,172 @@ class AdminExerciseServiceTest {
         assertEquals("New Name", updated.name());
         assertEquals("NEW_CODE", updated.code());
         assertFalse(updated.active());
+    }
+
+    @Test
+    void updateExercise_WithoutMediaPayload_PreservesExistingMedia() {
+        ExerciseMediaItem existingMedia = ExerciseMediaItem.builder()
+                .id(20L)
+                .type(ExerciseMediaType.VIDEO)
+                .url("https://cdn.example.com/existing.mp4")
+                .displayOrder(0)
+                .build();
+        Exercise existing = exerciseWithMedia(5L, existingMedia);
+        when(exerciseRepository.findById(5L)).thenReturn(Optional.of(existing));
+        when(exerciseRepository.existsByNameIgnoreCaseAndIdNot("Updated", 5L)).thenReturn(false);
+        when(exerciseRepository.existsByCodeAndIdNot("UPDATED", 5L)).thenReturn(false);
+        when(exerciseRepository.save(any(Exercise.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        AdminExerciseResponse response = service.updateExercise(5L, updateRequest(
+                "Updated", null, null, null, null
+        ));
+
+        assertEquals(1, response.mediaItems().size());
+        assertEquals("https://cdn.example.com/existing.mp4", response.mediaItems().get(0).url());
+    }
+
+    @Test
+    void updateExercise_WithAdditionalMediaMergesExistingAndNewMedia() {
+        ExerciseMediaItem existingMedia = ExerciseMediaItem.builder()
+                .id(20L)
+                .type(ExerciseMediaType.VIDEO)
+                .url("https://cdn.example.com/existing.mp4")
+                .displayOrder(0)
+                .build();
+        Exercise existing = exerciseWithMedia(5L, existingMedia);
+        when(exerciseRepository.findById(5L)).thenReturn(Optional.of(existing));
+        when(exerciseRepository.existsByNameIgnoreCaseAndIdNot("Updated", 5L)).thenReturn(false);
+        when(exerciseRepository.existsByCodeAndIdNot("UPDATED", 5L)).thenReturn(false);
+        when(exerciseRepository.save(any(Exercise.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        AdminExerciseResponse response = service.updateExercise(5L, updateRequest(
+                "Updated",
+                List.of(new ExerciseMediaItemRequest(
+                        ExerciseMediaType.IMAGE,
+                        "https://cdn.example.com/new.jpg",
+                        null,
+                        1
+                )),
+                null,
+                null,
+                null
+        ));
+
+        assertEquals(2, response.mediaItems().size());
+        assertEquals(List.of(
+                "https://cdn.example.com/existing.mp4",
+                "https://cdn.example.com/new.jpg"
+        ), response.mediaItems().stream().map(item -> item.url()).toList());
+    }
+
+    @Test
+    void updateExercise_WithReplaceMediaItems_RemovesOnlyUnrequestedMedia() {
+        ExerciseMediaItem existingVideo = ExerciseMediaItem.builder()
+                .id(20L)
+                .type(ExerciseMediaType.VIDEO)
+                .url("https://cdn.example.com/existing.mp4")
+                .displayOrder(0)
+                .build();
+        ExerciseMediaItem existingImage = ExerciseMediaItem.builder()
+                .id(21L)
+                .type(ExerciseMediaType.IMAGE)
+                .url("https://cdn.example.com/existing.jpg")
+                .displayOrder(1)
+                .build();
+        Exercise existing = exerciseWithMedia(5L, existingVideo, existingImage);
+        when(exerciseRepository.findById(5L)).thenReturn(Optional.of(existing));
+        when(exerciseRepository.existsByNameIgnoreCaseAndIdNot("Updated", 5L)).thenReturn(false);
+        when(exerciseRepository.existsByCodeAndIdNot("UPDATED", 5L)).thenReturn(false);
+        when(exerciseRepository.save(any(Exercise.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        UpdateAdminExerciseRequest request = new UpdateAdminExerciseRequest(
+                "Updated", "UPDATED", ExerciseCategory.PUSH, DifficultyLevel.BEGINNER,
+                null, null, null, null, null, null, true,
+                List.of(new ExerciseMediaItemRequest(
+                        ExerciseMediaType.IMAGE,
+                        "https://cdn.example.com/existing.jpg",
+                        null,
+                        0
+                )),
+                true
+        );
+
+        AdminExerciseResponse response = service.updateExercise(5L, request);
+
+        assertEquals(1, response.mediaItems().size());
+        assertEquals("https://cdn.example.com/existing.jpg", response.mediaItems().get(0).url());
+    }
+
+    private void stubCreate(String name, String code) {
+        when(exerciseRepository.existsByNameIgnoreCase(name)).thenReturn(false);
+        when(exerciseRepository.existsByCode(code)).thenReturn(false);
+        when(exerciseRepository.save(any(Exercise.class))).thenAnswer(inv -> {
+            Exercise saved = inv.getArgument(0);
+            saved.setId(10L);
+            return saved;
+        });
+    }
+
+    private CreateAdminExerciseRequest createRequest(
+            String name,
+            List<ExerciseMediaItemRequest> mediaItems,
+            String videoUrl,
+            String imageUrl
+    ) {
+        return new CreateAdminExerciseRequest(
+                name,
+                null,
+                ExerciseCategory.PUSH,
+                DifficultyLevel.BEGINNER,
+                null,
+                null,
+                null,
+                imageUrl,
+                videoUrl,
+                null,
+                true,
+                mediaItems
+        );
+    }
+
+    private UpdateAdminExerciseRequest updateRequest(
+            String name,
+            List<ExerciseMediaItemRequest> mediaItems,
+            String imageUrl,
+            String videoUrl,
+            Boolean replaceMediaItems
+    ) {
+        return new UpdateAdminExerciseRequest(
+                name,
+                "UPDATED",
+                ExerciseCategory.PUSH,
+                DifficultyLevel.BEGINNER,
+                null,
+                null,
+                null,
+                imageUrl,
+                videoUrl,
+                null,
+                true,
+                mediaItems,
+                replaceMediaItems
+        );
+    }
+
+    private Exercise exerciseWithMedia(Long id, ExerciseMediaItem... mediaItems) {
+        Exercise exercise = Exercise.builder()
+                .id(id)
+                .name("Existing")
+                .code("EXISTING")
+                .category(ExerciseCategory.PUSH)
+                .difficulty(DifficultyLevel.BEGINNER)
+                .active(true)
+                .build();
+        for (ExerciseMediaItem mediaItem : mediaItems) {
+            mediaItem.setExercise(exercise);
+            exercise.getMediaItems().add(mediaItem);
+        }
+        return exercise;
     }
 
     @Test
