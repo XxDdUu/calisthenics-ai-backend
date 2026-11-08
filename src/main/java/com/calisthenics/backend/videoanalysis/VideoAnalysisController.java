@@ -16,6 +16,7 @@ import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
 
+import java.io.IOException;
 import java.net.URLConnection;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -156,6 +157,8 @@ public class VideoAnalysisController {
             StreamingResponseBody body = outputStream -> {
                 try (var inputStream = minioStorageService.open(objectKey)) {
                     inputStream.transferTo(outputStream);
+                } catch (IOException ex) {
+                    log.debug("Client disconnected while streaming full video {}: {}", objectKey, ex.getMessage());
                 }
             };
             return ResponseEntity.ok()
@@ -204,6 +207,8 @@ public class VideoAnalysisController {
         StreamingResponseBody body = outputStream -> {
             try (var inputStream = minioStorageService.open(objectKey, start, contentLength)) {
                 inputStream.transferTo(outputStream);
+            } catch (IOException ex) {
+                log.debug("Client disconnected while streaming video range {}: {}", objectKey, ex.getMessage());
             }
         };
 

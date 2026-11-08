@@ -38,10 +38,7 @@ public class AnalysisService {
     @Transactional
     public AnalysisResponse analyzeAndSaveImage(Long userId, Long exerciseId, MultipartFile file) {
         String storedFileName = storageService.store(file);
-        String mediaUrl = ServletUriComponentsBuilder.fromCurrentContextPath()
-                .path("/api/v1/storage/files/")
-                .path(storedFileName)
-                .toUriString();
+        String mediaUrl = "/api/v1/storage/files/" + storedFileName;
 
         AiImageAnalysisResponseDto aiResult = aiServiceClient.analyzeImage(file, true);
 
@@ -51,10 +48,7 @@ public class AnalysisService {
     @Transactional
     public AnalysisResponse analyzeAndSaveVideo(Long userId, Long exerciseId, MultipartFile file) {
         String storedFileName = storageService.store(file);
-        String mediaUrl = ServletUriComponentsBuilder.fromCurrentContextPath()
-                .path("/api/v1/storage/files/")
-                .path(storedFileName)
-                .toUriString();
+        String mediaUrl = "/api/v1/storage/files/" + storedFileName;
 
         AiVideoAnalysisResponseDto aiResult = aiServiceClient.analyzeVideo(file, 5);
 

@@ -23,6 +23,7 @@ import org.springframework.security.access.prepost.PreAuthorize;
 
 import jakarta.servlet.http.HttpServletRequest;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URLConnection;
 import java.util.concurrent.TimeUnit;
 
@@ -133,25 +134,110 @@ public class StorageController {
     }
 
     @GetMapping("/files/{fileName:.+}")
-    @Operation(summary = "Download or stream media file by filename")
-    public ResponseEntity<Resource> getFile(@PathVariable String fileName, HttpServletRequest request) {
+    @Operation(summary = "Download or stream media file by filename with HTTP Range support")
+    public ResponseEntity<StreamingResponseBody> getFile(
+            @PathVariable String fileName,
+            @RequestHeader(value = HttpHeaders.RANGE, required = false) String rangeHeader,
+            HttpServletRequest request
+    ) {
         Resource resource = storageService.loadAsResource(fileName);
+        long fileSize;
+        try {
+            fileSize = resource.contentLength();
+        } catch (IOException e) {
+            fileSize = -1L;
+        }
 
         String contentType = null;
         try {
             contentType = request.getServletContext().getMimeType(resource.getFile().getAbsolutePath());
-        } catch (IOException ex) {
+        } catch (Exception ex) {
             // Default to binary stream if type cannot be determined
         }
 
-        if (contentType == null) {
-            contentType = "application/octet-stream";
+        if (contentType == null || contentType.isBlank()) {
+            contentType = URLConnection.guessContentTypeFromName(fileName);
+        }
+        if (contentType == null || contentType.isBlank()) {
+            contentType = MediaType.APPLICATION_OCTET_STREAM_VALUE;
         }
 
-        return ResponseEntity.ok()
+        // Full content request (no Range header) or file size unknown
+        if (rangeHeader == null || !rangeHeader.startsWith("bytes=") || fileSize <= 0) {
+            StreamingResponseBody body = outputStream -> {
+                try (InputStream is = resource.getInputStream()) {
+                    is.transferTo(outputStream);
+                } catch (IOException e) {
+                    log.debug("Client closed connection while downloading file {}: {}", fileName, e.getMessage());
+                }
+            };
+            var responseBuilder = ResponseEntity.ok()
+                    .contentType(MediaType.parseMediaType(contentType))
+                    .header(HttpHeaders.ACCEPT_RANGES, "bytes")
+                    .header(HttpHeaders.CONTENT_DISPOSITION, "inline; filename=\"" + resource.getFilename() + "\"");
+            if (fileSize > 0) {
+                responseBuilder.contentLength(fileSize);
+            }
+            return responseBuilder.body(body);
+        }
+
+        // HTTP Range request handling
+        String rangeValue = rangeHeader.substring(6).trim();
+        long start;
+        long end;
+        try {
+            if (rangeValue.startsWith("-")) {
+                long suffixLength = Long.parseLong(rangeValue.substring(1));
+                if (suffixLength <= 0) {
+                    return rangeNotSatisfiable(fileSize);
+                }
+                start = Math.max(0, fileSize - suffixLength);
+                end = fileSize - 1;
+            } else {
+                String[] parts = rangeValue.split("-", 2);
+                start = Long.parseLong(parts[0].trim());
+                if (parts.length > 1 && !parts[1].trim().isEmpty()) {
+                    end = Long.parseLong(parts[1].trim());
+                } else {
+                    end = fileSize - 1;
+                }
+            }
+
+            if (start < 0 || start > end || start >= fileSize) {
+                return rangeNotSatisfiable(fileSize);
+            }
+            if (end >= fileSize) {
+                end = fileSize - 1;
+            }
+        } catch (NumberFormatException nfe) {
+            return rangeNotSatisfiable(fileSize);
+        }
+
+        long contentLength = end - start + 1;
+        StreamingResponseBody body = outputStream -> {
+            try (InputStream is = resource.getInputStream()) {
+                long skipped = is.skip(start);
+                long bytesRemaining = contentLength;
+                byte[] buffer = new byte[8192];
+                while (bytesRemaining > 0) {
+                    int read = is.read(buffer, 0, (int) Math.min(buffer.length, bytesRemaining));
+                    if (read == -1) break;
+                    outputStream.write(buffer, 0, read);
+                    bytesRemaining -= read;
+                }
+                outputStream.flush();
+            } catch (IOException e) {
+                log.debug("Client closed connection while streaming file {}: {}", fileName, e.getMessage());
+            }
+        };
+
+        return ResponseEntity.status(HttpStatus.PARTIAL_CONTENT)
                 .contentType(MediaType.parseMediaType(contentType))
+                .contentLength(contentLength)
+                .header(HttpHeaders.ACCEPT_RANGES, "bytes")
+                .header(HttpHeaders.CONTENT_RANGE, "bytes " + start + "-" + end + "/" + fileSize)
                 .header(HttpHeaders.CONTENT_DISPOSITION, "inline; filename=\"" + resource.getFilename() + "\"")
-                .body(resource);
+                .body(body);
     }
 
     @GetMapping("/avatars/{objectName:.+}")
