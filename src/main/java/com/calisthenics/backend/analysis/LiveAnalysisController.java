@@ -12,8 +12,6 @@ import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.io.IOException;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
 
 @RestController
 @RequestMapping("/api/v1/analysis/live")
@@ -30,15 +28,21 @@ public class LiveAnalysisController {
     }
 
     @PostMapping(value = "/frame", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public CompletableFuture<ResponseEntity<JsonNode>> analyzeFrame(
-            @RequestPart("file") MultipartFile file,
+    public ResponseEntity<JsonNode> analyzeFrame(
+            @RequestParam(value = "file", required = false) MultipartFile fileParam,
+            @RequestPart(value = "file", required = false) MultipartFile filePart,
             @RequestParam @NotBlank String exercise,
             @RequestParam("session_id") @NotBlank String sessionId,
-            @RequestParam("frame_sequence") @Min(0) long frameSequence,
-            @RequestParam("timestamp_ms") @Min(0) long timestampMs,
-            @RequestParam(defaultValue = "false") boolean sideView
+            @RequestParam(name = "frame_sequence", defaultValue = "0") @Min(0) long frameSequence,
+            @RequestParam(name = "timestamp_ms", defaultValue = "0") @Min(0) long timestampMs,
+            @RequestParam(name = "side_view", required = false) Boolean sideViewSnake,
+            @RequestParam(name = "sideView", required = false) Boolean sideViewCamel,
+            @RequestParam(name = "draw_overlay", required = false) Boolean drawOverlaySnake,
+            @RequestParam(name = "drawOverlay", required = false) Boolean drawOverlayCamel,
+            @RequestParam(name = "debug", defaultValue = "false") boolean debug
     ) {
-        if (file.isEmpty()) {
+        MultipartFile file = fileParam != null ? fileParam : filePart;
+        if (file == null || file.isEmpty()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Camera frame is empty.");
         }
         if (file.getSize() > MAX_FRAME_BYTES) {
@@ -48,31 +52,18 @@ public class LiveAnalysisController {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Camera frame must be an image.");
         }
 
+        boolean sideView = Boolean.TRUE.equals(sideViewSnake) || Boolean.TRUE.equals(sideViewCamel);
+        boolean drawOverlay = Boolean.TRUE.equals(drawOverlaySnake) || Boolean.TRUE.equals(drawOverlayCamel);
+
         try {
             byte[] imageBytes = file.getBytes();
-            return liveAnalysisService
-                    .analyzeFrame(imageBytes, exercise, sessionId, frameSequence, timestampMs, sideView)
-                    .handle(this::toFrameResponse);
+            JsonNode result = liveAnalysisService.analyzeFrameSync(
+                    imageBytes, exercise, sessionId, frameSequence, timestampMs, sideView, drawOverlay, debug
+            );
+            return ResponseEntity.ok(result);
         } catch (IOException exception) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Could not read camera frame.", exception);
         }
-    }
-
-    private ResponseEntity<JsonNode> toFrameResponse(JsonNode body, Throwable throwable) {
-        if (throwable == null) {
-            return ResponseEntity.ok(body);
-        }
-        Throwable cause = throwable instanceof CompletionException && throwable.getCause() != null
-                ? throwable.getCause()
-                : throwable;
-        int status = HttpStatus.BAD_GATEWAY.value();
-        if (cause instanceof ResponseStatusException responseStatus) {
-            int upstream = responseStatus.getStatusCode().value();
-            if (upstream != HttpStatus.UNAUTHORIZED.value() && upstream != HttpStatus.FORBIDDEN.value()) {
-                status = upstream;
-            }
-        }
-        return ResponseEntity.status(status).build();
     }
 
     @PostMapping("/session/{sessionId}/reset")

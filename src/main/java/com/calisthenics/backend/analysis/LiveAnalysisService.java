@@ -36,6 +36,19 @@ public class LiveAnalysisService {
         return get("/api/v1/analysis/exercises");
     }
 
+    public JsonNode analyzeFrameSync(
+            byte[] imageBytes,
+            String exercise,
+            String sessionId,
+            long frameSequence,
+            long timestampMs,
+            boolean sideView,
+            boolean drawOverlay,
+            boolean debug
+    ) {
+        return postFrame(imageBytes, exercise, sessionId, frameSequence, timestampMs, sideView, drawOverlay, debug);
+    }
+
     public CompletableFuture<JsonNode> analyzeFrame(
             byte[] imageBytes,
             String exercise,
@@ -44,9 +57,22 @@ public class LiveAnalysisService {
             long timestampMs,
             boolean sideView
     ) {
+        return analyzeFrame(imageBytes, exercise, sessionId, frameSequence, timestampMs, sideView, false, false);
+    }
+
+    public CompletableFuture<JsonNode> analyzeFrame(
+            byte[] imageBytes,
+            String exercise,
+            String sessionId,
+            long frameSequence,
+            long timestampMs,
+            boolean sideView,
+            boolean drawOverlay,
+            boolean debug
+    ) {
         try {
             return CompletableFuture.supplyAsync(
-                    () -> postFrame(imageBytes, exercise, sessionId, frameSequence, timestampMs, sideView),
+                    () -> postFrame(imageBytes, exercise, sessionId, frameSequence, timestampMs, sideView, drawOverlay, debug),
                     liveAnalysisExecutor
             );
         } catch (RejectedExecutionException exception) {
@@ -81,7 +107,9 @@ public class LiveAnalysisService {
             String sessionId,
             long frameSequence,
             long timestampMs,
-            boolean sideView
+            boolean sideView,
+            boolean drawOverlay,
+            boolean debug
     ) {
         MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
         HttpHeaders fileHeaders = new HttpHeaders();
@@ -99,8 +127,8 @@ public class LiveAnalysisService {
         body.add("frame_sequence", Long.toString(frameSequence));
         body.add("timestamp_ms", Long.toString(timestampMs));
         body.add("side_view", Boolean.toString(sideView));
-        body.add("draw_overlay", "false");
-        body.add("debug", "false");
+        body.add("draw_overlay", Boolean.toString(drawOverlay));
+        body.add("debug", Boolean.toString(debug));
 
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.MULTIPART_FORM_DATA);
