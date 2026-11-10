@@ -5,7 +5,9 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.EntityGraph;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
 import java.time.LocalDate;
@@ -106,4 +108,36 @@ public interface WorkoutSessionRepository extends JpaRepository<WorkoutSession, 
             @org.springframework.data.repository.query.Param("status") WorkoutSessionStatus status,
             @org.springframework.data.repository.query.Param("startDate") LocalDate startDate,
             @org.springframework.data.repository.query.Param("endDate") LocalDate endDate);
+
+    @Modifying(flushAutomatically = true)
+    @Query(
+            value = "DELETE FROM workout_session_sets WHERE workout_session_exercise_id IN (" +
+                    "SELECT id FROM workout_session_exercises WHERE workout_session_id IN (" +
+                    "SELECT id FROM workout_sessions WHERE workout_plan_id = :workoutPlanId))",
+            nativeQuery = true
+    )
+    int deleteSessionSetsByWorkoutPlanId(@Param("workoutPlanId") Long workoutPlanId);
+
+    @Modifying(flushAutomatically = true)
+    @Query(
+            value = "DELETE FROM workout_session_exercises WHERE workout_session_id IN (" +
+                    "SELECT id FROM workout_sessions WHERE workout_plan_id = :workoutPlanId)",
+            nativeQuery = true
+    )
+    int deleteSessionExercisesByWorkoutPlanId(@Param("workoutPlanId") Long workoutPlanId);
+
+    @Modifying(flushAutomatically = true)
+    @Query(
+            value = "DELETE FROM workout_logs WHERE workout_session_id IN (" +
+                    "SELECT id FROM workout_sessions WHERE workout_plan_id = :workoutPlanId)",
+            nativeQuery = true
+    )
+    int deleteWorkoutLogsByWorkoutPlanId(@Param("workoutPlanId") Long workoutPlanId);
+
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query(
+            value = "DELETE FROM workout_sessions WHERE workout_plan_id = :workoutPlanId",
+            nativeQuery = true
+    )
+    int deleteAllByWorkoutPlanId(@Param("workoutPlanId") Long workoutPlanId);
 }

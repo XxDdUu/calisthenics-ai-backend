@@ -1,18 +1,16 @@
 package com.calisthenics.backend.workoutplan.service.impl;
 
+import com.calisthenics.backend.analytics.repository.PersonalRecordRepository;
 import com.calisthenics.backend.coachclient.entity.WorkoutPlanAssignment;
 import com.calisthenics.backend.coachclient.repository.WorkoutPlanAssignmentRepository;
 import com.calisthenics.backend.coachclient.repository.CoachClientRelationshipRepository;
 import com.calisthenics.backend.coachclient.type.CoachClientRelationshipStatus;
 import com.calisthenics.backend.coachclient.type.WorkoutPlanAssignmentStatus;
-import com.calisthenics.backend.config.UserTimeResolver;
 import com.calisthenics.backend.exercise.Exercise;
 import com.calisthenics.backend.exercise.ExerciseRepository;
 import com.calisthenics.backend.user.User;
 import com.calisthenics.backend.user.UserRepository;
-import com.calisthenics.backend.workout.WorkoutSession;
 import com.calisthenics.backend.workout.WorkoutSessionRepository;
-import com.calisthenics.backend.workout.WorkoutSessionStatus;
 import com.calisthenics.backend.workoutplan.dto.request.CreateWorkoutPlanRequest;
 import com.calisthenics.backend.workoutplan.dto.request.DuplicateWorkoutPlanRequest;
 import com.calisthenics.backend.workoutplan.dto.request.UpdateWorkoutPlanRequest;
@@ -64,7 +62,7 @@ public class WorkoutPlanServiceImpl implements WorkoutPlanService {
     private final WorkoutPlanAssignmentRepository assignmentRepository;
     private final CoachClientRelationshipRepository relationshipRepository;
     private final WorkoutSessionRepository workoutSessionRepository;
-    private final UserTimeResolver userTimeResolver;
+    private final PersonalRecordRepository personalRecordRepository;
 
     @Override
     @Transactional
@@ -205,19 +203,22 @@ public class WorkoutPlanServiceImpl implements WorkoutPlanService {
     @Override
     @Transactional
     public void delete(Long userId, Long planId) {
+        // Verify ownership before mutating any session or plan data.
+        findOwnedPlan(userId, planId);
+
+        // Preserve personal records earned during sessions of this plan by detaching session references.
+        personalRecordRepository.detachWorkoutSessionsByPlanId(planId);
+
+        // Explicitly delete all child session data and sessions (any status) before deleting parent plan.
+        workoutSessionRepository.deleteSessionSetsByWorkoutPlanId(planId);
+        workoutSessionRepository.deleteSessionExercisesByWorkoutPlanId(planId);
+        workoutSessionRepository.deleteWorkoutLogsByWorkoutPlanId(planId);
+        workoutSessionRepository.deleteAllByWorkoutPlanId(planId);
+
+        // Reload managed plan after clearing L1 cache and flush so FK violations roll back atomically.
         WorkoutPlan plan = findOwnedPlan(userId, planId);
-        // Cancel only future unstarted SCHEDULED placeholders for this plan; preserve all historical records.
-        java.time.LocalDate today = userTimeResolver.today(null);
-        List<WorkoutSession> futureUnstarted = workoutSessionRepository
-                .findByUserIdAndStatusAndStartedAtIsNullAndWorkoutDateAfter(userId, WorkoutSessionStatus.SCHEDULED, today);
-        List<WorkoutSession> matchingFuture = futureUnstarted.stream()
-                .filter(s -> s.getWorkoutPlan() != null && planId.equals(s.getWorkoutPlan().getId()))
-                .toList();
-        if (!matchingFuture.isEmpty()) {
-            matchingFuture.forEach(s -> s.setStatus(WorkoutSessionStatus.CANCELLED));
-            workoutSessionRepository.saveAll(matchingFuture);
-        }
         workoutPlanRepository.delete(plan);
+        workoutPlanRepository.flush();
     }
 
     @Override

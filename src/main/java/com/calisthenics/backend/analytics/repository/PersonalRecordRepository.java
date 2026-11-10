@@ -4,6 +4,7 @@ import com.calisthenics.backend.analytics.model.PersonalRecord;
 import com.calisthenics.backend.analytics.model.PersonalRecordType;
 import org.springframework.data.jpa.repository.EntityGraph;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
@@ -104,4 +105,12 @@ public interface PersonalRecordRepository extends JpaRepository<PersonalRecord, 
     long countByUserIdAndAchievedAtBetween(Long userId, ZonedDateTime start, ZonedDateTime end);
 
     long countByExerciseId(Long exerciseId);
+
+    @Modifying(flushAutomatically = true)
+    @Query(
+            value = "UPDATE personal_records SET workout_session_id = NULL, workout_session_set_id = NULL " +
+                    "WHERE workout_session_id IN (SELECT id FROM workout_sessions WHERE workout_plan_id = :workoutPlanId)",
+            nativeQuery = true
+    )
+    int detachWorkoutSessionsByPlanId(@Param("workoutPlanId") Long workoutPlanId);
 }
