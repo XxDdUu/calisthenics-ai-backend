@@ -1,5 +1,7 @@
 package com.calisthenics.backend.profile.service.impl;
 
+import com.calisthenics.backend.bodymetrics.entity.ClientBodyMeasurement;
+import com.calisthenics.backend.bodymetrics.repository.ClientBodyMeasurementRepository;
 import com.calisthenics.backend.chat.repository.ChatConversationRepository;
 import com.calisthenics.backend.coachclient.entity.CoachClientRelationship;
 import com.calisthenics.backend.coachclient.repository.CoachClientRelationshipRepository;
@@ -24,6 +26,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.math.BigDecimal;
+import java.time.ZonedDateTime;
 import java.util.List;
 import java.util.Optional;
 
@@ -37,6 +40,7 @@ public class ClientProfileServiceImpl implements ClientProfileService {
     private final WorkoutPlanRepository workoutPlanRepository;
     private final WorkoutSessionRepository workoutSessionRepository;
     private final ChatConversationRepository chatConversationRepository;
+    private final ClientBodyMeasurementRepository measurementRepository;
 
     @Override
     @Transactional(readOnly = true)
@@ -93,6 +97,13 @@ public class ClientProfileServiceImpl implements ClientProfileService {
         }
         if (request.getHeightCm() != null) {
             profile.setHeightCm(BigDecimal.valueOf(request.getHeightCm()));
+        }
+        if (request.getWeightKg() != null) {
+            measurementRepository.save(ClientBodyMeasurement.builder()
+                    .client(user)
+                    .weightKg(BigDecimal.valueOf(request.getWeightKg()))
+                    .measuredAt(ZonedDateTime.now())
+                    .build());
         }
 
         ClientProfile saved = clientProfileRepository.save(profile);
@@ -211,6 +222,15 @@ public class ClientProfileServiceImpl implements ClientProfileService {
                 ? profile.getExperienceLevel()
                 : user.getExperienceLevel();
 
+        Double heightCm = (profile != null && profile.getHeightCm() != null)
+                ? profile.getHeightCm().doubleValue()
+                : null;
+
+        Double weightKg = measurementRepository.findFirstByClientIdOrderByMeasuredAtDesc(clientUserId)
+                .map(ClientBodyMeasurement::getWeightKg)
+                .map(BigDecimal::doubleValue)
+                .orElse(null);
+
         return ClientProfileResponse.builder()
                 .id(user.getId())
                 .userId(user.getId())
@@ -224,7 +244,8 @@ public class ClientProfileServiceImpl implements ClientProfileService {
                 .trainingInterests(profile != null ? profile.getTrainingInterests() : null)
                 .preferredFrequency(profile != null ? profile.getPreferredFrequency() : null)
                 .coachingLanguage(profile != null ? profile.getCoachingLanguage() : null)
-                .heightCm(profile != null && profile.getHeightCm() != null ? profile.getHeightCm().doubleValue() : null)
+                .heightCm(heightCm)
+                .weightKg(weightKg)
                 .activePlansCount(activePlans)
                 .completedSessionsCount(completedSessions)
                 .currentPlanId(currentPlanOpt.map(WorkoutPlan::getId).orElse(null))

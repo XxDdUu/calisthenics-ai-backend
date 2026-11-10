@@ -16,6 +16,16 @@ public class AppProperties {
     private Storage storage = new Storage();
     private Firebase firebase = new Firebase();
     private Google google = new Google();
+    private Gemini gemini = new Gemini();
+
+    @Getter
+    @Setter
+    public static class Gemini {
+        private String apiKey = "";
+        private String model = "gemini-flash-lite-latest";
+        private String baseUrl = "https://generativelanguage.googleapis.com/v1beta";
+        private int timeoutSeconds = 30;
+    }
 
     @Getter
     @Setter

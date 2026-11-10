@@ -46,6 +46,9 @@ public interface WorkoutSessionRepository extends JpaRepository<WorkoutSession, 
     List<WorkoutSession> findByUserIdAndWorkoutDateAndStatus(
             Long userId, LocalDate workoutDate, WorkoutSessionStatus status);
 
+    boolean existsByUserIdAndWorkoutDateAndStatus(
+            Long userId, LocalDate workoutDate, WorkoutSessionStatus status);
+
     List<WorkoutSession> findByUserIdAndStatusOrderByStartedAtDesc(Long userId, WorkoutSessionStatus status);
 
     Page<WorkoutSession> findByUserIdAndStatus(Long userId, WorkoutSessionStatus status, Pageable pageable);

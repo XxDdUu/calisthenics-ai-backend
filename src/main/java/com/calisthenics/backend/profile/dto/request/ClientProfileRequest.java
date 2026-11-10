@@ -42,4 +42,8 @@ public class ClientProfileRequest {
     @jakarta.validation.constraints.DecimalMin(value = "50.0", message = "Height must be at least 50 cm")
     @jakarta.validation.constraints.DecimalMax(value = "300.0", message = "Height must not exceed 300 cm")
     private Double heightCm;
+
+    @jakarta.validation.constraints.DecimalMin(value = "20.0", message = "Weight must be at least 20 kg")
+    @jakarta.validation.constraints.DecimalMax(value = "500.0", message = "Weight must not exceed 500 kg")
+    private Double weightKg;
 }

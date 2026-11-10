@@ -1,5 +1,6 @@
 package com.calisthenics.backend.profile;
 
+import com.calisthenics.backend.bodymetrics.repository.ClientBodyMeasurementRepository;
 import com.calisthenics.backend.coachclient.entity.CoachClientRelationship;
 import com.calisthenics.backend.coachclient.entity.WorkoutPlanAssignment;
 import com.calisthenics.backend.coachclient.repository.CoachClientRelationshipRepository;
@@ -35,6 +36,7 @@ import java.time.ZonedDateTime;
 import java.util.List;
 import java.util.UUID;
 
+import static org.hamcrest.Matchers.nullValue;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
@@ -57,6 +59,9 @@ class ProfileIntegrationTest {
 
     @Autowired
     private WorkoutPlanAssignmentRepository assignmentRepository;
+
+    @Autowired
+    private ClientBodyMeasurementRepository measurementRepository;
 
     @Autowired
     private WorkoutPlanRepository workoutPlanRepository;
@@ -244,6 +249,114 @@ class ProfileIntegrationTest {
         mockMvc.perform(get("/api/v1/clients/" + client.getId() + "/overview")
                         .with(principal(stranger)))
                 .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void testAuthorizedCoach_CanViewAssignedAthleteHeightAndWeight_Success() throws Exception {
+        User coach = createUser("Coach BodyMetrics");
+        User athlete = createUser("Athlete Fit");
+
+        relationshipRepository.save(CoachClientRelationship.builder()
+                .coach(coach)
+                .client(athlete)
+                .requestedBy(athlete)
+                .status(CoachClientRelationshipStatus.ACTIVE)
+                .build());
+
+        // Athlete sets their height and weight
+        ClientProfileRequest request = ClientProfileRequest.builder()
+                .displayName("Athlete Fit")
+                .heightCm(177.0)
+                .weightKg(76.0)
+                .build();
+
+        mockMvc.perform(put("/api/v1/clients/me")
+                        .with(principal(athlete))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.heightCm").value(177.0))
+                .andExpect(jsonPath("$.weightKg").value(76.0));
+
+        // Authorized coach views the athlete's profile
+        mockMvc.perform(get("/api/v1/clients/" + athlete.getId())
+                        .with(principal(coach)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.userId").value(athlete.getId()))
+                .andExpect(jsonPath("$.heightCm").value(177.0))
+                .andExpect(jsonPath("$.weightKg").value(76.0));
+    }
+
+    @Test
+    void testAuthorizedCoach_AthleteHasNoHeightOrWeight_ReturnsNullMetrics() throws Exception {
+        User coach = createUser("Coach EmptyMetrics");
+        User athlete = createUser("Athlete Incomplete");
+
+        relationshipRepository.save(CoachClientRelationship.builder()
+                .coach(coach)
+                .client(athlete)
+                .requestedBy(athlete)
+                .status(CoachClientRelationshipStatus.ACTIVE)
+                .build());
+
+        // Coach views athlete profile before any metrics are entered
+        mockMvc.perform(get("/api/v1/clients/" + athlete.getId())
+                        .with(principal(coach)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.userId").value(athlete.getId()))
+                .andExpect(jsonPath("$.heightCm").value(nullValue()))
+                .andExpect(jsonPath("$.weightKg").value(nullValue()));
+    }
+
+    @Test
+    void testAthleteUpdatesMetrics_AppearsCorrectlyInCoachView() throws Exception {
+        User coach = createUser("Coach Dynamic");
+        User athlete = createUser("Athlete Growing");
+
+        relationshipRepository.save(CoachClientRelationship.builder()
+                .coach(coach)
+                .client(athlete)
+                .requestedBy(athlete)
+                .status(CoachClientRelationshipStatus.ACTIVE)
+                .build());
+
+        // Initial metrics
+        ClientProfileRequest initialRequest = ClientProfileRequest.builder()
+                .heightCm(170.0)
+                .weightKg(68.0)
+                .build();
+        mockMvc.perform(put("/api/v1/clients/me")
+                        .with(principal(athlete))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(initialRequest)))
+                .andExpect(status().isOk());
+
+        // Verify coach sees initial metrics
+        mockMvc.perform(get("/api/v1/clients/" + athlete.getId())
+                        .with(principal(coach)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.heightCm").value(170.0))
+                .andExpect(jsonPath("$.weightKg").value(68.0));
+
+        // Athlete updates their height and weight
+        ClientProfileRequest updatedRequest = ClientProfileRequest.builder()
+                .heightCm(172.5)
+                .weightKg(71.5)
+                .build();
+        mockMvc.perform(put("/api/v1/clients/me")
+                        .with(principal(athlete))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(updatedRequest)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.heightCm").value(172.5))
+                .andExpect(jsonPath("$.weightKg").value(71.5));
+
+        // Coach views again - receives updated metrics
+        mockMvc.perform(get("/api/v1/clients/" + athlete.getId())
+                        .with(principal(coach)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.heightCm").value(172.5))
+                .andExpect(jsonPath("$.weightKg").value(71.5));
     }
 
     @Test

@@ -23,6 +23,7 @@ import java.util.List;
 public class AnalysisController {
 
     private final AnalysisService analysisService;
+    private final AnalysisSessionService sessionService;
 
     @PostMapping(value = "/image", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     @Operation(summary = "Analyze single image frame for calisthenics pose estimation & form scoring")
@@ -46,7 +47,13 @@ public class AnalysisController {
 
     @GetMapping("/history")
     @Operation(summary = "Get user's past AI form analysis history")
-    public ResponseEntity<List<AnalysisResponse>> getUserHistory(@AuthenticationPrincipal UserPrincipal currentUser) {
+    public ResponseEntity<?> getUserHistory(
+            @AuthenticationPrincipal UserPrincipal currentUser,
+            @RequestParam(value = "type", required = false) String type,
+            @RequestParam(value = "exerciseType", required = false) String exerciseType) {
+        if ("sessions".equalsIgnoreCase(type) || "live".equalsIgnoreCase(type) || exerciseType != null) {
+            return ResponseEntity.ok(sessionService.getUserHistory(currentUser.getId(), exerciseType));
+        }
         List<AnalysisResponse> history = analysisService.getUserAnalysisHistory(currentUser.getId());
         return ResponseEntity.ok(history);
     }

@@ -10,4 +10,6 @@ import java.util.Optional;
 public interface WorkoutPlanDayRepository extends JpaRepository<WorkoutPlanDay, Long> {
 
     Optional<WorkoutPlanDay> findByIdAndWorkoutPlanId(Long id, Long workoutPlanId);
+
+    java.util.List<WorkoutPlanDay> findByWorkoutPlanIdOrderByDisplayOrderAsc(Long workoutPlanId);
 }

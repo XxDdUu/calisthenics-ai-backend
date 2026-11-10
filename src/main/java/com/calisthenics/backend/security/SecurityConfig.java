@@ -64,7 +64,9 @@ public class SecurityConfig {
                                 HttpMethod.GET,
                                 "/api/v1/storage/exercise-media/**",
                                 "/api/v1/exercises/**",
-                                "/api/v1/analysis/live/exercises"
+                                "/api/v1/analysis/live/exercises",
+                                "/api/v1/profile-media/**",
+                                "/api/v1/profile/media/**"
                         ).permitAll()
                         .anyRequest().authenticated()
                 );

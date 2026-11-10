@@ -42,6 +42,13 @@ public class WorkoutPlan {
     @Builder.Default
     private boolean active = false;
 
+    @Column(name = "is_ai_generated", nullable = false)
+    @Builder.Default
+    private boolean aiGenerated = false;
+
+    @Column(name = "ai_prompt", columnDefinition = "TEXT")
+    private String aiPrompt;
+
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)
     private ZonedDateTime createdAt;

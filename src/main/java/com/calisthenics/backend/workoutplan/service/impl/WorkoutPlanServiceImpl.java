@@ -235,11 +235,13 @@ public class WorkoutPlanServiceImpl implements WorkoutPlanService {
 
     private void activatePlanForLockedUser(Long userId, WorkoutPlan target) {
         for (WorkoutPlan plan : workoutPlanRepository.findByUserIdForUpdate(userId)) {
-            plan.setActive(plan.getId().equals(target.getId()));
+            if (!plan.getId().equals(target.getId()) && plan.isActive()) {
+                plan.setActive(false);
+                workoutPlanRepository.saveAndFlush(plan);
+            }
         }
-        // findByUserIdForUpdate returns the managed target; retain this assignment for clarity when
-        // a persistence provider returns a separate proxy instance.
         target.setActive(true);
+        workoutPlanRepository.saveAndFlush(target);
     }
 
     private List<WorkoutPlanDayRequest> validateDays(WorkoutPlanRequest request, boolean requireCompleteWeek) {

@@ -1,5 +1,6 @@
 server:
   port: ${PORT:8080}
+  forward-headers-strategy: framework
   servlet:
     context-path: /
 
@@ -79,6 +80,12 @@ app:
 
   google:
     client-id: ${GOOGLE_CLIENT_ID:610669602436-6vga6qoca1iefspli4o28ets4fgkv68j.apps.googleusercontent.com}
+
+  gemini:
+    api-key: ${GEMINI_API_KEY:}
+    model: ${GEMINI_MODEL:gemini-flash-lite-latest}
+    base-url: ${GEMINI_BASE_URL:https://generativelanguage.googleapis.com/v1beta}
+    timeout-seconds: ${GEMINI_TIMEOUT_SECONDS:30}
 
 # Springdoc OpenAPI Swagger Documentation
 springdoc:
