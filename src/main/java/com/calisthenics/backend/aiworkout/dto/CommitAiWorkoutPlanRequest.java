@@ -26,5 +26,7 @@ public class CommitAiWorkoutPlanRequest {
     @Builder.Default
     private Boolean replaceExisting = true;
 
+    private Long expectedActivePlanId;
+
     private Long clientId;
 }

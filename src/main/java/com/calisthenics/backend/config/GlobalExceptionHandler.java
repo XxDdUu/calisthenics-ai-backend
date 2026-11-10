@@ -121,11 +121,43 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler({
             CoachClientConflictException.class,
-            WorkoutPlanAssignmentConflictException.class,
-            DataIntegrityViolationException.class,
-            OptimisticLockingFailureException.class
+            WorkoutPlanAssignmentConflictException.class
     })
     public ResponseEntity<Map<String, Object>> handleCoachClientConflict() {
+        return error(HttpStatus.CONFLICT, "Conflict", "The requested action conflicts with current state");
+    }
+
+    @ExceptionHandler(OptimisticLockingFailureException.class)
+    public ResponseEntity<Map<String, Object>> handleOptimisticLockConflict() {
+        return error(HttpStatus.CONFLICT, "Conflict", "Your workout data was updated elsewhere. Refresh and try again.");
+    }
+
+    @ExceptionHandler(DataIntegrityViolationException.class)
+    public ResponseEntity<Map<String, Object>> handleDataIntegrityViolation(DataIntegrityViolationException ex) {
+        Throwable root = ex.getMostSpecificCause();
+        String details = root != null && root.getMessage() != null ? root.getMessage() : "";
+        String lower = details.toLowerCase();
+
+        if (lower.contains("uk_workout_plans_one_active_per_user")) {
+            return error(HttpStatus.CONFLICT, "Conflict",
+                    "Another workout plan is already active. Refresh your plans or confirm replacing the active plan.");
+        }
+        if (lower.contains("uk_workout_plan_exercise_order")) {
+            return error(HttpStatus.CONFLICT, "Conflict",
+                    "An exercise already uses that display order in this session.");
+        }
+        if (lower.contains("uk_active_session_for_scheduled_day")) {
+            return error(HttpStatus.CONFLICT, "Conflict",
+                    "An in-progress workout session already exists for this day.");
+        }
+        if (lower.contains("duplicate key") || lower.contains("unique constraint") || lower.contains("23505")) {
+            return error(HttpStatus.CONFLICT, "Conflict",
+                    "This action conflicts with an existing record. Please refresh and retry.");
+        }
+        if (lower.contains("check constraint") || lower.contains("not-null") || lower.contains("null value")) {
+            return error(HttpStatus.BAD_REQUEST, "Bad Request",
+                    "Invalid workout data: sets, reps, and hold durations must be positive when provided.");
+        }
         return error(HttpStatus.CONFLICT, "Conflict", "The requested action conflicts with current state");
     }
 

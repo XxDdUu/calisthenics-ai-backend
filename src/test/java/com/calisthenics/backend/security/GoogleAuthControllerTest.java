@@ -2,6 +2,7 @@ package com.calisthenics.backend.security;
 
 import com.calisthenics.backend.security.dto.GoogleAuthRequest;
 import com.calisthenics.backend.security.dto.GoogleUserInfo;
+import com.calisthenics.backend.user.Gender;
 import com.calisthenics.backend.user.Role;
 import com.calisthenics.backend.user.User;
 import com.calisthenics.backend.user.UserRepository;
@@ -74,12 +75,14 @@ public class GoogleAuthControllerTest {
                 .andExpect(jsonPath("$.refreshToken").isNotEmpty())
                 .andExpect(jsonPath("$.email").value("newgoogleuser@example.com"))
                 .andExpect(jsonPath("$.fullName").value("New Google Athlete"))
-                .andExpect(jsonPath("$.role").value("ROLE_USER"));
+                .andExpect(jsonPath("$.role").value("ROLE_USER"))
+                .andExpect(jsonPath("$.gender").doesNotExist());
 
         User savedUser = userRepository.findByGoogleId("google-sub-1001").orElse(null);
         assertThat(savedUser).isNotNull();
         assertThat(savedUser.getEmail()).isEqualTo("newgoogleuser@example.com");
         assertThat(savedUser.getRole()).isEqualTo(Role.ROLE_USER);
+        assertThat(savedUser.getGender()).isNull();
         assertThat(savedUser.getPasswordHash()).isNull();
     }
 
@@ -90,6 +93,7 @@ public class GoogleAuthControllerTest {
                 .googleId("google-sub-2002")
                 .fullName("Existing Google User")
                 .role(Role.ROLE_USER)
+                .gender(Gender.FEMALE)
                 .build();
         userRepository.save(existing);
 
@@ -111,7 +115,8 @@ public class GoogleAuthControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.accessToken").isNotEmpty())
                 .andExpect(jsonPath("$.email").value("existinggoogle@example.com"))
-                .andExpect(jsonPath("$.userId").value(existing.getId()));
+                .andExpect(jsonPath("$.userId").value(existing.getId()))
+                .andExpect(jsonPath("$.gender").value("FEMALE"));
     }
 
     @Test

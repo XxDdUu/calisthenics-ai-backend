@@ -1,6 +1,7 @@
 package com.calisthenics.backend.coachclient.dto.response;
 
 import com.calisthenics.backend.coachclient.type.CoachClientRelationshipStatus;
+import com.calisthenics.backend.user.Gender;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -19,10 +20,12 @@ public class CoachClientRelationshipResponse {
     private String coachName;
     private String coachAvatarUrl;
     private String coachExperienceLevel;
+    private Gender coachGender;
     private Long clientId;
     private String clientName;
     private String clientAvatarUrl;
     private String clientExperienceLevel;
+    private Gender clientGender;
     private Long requestedBy;
     private CoachClientRelationshipStatus status;
     private ZonedDateTime createdAt;

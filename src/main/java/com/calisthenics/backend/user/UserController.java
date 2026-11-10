@@ -1,11 +1,13 @@
 package com.calisthenics.backend.user;
 
 import com.calisthenics.backend.security.UserPrincipal;
+import com.calisthenics.backend.user.dto.UpdateGenderRequest;
 import com.calisthenics.backend.user.dto.UpdateProfileRequest;
 import com.calisthenics.backend.user.dto.UserProfileResponse;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -36,6 +38,18 @@ public class UserController {
             @AuthenticationPrincipal UserPrincipal currentUser,
             @RequestBody UpdateProfileRequest updateRequest) {
         UserProfileResponse updatedProfile = userService.updateUserProfile(currentUser.getId(), updateRequest);
+        return ResponseEntity.ok(updatedProfile);
+    }
+
+    @PatchMapping("/me/gender")
+    @Operation(summary = "Update authenticated user's gender")
+    public ResponseEntity<UserProfileResponse> updateCurrentUserGender(
+            @AuthenticationPrincipal UserPrincipal currentUser,
+            @Valid @RequestBody UpdateGenderRequest updateGenderRequest) {
+        UserProfileResponse updatedProfile = userService.updateUserGender(
+                currentUser.getId(),
+                updateGenderRequest.getGender()
+        );
         return ResponseEntity.ok(updatedProfile);
     }
 

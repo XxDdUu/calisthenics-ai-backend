@@ -42,6 +42,7 @@ import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.Spy;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.http.HttpStatus;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.time.LocalDate;
@@ -338,9 +339,10 @@ class AiWorkoutPlanServiceTest {
     @Test
     @DisplayName("Commit plan creates active workout plan and schedules calendar sessions")
     void testCommitPlanSuccessfully() {
-        when(userRepository.findById(10L)).thenReturn(Optional.of(testAthlete));
+        when(userRepository.findByIdForUpdate(10L)).thenReturn(Optional.of(testAthlete));
         when(userRepository.getReferenceById(10L)).thenReturn(testAthlete);
         when(exerciseRepository.existsById(anyLong())).thenReturn(true);
+        when(workoutPlanRepository.findByUserIdForUpdate(10L)).thenReturn(Collections.emptyList());
 
         AiWorkoutPlanPreviewResponse.AiWorkoutSessionPreview mondaySession = AiWorkoutPlanPreviewResponse.AiWorkoutSessionPreview.builder()
                 .dayOfWeek(WorkoutDayOfWeek.MONDAY)
@@ -422,7 +424,7 @@ class AiWorkoutPlanServiceTest {
     @Test
     @DisplayName("Duplicate commit with same idempotency key returns existing plan without re-inserting")
     void testIdempotentCommit() {
-        when(userRepository.findById(10L)).thenReturn(Optional.of(testAthlete));
+        when(userRepository.findByIdForUpdate(10L)).thenReturn(Optional.of(testAthlete));
 
         AiWorkoutPlanLog previousLog = AiWorkoutPlanLog.builder()
                 .id(55L)
@@ -430,7 +432,8 @@ class AiWorkoutPlanServiceTest {
                 .status("COMMITTED")
                 .build();
 
-        when(aiWorkoutPlanLogRepository.findByIdempotencyKey("idemp-unique-999")).thenReturn(Optional.of(previousLog));
+        when(aiWorkoutPlanLogRepository.findFirstByUserIdAndIdempotencyKeyOrderByCreatedAtDesc(10L, "idemp-unique-999"))
+                .thenReturn(Optional.of(previousLog));
 
         WorkoutPlan activePlan = WorkoutPlan.builder().id(202L).name("Active Plan").build();
         when(workoutPlanRepository.findFirstByUserIdAndActiveTrueOrderByUpdatedAtDesc(10L)).thenReturn(Optional.of(activePlan));
@@ -449,5 +452,147 @@ class AiWorkoutPlanServiceTest {
 
         assertEquals(202L, result.getId());
         verify(workoutPlanService, never()).create(anyLong(), any());
+    }
+
+    @Test
+    @DisplayName("Generate and commit normalize reps=0 on static hold exercises to null")
+    void testNormalizeZeroRepsOnStaticHoldExercise() {
+        when(userRepository.findById(10L)).thenReturn(Optional.of(testAthlete));
+        when(userRepository.findByIdForUpdate(10L)).thenReturn(Optional.of(testAthlete));
+        when(userRepository.getReferenceById(10L)).thenReturn(testAthlete);
+        when(exerciseRepository.findByActiveTrue()).thenReturn(exerciseCatalog);
+        when(exerciseRepository.existsById(6L)).thenReturn(true);
+        when(workoutPlanRepository.findFirstByUserIdAndActiveTrueOrderByUpdatedAtDesc(10L)).thenReturn(Optional.empty());
+        when(workoutPlanRepository.findByUserIdForUpdate(10L)).thenReturn(Collections.emptyList());
+
+        GeminiStructuredWorkoutPlan geminiPlan = GeminiStructuredWorkoutPlan.builder()
+                .planName("Planche Specialization")
+                .durationWeeks(4)
+                .sessions(List.of(
+                        GeminiStructuredWorkoutPlan.GeminiSession.builder()
+                                .dayOfWeek("MONDAY")
+                                .title("Planche Focus")
+                                .restDay(false)
+                                .exercises(List.of(
+                                        GeminiStructuredWorkoutPlan.GeminiExercise.builder()
+                                                .exerciseId(6L)
+                                                .exerciseName("Planche")
+                                                .sets(4)
+                                                .reps(0)
+                                                .holdSeconds(12)
+                                                .restSeconds(180)
+                                                .build()
+                                ))
+                                .build()
+                ))
+                .build();
+
+        when(geminiApiClient.generateWorkoutPlan(anyString(), anyString())).thenReturn(
+                new GeminiApiClient.GeminiCallResult(geminiPlan, "{}", 100, 200, 180L, "gemini-flash-lite-latest")
+        );
+
+        AiWorkoutPlanPreviewResponse preview = aiWorkoutPlanService.generatePlan(
+                10L, GenerateAiWorkoutPlanRequest.builder().prompt("Planche 4 weeks").build()
+        );
+        AiWorkoutPlanPreviewResponse.AiWorkoutExercisePreview mondayPlanche = preview.getSessions().stream()
+                .filter(s -> s.getDayOfWeek() == WorkoutDayOfWeek.MONDAY)
+                .findFirst().orElseThrow()
+                .getExercises().get(0);
+        assertNull(mondayPlanche.getReps());
+        assertEquals(12, mondayPlanche.getHoldSeconds());
+
+        // Even if a stale or raw preview still contains reps=0, commitPlan sanitizes it before persistence
+        mondayPlanche.setReps(0);
+        WorkoutPlan created = WorkoutPlan.builder().id(301L).name("Planche Specialization").user(testAthlete).active(true).build();
+        when(workoutPlanService.create(eq(10L), any(CreateWorkoutPlanRequest.class))).thenReturn(
+                WorkoutPlanResponse.builder().id(301L).name("Planche Specialization").active(true).build()
+        );
+        when(workoutPlanRepository.findById(301L)).thenReturn(Optional.of(created));
+        when(workoutPlanRepository.getReferenceById(301L)).thenReturn(created);
+        when(workoutPlanDayRepository.findByWorkoutPlanIdOrderByDisplayOrderAsc(301L)).thenReturn(Collections.emptyList());
+
+        aiWorkoutPlanService.commitPlan(10L, CommitAiWorkoutPlanRequest.builder()
+                .plan(preview)
+                .replaceExisting(true)
+                .build());
+
+        ArgumentCaptor<CreateWorkoutPlanRequest> captor = ArgumentCaptor.forClass(CreateWorkoutPlanRequest.class);
+        verify(workoutPlanService).create(eq(10L), captor.capture());
+        var persistedEx = captor.getValue().getDays().stream()
+                .filter(d -> d.getDayOfWeek() == WorkoutDayOfWeek.MONDAY)
+                .findFirst().orElseThrow()
+                .getExercises().get(0);
+        assertNull(persistedEx.getReps());
+        assertEquals(12, persistedEx.getDurationSeconds());
+    }
+
+    @Test
+    @DisplayName("Commit rejects stale expectedActivePlanId with 409 CONFLICT without overwriting active plan")
+    void testCommitRejectsStaleActivePlanConflict() {
+        when(userRepository.findByIdForUpdate(10L)).thenReturn(Optional.of(testAthlete));
+        WorkoutPlan existingActive = WorkoutPlan.builder().id(88L).name("Coach Strength Plan").active(true).build();
+        when(workoutPlanRepository.findByUserIdForUpdate(10L)).thenReturn(List.of(existingActive));
+
+        AiWorkoutPlanPreviewResponse preview = AiWorkoutPlanPreviewResponse.builder()
+                .planName("New AI Plan")
+                .sessions(List.of(
+                        AiWorkoutPlanPreviewResponse.AiWorkoutSessionPreview.builder()
+                                .dayOfWeek(WorkoutDayOfWeek.MONDAY)
+                                .restDay(false)
+                                .exercises(Collections.emptyList())
+                                .build()
+                ))
+                .build();
+
+        ResponseStatusException ex = assertThrows(ResponseStatusException.class, () ->
+                aiWorkoutPlanService.commitPlan(10L, CommitAiWorkoutPlanRequest.builder()
+                        .plan(preview)
+                        .replaceExisting(true)
+                        .expectedActivePlanId(0L)
+                        .build()));
+
+        assertEquals(HttpStatus.CONFLICT, ex.getStatusCode());
+        assertTrue(ex.getReason().contains("Coach Strength Plan"));
+        assertTrue(existingActive.isActive());
+        verify(workoutPlanService, never()).create(anyLong(), any());
+    }
+
+    @Test
+    @DisplayName("Commit with replaceExisting=false creates inactive plan and keeps existing active plan intact")
+    void testCommitReplaceExistingFalseKeepsActivePlan() {
+        when(userRepository.findByIdForUpdate(10L)).thenReturn(Optional.of(testAthlete));
+        when(userRepository.getReferenceById(10L)).thenReturn(testAthlete);
+        WorkoutPlan existingActive = WorkoutPlan.builder().id(88L).name("Existing Active Plan").active(true).build();
+        when(workoutPlanRepository.findByUserIdForUpdate(10L)).thenReturn(List.of(existingActive));
+
+        WorkoutPlan createdEntity = WorkoutPlan.builder().id(305L).name("Saved Draft AI Plan").user(testAthlete).active(false).build();
+        when(workoutPlanService.create(eq(10L), any(CreateWorkoutPlanRequest.class))).thenReturn(
+                WorkoutPlanResponse.builder().id(305L).name("Saved Draft AI Plan").active(false).build()
+        );
+        when(workoutPlanRepository.findById(305L)).thenReturn(Optional.of(createdEntity));
+        when(workoutPlanRepository.getReferenceById(305L)).thenReturn(createdEntity);
+        when(workoutPlanDayRepository.findByWorkoutPlanIdOrderByDisplayOrderAsc(305L)).thenReturn(Collections.emptyList());
+
+        AiWorkoutPlanPreviewResponse preview = AiWorkoutPlanPreviewResponse.builder()
+                .planName("Saved Draft AI Plan")
+                .sessions(List.of(
+                        AiWorkoutPlanPreviewResponse.AiWorkoutSessionPreview.builder()
+                                .dayOfWeek(WorkoutDayOfWeek.MONDAY)
+                                .restDay(true)
+                                .exercises(Collections.emptyList())
+                                .build()
+                ))
+                .build();
+
+        WorkoutPlanResponse response = aiWorkoutPlanService.commitPlan(10L, CommitAiWorkoutPlanRequest.builder()
+                .plan(preview)
+                .replaceExisting(false)
+                .build());
+
+        assertFalse(response.isActive());
+        assertTrue(existingActive.isActive());
+        ArgumentCaptor<CreateWorkoutPlanRequest> captor = ArgumentCaptor.forClass(CreateWorkoutPlanRequest.class);
+        verify(workoutPlanService).create(eq(10L), captor.capture());
+        assertEquals(Boolean.FALSE, captor.getValue().getActive());
     }
 }

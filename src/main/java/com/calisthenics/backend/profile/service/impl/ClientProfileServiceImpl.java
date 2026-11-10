@@ -80,6 +80,10 @@ public class ClientProfileServiceImpl implements ClientProfileService {
             user.setExperienceLevel(request.getExperienceLevel().trim());
             userRepository.save(user);
         }
+        if (request.getGender() != null) {
+            user.setGender(request.getGender());
+            userRepository.save(user);
+        }
         if (request.getTrainingExperience() != null) {
             profile.setTrainingExperience(request.getTrainingExperience().trim());
         }
@@ -190,6 +194,7 @@ public class ClientProfileServiceImpl implements ClientProfileService {
                     .coachName(coach.getFullName())
                     .coachAvatarUrl(coach.getAvatarUrl())
                     .coachExperienceLevel(coach.getExperienceLevel())
+                    .coachGender(coach.getGender())
                     .connectionStatus("ACTIVE")
                     .relationshipId(rel.getId())
                     .conversationId(conversationId)
@@ -239,6 +244,7 @@ public class ClientProfileServiceImpl implements ClientProfileService {
                 .avatarUrl(avatarUrl)
                 .bio(profile != null ? profile.getBio() : null)
                 .experienceLevel(experienceLevel)
+                .gender(user.getGender())
                 .trainingExperience(profile != null ? profile.getTrainingExperience() : null)
                 .primaryGoals(profile != null ? profile.getPrimaryGoals() : null)
                 .trainingInterests(profile != null ? profile.getTrainingInterests() : null)

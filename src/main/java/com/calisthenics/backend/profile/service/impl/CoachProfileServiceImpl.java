@@ -65,6 +65,10 @@ public class CoachProfileServiceImpl implements CoachProfileService {
             user.setAvatarUrl(request.getAvatarUrl().trim());
             userRepository.save(user);
         }
+        if (request.getGender() != null) {
+            user.setGender(request.getGender());
+            userRepository.save(user);
+        }
         if (request.getBio() != null) {
             profile.setBio(request.getBio().trim());
         }
@@ -198,6 +202,7 @@ public class CoachProfileServiceImpl implements CoachProfileService {
                 .displayName(displayName)
                 .avatarUrl(avatarUrl)
                 .experienceLevel(user.getExperienceLevel())
+                .gender(user.getGender())
                 .bio(profile != null ? profile.getBio() : null)
                 .specialties(profile != null ? profile.getSpecialties() : null)
                 .yearsExperience(profile != null ? profile.getYearsExperience() : null)

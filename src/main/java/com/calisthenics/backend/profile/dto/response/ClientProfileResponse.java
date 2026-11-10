@@ -1,5 +1,6 @@
 package com.calisthenics.backend.profile.dto.response;
 
+import com.calisthenics.backend.user.Gender;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -20,6 +21,7 @@ public class ClientProfileResponse {
     private String avatarUrl;
     private String bio;
     private String experienceLevel;
+    private Gender gender;
     private String trainingExperience;
     private String primaryGoals;
     private String trainingInterests;

@@ -39,7 +39,22 @@ public class UserService {
         if (request.getExperienceLevel() != null) {
             user.setExperienceLevel(request.getExperienceLevel());
         }
+        if (request.getGender() != null) {
+            user.setGender(request.getGender());
+        }
 
+        User updated = userRepository.save(user);
+        return mapToProfileResponse(updated);
+    }
+
+    @Transactional
+    public UserProfileResponse updateUserGender(Long userId, Gender gender) {
+        if (gender == null) {
+            throw new IllegalArgumentException("Gender must be MALE or FEMALE");
+        }
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
+        user.setGender(gender);
         User updated = userRepository.save(user);
         return mapToProfileResponse(updated);
     }
@@ -73,6 +88,7 @@ public class UserService {
                 .fullName(user.getFullName())
                 .avatarUrl(user.getAvatarUrl())
                 .experienceLevel(user.getExperienceLevel())
+                .gender(user.getGender())
                 .build();
     }
 
@@ -84,6 +100,7 @@ public class UserService {
                 .avatarUrl(user.getAvatarUrl())
                 .role(user.getRole().name())
                 .experienceLevel(user.getExperienceLevel())
+                .gender(user.getGender())
                 .createdAt(user.getCreatedAt())
                 .build();
     }

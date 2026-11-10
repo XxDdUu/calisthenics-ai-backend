@@ -10,9 +10,11 @@ import com.calisthenics.backend.coachclient.type.WorkoutPlanAssignmentStatus;
 import com.calisthenics.backend.profile.dto.request.ClientProfileRequest;
 import com.calisthenics.backend.profile.dto.request.CoachProfileRequest;
 import com.calisthenics.backend.security.UserPrincipal;
+import com.calisthenics.backend.user.Gender;
 import com.calisthenics.backend.user.Role;
 import com.calisthenics.backend.user.User;
 import com.calisthenics.backend.user.UserRepository;
+import com.calisthenics.backend.user.dto.UpdateGenderRequest;
 import com.calisthenics.backend.workout.WorkoutSession;
 import com.calisthenics.backend.workout.WorkoutSessionRepository;
 import com.calisthenics.backend.workoutplan.entity.WorkoutPlan;
@@ -39,6 +41,7 @@ import java.util.UUID;
 import static org.hamcrest.Matchers.nullValue;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -390,7 +393,115 @@ class ProfileIntegrationTest {
                         .with(principal(user)))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.displayName").value("Fresh User"))
-                .andExpect(jsonPath("$.activeClientsCount").value(0));
+                .andExpect(jsonPath("$.activeClientsCount").value(0))
+                .andExpect(jsonPath("$.gender").value(nullValue()));
+    }
+
+    @Test
+    void testGenderLifecycle_NullByDefault_UpdateSyncsAcrossProfilesAndPreservesOtherUsers() throws Exception {
+        User athlete = createUser("Athlete Gender");
+        User coach = createUser("Coach Gender");
+
+        relationshipRepository.save(CoachClientRelationship.builder()
+                .coach(coach)
+                .client(athlete)
+                .requestedBy(athlete)
+                .status(CoachClientRelationshipStatus.ACTIVE)
+                .build());
+
+        // New/existing user starts with null gender across user, client, and coach endpoints
+        mockMvc.perform(get("/api/v1/users/me").with(principal(athlete)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.gender").value(nullValue()));
+        mockMvc.perform(get("/api/v1/clients/me").with(principal(athlete)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.gender").value(nullValue()));
+        mockMvc.perform(get("/api/v1/coaches/me").with(principal(athlete)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.gender").value(nullValue()));
+
+        // Update gender via PATCH /api/v1/users/me/gender to MALE
+        UpdateGenderRequest maleRequest = UpdateGenderRequest.builder().gender(Gender.MALE).build();
+        mockMvc.perform(patch("/api/v1/users/me/gender")
+                        .with(principal(athlete))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(maleRequest)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.gender").value("MALE"));
+
+        // Synchronized across all profile responses (user, client, coach, public coach, coach viewing client)
+        mockMvc.perform(get("/api/v1/users/me").with(principal(athlete)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.gender").value("MALE"));
+        mockMvc.perform(get("/api/v1/clients/me").with(principal(athlete)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.gender").value("MALE"));
+        mockMvc.perform(get("/api/v1/coaches/me").with(principal(athlete)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.gender").value("MALE"));
+        mockMvc.perform(get("/api/v1/coaches/" + athlete.getId()).with(principal(coach)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.gender").value("MALE"));
+        mockMvc.perform(get("/api/v1/clients/" + athlete.getId()).with(principal(coach)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.gender").value("MALE"));
+
+        // Coach's own gender remains null (updating athlete did not touch coach)
+        mockMvc.perform(get("/api/v1/users/me").with(principal(coach)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.gender").value(nullValue()));
+
+        // Updating other client fields without gender preserves existing MALE gender
+        ClientProfileRequest bioUpdate = ClientProfileRequest.builder()
+                .bio("Updated bio only")
+                .build();
+        mockMvc.perform(put("/api/v1/clients/me")
+                        .with(principal(athlete))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(bioUpdate)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.bio").value("Updated bio only"))
+                .andExpect(jsonPath("$.gender").value("MALE"));
+
+        // Edit gender via client profile update to FEMALE
+        ClientProfileRequest femaleUpdate = ClientProfileRequest.builder()
+                .gender(Gender.FEMALE)
+                .build();
+        mockMvc.perform(put("/api/v1/clients/me")
+                        .with(principal(athlete))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(femaleUpdate)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.gender").value("FEMALE"));
+
+        mockMvc.perform(get("/api/v1/coaches/me").with(principal(athlete)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.gender").value("FEMALE"));
+    }
+
+    @Test
+    void testUpdateGender_ValidationAndAuth_RejectsInvalidAndUnauthenticated() throws Exception {
+        User user = createUser("Validation User");
+
+        // Unauthenticated
+        mockMvc.perform(patch("/api/v1/users/me/gender")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"gender\":\"MALE\"}"))
+                .andExpect(status().isUnauthorized());
+
+        // Null gender
+        mockMvc.perform(patch("/api/v1/users/me/gender")
+                        .with(principal(user))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isBadRequest());
+
+        // Invalid gender value
+        mockMvc.perform(patch("/api/v1/users/me/gender")
+                        .with(principal(user))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"gender\":\"OTHER\"}"))
+                .andExpect(status().isBadRequest());
     }
 
     private User createUser(String name) {

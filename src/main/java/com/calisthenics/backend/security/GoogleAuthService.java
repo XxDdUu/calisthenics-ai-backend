@@ -99,6 +99,7 @@ public class GoogleAuthService {
                 .email(user.getEmail())
                 .fullName(user.getFullName())
                 .role(user.getRole().name())
+                .gender(user.getGender())
                 .build();
     }
 }

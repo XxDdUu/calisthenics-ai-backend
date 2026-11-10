@@ -1,5 +1,6 @@
 package com.calisthenics.backend.profile.dto.request;
 
+import com.calisthenics.backend.user.Gender;
 import jakarta.validation.constraints.Size;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -23,6 +24,8 @@ public class ClientProfileRequest {
 
     @Size(max = 50, message = "Experience level must not exceed 50 characters")
     private String experienceLevel;
+
+    private Gender gender;
 
     @Size(max = 500, message = "Training experience must not exceed 500 characters")
     private String trainingExperience;

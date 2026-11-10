@@ -13,4 +13,6 @@ public interface AiWorkoutPlanLogRepository extends JpaRepository<AiWorkoutPlanL
     List<AiWorkoutPlanLog> findByUserIdOrderByCreatedAtDesc(Long userId);
 
     Optional<AiWorkoutPlanLog> findByIdempotencyKey(String idempotencyKey);
+
+    Optional<AiWorkoutPlanLog> findFirstByUserIdAndIdempotencyKeyOrderByCreatedAtDesc(Long userId, String idempotencyKey);
 }

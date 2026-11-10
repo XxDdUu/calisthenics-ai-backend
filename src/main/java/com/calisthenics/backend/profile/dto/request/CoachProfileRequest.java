@@ -1,5 +1,6 @@
 package com.calisthenics.backend.profile.dto.request;
 
+import com.calisthenics.backend.user.Gender;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.Size;
 import lombok.AllArgsConstructor;
@@ -21,6 +22,8 @@ public class CoachProfileRequest {
 
     @Size(max = 500, message = "Bio must not exceed 500 characters")
     private String bio;
+
+    private Gender gender;
 
     @Size(max = 500, message = "Specialties must not exceed 500 characters")
     private String specialties;

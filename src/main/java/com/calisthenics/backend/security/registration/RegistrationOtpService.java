@@ -223,6 +223,7 @@ public class RegistrationOtpService {
                 .email(savedUser.getEmail())
                 .fullName(savedUser.getFullName())
                 .role(savedUser.getRole().name())
+                .gender(savedUser.getGender())
                 .build();
     }
 

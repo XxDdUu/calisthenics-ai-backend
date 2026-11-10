@@ -47,6 +47,10 @@ public class User {
     @Builder.Default
     private String experienceLevel = "INTERMEDIATE";
 
+    @Enumerated(EnumType.STRING)
+    @Column(name = "gender", length = 20)
+    private Gender gender;
+
     @CreationTimestamp
     @Column(name = "created_at", updatable = false)
     private ZonedDateTime createdAt;

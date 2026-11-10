@@ -1,5 +1,6 @@
 package com.calisthenics.backend.security.dto;
 
+import com.calisthenics.backend.user.Gender;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -19,4 +20,5 @@ public class AuthResponse {
     private String email;
     private String fullName;
     private String role;
+    private Gender gender;
 }

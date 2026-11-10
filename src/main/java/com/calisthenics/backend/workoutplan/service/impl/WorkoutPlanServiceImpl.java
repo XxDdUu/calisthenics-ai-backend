@@ -474,9 +474,19 @@ public class WorkoutPlanServiceImpl implements WorkoutPlanService {
             }
             if (exercise.getSets() == null) {
                 exercise.setSets(3);
+            } else if (exercise.getSets() <= 0) {
+                throw new IllegalArgumentException("Sets must be greater than zero");
             }
             if (exercise.getRestSeconds() == null) {
                 exercise.setRestSeconds(60);
+            } else if (exercise.getRestSeconds() < 0) {
+                throw new IllegalArgumentException("Rest duration cannot be negative");
+            }
+            if (exercise.getReps() != null && exercise.getReps() <= 0) {
+                throw new IllegalArgumentException("Reps must be greater than zero when provided");
+            }
+            if (exercise.getDurationSeconds() != null && exercise.getDurationSeconds() <= 0) {
+                throw new IllegalArgumentException("Hold duration must be greater than zero when provided");
             }
             if (exercise.getDisplayOrder() == null) {
                 exercise.setDisplayOrder(i + 1);

@@ -182,6 +182,7 @@ public class AdminService {
                 user.getEmail(),
                 user.getFullName(),
                 user.getRole().name(),
+                user.getGender(),
                 hasCoachProfile,
                 hasClientProfile,
                 user.getCreatedAt()

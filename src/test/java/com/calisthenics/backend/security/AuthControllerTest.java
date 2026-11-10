@@ -3,6 +3,7 @@ package com.calisthenics.backend.security;
 import com.calisthenics.backend.security.dto.LoginRequest;
 import com.calisthenics.backend.security.dto.RegisterRequest;
 import com.calisthenics.backend.security.registration.RegistrationEmailService;
+import com.calisthenics.backend.user.Gender;
 import com.calisthenics.backend.user.Role;
 import com.calisthenics.backend.user.User;
 import com.calisthenics.backend.user.UserRepository;
@@ -130,7 +131,28 @@ public class AuthControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.accessToken").isNotEmpty())
                 .andExpect(jsonPath("$.refreshToken").isNotEmpty())
-                .andExpect(jsonPath("$.email").value("valid-login@calisthenics.ai"));
+                .andExpect(jsonPath("$.email").value("valid-login@calisthenics.ai"))
+                .andExpect(jsonPath("$.gender").doesNotExist());
+    }
+
+    @Test
+    public void loginWithConfiguredGenderReturnsGenderInAuthResponse() throws Exception {
+        userRepository.save(User.builder()
+                .email("male-login@calisthenics.ai")
+                .passwordHash(passwordEncoder.encode("correct-password"))
+                .fullName("Male Athlete")
+                .experienceLevel("INTERMEDIATE")
+                .role(Role.ROLE_USER)
+                .gender(Gender.MALE)
+                .build());
+
+        mockMvc.perform(post("/api/v1/auth/login")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(
+                                loginRequest("male-login@calisthenics.ai", "correct-password")
+                        )))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.gender").value("MALE"));
     }
 
     @Test
