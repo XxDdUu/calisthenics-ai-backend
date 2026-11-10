@@ -1,6 +1,7 @@
 package com.calisthenics.backend.config;
 
 import lombok.extern.slf4j.Slf4j;
+import com.calisthenics.backend.aiworkout.exception.AiWorkoutPlanValidationException;
 import com.calisthenics.backend.chat.exception.ChatAccessDeniedException;
 import com.calisthenics.backend.chat.exception.ChatConversationNotFoundException;
 import com.calisthenics.backend.coachclient.exception.CoachClientConflictException;
@@ -68,6 +69,16 @@ public class GlobalExceptionHandler {
         body.put("error", "Bad Request");
         body.put("message", ex.getMessage());
         return ResponseEntity.badRequest().body(body);
+    }
+
+    @ExceptionHandler(AiWorkoutPlanValidationException.class)
+    public ResponseEntity<Map<String, Object>> handleAiWorkoutPlanValidation(AiWorkoutPlanValidationException ex) {
+        Map<String, Object> body = new HashMap<>();
+        body.put("status", HttpStatus.UNPROCESSABLE_ENTITY.value());
+        body.put("error", HttpStatus.UNPROCESSABLE_ENTITY.getReasonPhrase());
+        body.put("message", ex.getMessage());
+        body.put("details", ex.getViolations());
+        return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY).body(body);
     }
 
     @ExceptionHandler(IllegalArgumentException.class)

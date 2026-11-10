@@ -7,6 +7,8 @@ import com.calisthenics.backend.analytics.repository.PersonalRecordRepository;
 import com.calisthenics.backend.analytics.service.PersonalRecordService;
 import com.calisthenics.backend.analytics.service.TrainingAnalyticsService;
 import com.calisthenics.backend.coachclient.repository.CoachClientRelationshipRepository;
+import com.calisthenics.backend.config.AppProperties;
+import com.calisthenics.backend.config.UserTimeResolver;
 import com.calisthenics.backend.exercise.DifficultyLevel;
 import com.calisthenics.backend.exercise.Exercise;
 import com.calisthenics.backend.exercise.ExerciseCategory;
@@ -51,7 +53,6 @@ public class TrainingAnalyticsServiceTest {
     @Mock
     private PersonalRecordService personalRecordService;
 
-    @InjectMocks
     private TrainingAnalyticsService analyticsService;
 
     private User athlete;
@@ -60,6 +61,14 @@ public class TrainingAnalyticsServiceTest {
 
     @BeforeEach
     void setUp() {
+        analyticsService = new TrainingAnalyticsService(
+                workoutSessionRepository,
+                personalRecordRepository,
+                exerciseRepository,
+                coachClientRelationshipRepository,
+                personalRecordService,
+                new UserTimeResolver(new AppProperties())
+        );
         athlete = User.builder().id(1L).email("athlete@calisthenics.ai").fullName("Athlete One").role(Role.ROLE_USER).build();
         pullUp = Exercise.builder().id(10L).name("Weighted Pull-up").code("weighted-pull-up")
                 .category(ExerciseCategory.PULL).difficulty(DifficultyLevel.INTERMEDIATE).build();
@@ -82,7 +91,7 @@ public class TrainingAnalyticsServiceTest {
 
         when(workoutSessionRepository.findDistinctCompletedWorkoutDates(1L, WorkoutSessionStatus.COMPLETED))
                 .thenReturn(distinctDates);
-        when(workoutSessionRepository.countByUserIdAndCompletedAtIsNotNull(1L)).thenReturn(10L);
+        when(workoutSessionRepository.countByUserIdAndStatus(1L, WorkoutSessionStatus.COMPLETED)).thenReturn(10L);
         when(personalRecordRepository.countByUserId(1L)).thenReturn(5L);
         when(personalRecordRepository.findByUserIdOrderByAchievedAtDesc(1L)).thenReturn(Collections.emptyList());
 

@@ -87,6 +87,23 @@ app:
     base-url: ${GEMINI_BASE_URL:https://generativelanguage.googleapis.com/v1beta}
     timeout-seconds: ${GEMINI_TIMEOUT_SECONDS:30}
 
+  timezone: ${APP_TIMEZONE:Asia/Ho_Chi_Minh}
+
+  workout-planner:
+    min-exercises-per-session: ${WORKOUT_PLANNER_MIN_EXERCISES:1}
+    recommended-min-exercises: ${WORKOUT_PLANNER_RECOMMENDED_MIN_EXERCISES:4}
+    recommended-max-exercises: ${WORKOUT_PLANNER_RECOMMENDED_MAX_EXERCISES:8}
+    max-exercises-per-session: ${WORKOUT_PLANNER_MAX_EXERCISES:10}
+    beginner-max-exercises: ${WORKOUT_PLANNER_BEGINNER_MAX_EXERCISES:8}
+    intermediate-max-exercises: ${WORKOUT_PLANNER_INTERMEDIATE_MAX_EXERCISES:10}
+    advanced-max-exercises: ${WORKOUT_PLANNER_ADVANCED_MAX_EXERCISES:10}
+    skill-mobility-max-exercises: ${WORKOUT_PLANNER_SKILL_MOBILITY_MAX_EXERCISES:8}
+    min-training-days-per-week: ${WORKOUT_PLANNER_MIN_TRAINING_DAYS:1}
+    max-training-days-per-week: ${WORKOUT_PLANNER_MAX_TRAINING_DAYS:7}
+    min-duration-weeks: ${WORKOUT_PLANNER_MIN_DURATION_WEEKS:1}
+    max-duration-weeks: ${WORKOUT_PLANNER_MAX_DURATION_WEEKS:12}
+    correction-retries: ${WORKOUT_PLANNER_CORRECTION_RETRIES:1}
+
 # Springdoc OpenAPI Swagger Documentation
 springdoc:
   api-docs:

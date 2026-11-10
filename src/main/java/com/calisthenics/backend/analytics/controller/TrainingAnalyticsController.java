@@ -26,29 +26,33 @@ public class TrainingAnalyticsController {
     @GetMapping("/api/v1/analytics/overview")
     @Operation(summary = "Get user training consistency, streaks, and overall stats")
     public ResponseEntity<TrainingOverviewResponse> getOverview(
-            @AuthenticationPrincipal UserPrincipal currentUser) {
-        return ResponseEntity.ok(analyticsService.getTrainingOverview(currentUser.getId()));
+            @AuthenticationPrincipal UserPrincipal currentUser,
+            @RequestHeader(value = "X-Timezone", required = false) String timezone) {
+        return ResponseEntity.ok(analyticsService.getTrainingOverview(currentUser.getId(), timezone));
     }
 
     @GetMapping("/api/v1/analytics/weekly")
     @Operation(summary = "Get current vs previous week training comparison")
     public ResponseEntity<WeeklyAnalyticsResponse> getWeeklyAnalytics(
-            @AuthenticationPrincipal UserPrincipal currentUser) {
-        return ResponseEntity.ok(analyticsService.getWeeklyAnalytics(currentUser.getId()));
+            @AuthenticationPrincipal UserPrincipal currentUser,
+            @RequestHeader(value = "X-Timezone", required = false) String timezone) {
+        return ResponseEntity.ok(analyticsService.getWeeklyAnalytics(currentUser.getId(), timezone));
     }
 
     @GetMapping("/api/v1/analytics/monthly")
     @Operation(summary = "Get current vs previous month training analytics")
     public ResponseEntity<MonthlyAnalyticsResponse> getMonthlyAnalytics(
-            @AuthenticationPrincipal UserPrincipal currentUser) {
-        return ResponseEntity.ok(analyticsService.getMonthlyAnalytics(currentUser.getId()));
+            @AuthenticationPrincipal UserPrincipal currentUser,
+            @RequestHeader(value = "X-Timezone", required = false) String timezone) {
+        return ResponseEntity.ok(analyticsService.getMonthlyAnalytics(currentUser.getId(), timezone));
     }
 
     @GetMapping("/api/v1/analytics/insights")
     @Operation(summary = "Get deterministic, data-backed training insights")
     public ResponseEntity<TrainingInsightsResponse> getInsights(
-            @AuthenticationPrincipal UserPrincipal currentUser) {
-        return ResponseEntity.ok(analyticsService.getTrainingInsights(currentUser.getId()));
+            @AuthenticationPrincipal UserPrincipal currentUser,
+            @RequestHeader(value = "X-Timezone", required = false) String timezone) {
+        return ResponseEntity.ok(analyticsService.getTrainingInsights(currentUser.getId(), timezone));
     }
 
     @GetMapping("/api/v1/exercises/{exerciseId}/progress")
@@ -56,8 +60,9 @@ public class TrainingAnalyticsController {
     public ResponseEntity<ExerciseProgressResponse> getExerciseProgress(
             @AuthenticationPrincipal UserPrincipal currentUser,
             @PathVariable Long exerciseId,
-            @RequestParam(required = false) String filter) {
-        return ResponseEntity.ok(analyticsService.getExerciseProgress(currentUser.getId(), exerciseId, filter));
+            @RequestParam(required = false) String filter,
+            @RequestHeader(value = "X-Timezone", required = false) String timezone) {
+        return ResponseEntity.ok(analyticsService.getExerciseProgress(currentUser.getId(), exerciseId, filter, timezone));
     }
 
     @GetMapping("/api/v1/exercises/{exerciseId}/history")
@@ -65,8 +70,9 @@ public class TrainingAnalyticsController {
     public ResponseEntity<List<ExerciseHistorySessionDto>> getExerciseHistory(
             @AuthenticationPrincipal UserPrincipal currentUser,
             @PathVariable Long exerciseId,
-            @RequestParam(required = false) String filter) {
-        ExerciseProgressResponse progress = analyticsService.getExerciseProgress(currentUser.getId(), exerciseId, filter);
+            @RequestParam(required = false) String filter,
+            @RequestHeader(value = "X-Timezone", required = false) String timezone) {
+        ExerciseProgressResponse progress = analyticsService.getExerciseProgress(currentUser.getId(), exerciseId, filter, timezone);
         return ResponseEntity.ok(progress.getSessions());
     }
 

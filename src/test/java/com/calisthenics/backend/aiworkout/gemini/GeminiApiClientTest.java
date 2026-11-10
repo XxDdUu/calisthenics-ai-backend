@@ -8,9 +8,12 @@ import org.springframework.http.MediaType;
 import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.web.client.RestTemplate;
 
+import org.springframework.web.server.ResponseStatusException;
+
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withStatus;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
@@ -27,6 +30,16 @@ class GeminiApiClientTest {
                 client.generatePerformanceSummary("sys", "user");
 
         assertThat(result).isEmpty();
+    }
+
+    @Test
+    void generateWorkoutPlan_missingApiKey_throwsServiceUnavailableInsteadOfSilentFallback() {
+        AppProperties props = new AppProperties();
+        props.getGemini().setApiKey("");
+
+        GeminiApiClient client = new GeminiApiClient(props, new ObjectMapper());
+        assertThatThrownBy(() -> client.generateWorkoutPlan("sys", "user"))
+                .isInstanceOf(ResponseStatusException.class);
     }
 
     @Test

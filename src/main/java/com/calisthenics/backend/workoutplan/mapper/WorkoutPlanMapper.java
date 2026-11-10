@@ -9,10 +9,13 @@ import com.calisthenics.backend.workoutplan.dto.response.WorkoutPlanResponse;
 import com.calisthenics.backend.workoutplan.entity.WorkoutPlan;
 import com.calisthenics.backend.workoutplan.entity.WorkoutPlanDay;
 import com.calisthenics.backend.workoutplan.entity.WorkoutPlanExercise;
+import com.calisthenics.backend.workoutplan.type.WorkoutDayOfWeek;
 import com.calisthenics.backend.workoutplan.type.WorkoutSessionType;
 import org.springframework.stereotype.Component;
 
 import java.util.Comparator;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.stream.StreamSupport;
 
 @Component
@@ -23,6 +26,15 @@ public class WorkoutPlanMapper {
     }
 
     public WorkoutPlanResponse toResponse(WorkoutPlan plan, Iterable<WorkoutPlanDay> days) {
+        // Deduplicate by canonical weekday in case JPA join-fetch bag semantics emit repeated day references.
+        Map<WorkoutDayOfWeek, WorkoutPlanDay> uniqueDays = new LinkedHashMap<>();
+        if (days != null) {
+            for (WorkoutPlanDay day : days) {
+                if (day != null && day.getDayOfWeek() != null) {
+                    uniqueDays.putIfAbsent(day.getDayOfWeek(), day);
+                }
+            }
+        }
         return WorkoutPlanResponse.builder()
                 .id(plan.getId())
                 .name(plan.getName())
@@ -31,7 +43,7 @@ public class WorkoutPlanMapper {
                 .active(plan.isActive())
                 .createdAt(plan.getCreatedAt())
                 .updatedAt(plan.getUpdatedAt())
-                .days(StreamSupport.stream(days.spliterator(), false)
+                .days(uniqueDays.values().stream()
                         .map(this::toDayResponse)
                         .sorted(Comparator.comparing(WorkoutPlanDayResponse::getDisplayOrder))
                         .toList())

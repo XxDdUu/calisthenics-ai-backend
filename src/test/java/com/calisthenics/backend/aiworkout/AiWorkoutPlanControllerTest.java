@@ -4,6 +4,7 @@ import com.calisthenics.backend.aiworkout.controller.AiWorkoutPlanController;
 import com.calisthenics.backend.aiworkout.dto.AiWorkoutPlanPreviewResponse;
 import com.calisthenics.backend.aiworkout.dto.CommitAiWorkoutPlanRequest;
 import com.calisthenics.backend.aiworkout.dto.GenerateAiWorkoutPlanRequest;
+import com.calisthenics.backend.aiworkout.exception.AiWorkoutPlanValidationException;
 import com.calisthenics.backend.aiworkout.service.AiWorkoutPlanService;
 import com.calisthenics.backend.security.JwtAuthenticationFilter;
 import com.calisthenics.backend.security.UserPrincipal;
@@ -33,6 +34,7 @@ import java.util.List;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.when;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -82,7 +84,7 @@ class AiWorkoutPlanControllerTest {
 
         AiWorkoutPlanPreviewResponse preview = AiWorkoutPlanPreviewResponse.builder()
                 .planName("5-Day Calisthenics Program")
-                .description("Generated with Gemini")
+                .description("Structured 5-day calisthenics plan")
                 .durationWeeks(4)
                 .splitType(WorkoutSplitType.CUSTOM)
                 .sessions(List.of(
@@ -94,14 +96,14 @@ class AiWorkoutPlanControllerTest {
                                 .build()
                 ))
                 .metadata(AiWorkoutPlanPreviewResponse.AiWorkoutMetadata.builder()
-                        .modelUsed("gemini-2.5-flash-lite")
+                        .modelUsed("default-planner-model")
                         .inputTokens(120)
                         .outputTokens(350)
                         .latencyMs(450L)
                         .build())
                 .build();
 
-        when(aiWorkoutPlanService.generatePlan(eq(10L), any(GenerateAiWorkoutPlanRequest.class)))
+        when(aiWorkoutPlanService.generatePlan(eq(10L), any(GenerateAiWorkoutPlanRequest.class), nullable(String.class)))
                 .thenReturn(preview);
 
         mockMvc.perform(post("/api/v1/ai/workout-plans/generate")
@@ -111,7 +113,30 @@ class AiWorkoutPlanControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.planName").value("5-Day Calisthenics Program"))
                 .andExpect(jsonPath("$.durationWeeks").value(4))
-                .andExpect(jsonPath("$.metadata.modelUsed").value("gemini-2.5-flash-lite"));
+                .andExpect(jsonPath("$.metadata.modelUsed").value("default-planner-model"));
+    }
+
+    @Test
+    @DisplayName("POST /api/v1/ai/workout-plans/generate returns 422 when validator rejects invalid AI plan")
+    void testGenerateEndpointReturns422OnValidationError() throws Exception {
+        GenerateAiWorkoutPlanRequest request = GenerateAiWorkoutPlanRequest.builder()
+                .prompt("Create a 14-day workout plan")
+                .fitnessLevel("INTERMEDIATE")
+                .build();
+
+        when(aiWorkoutPlanService.generatePlan(eq(10L), any(GenerateAiWorkoutPlanRequest.class), nullable(String.class)))
+                .thenThrow(new AiWorkoutPlanValidationException(
+                        "Training days per week cannot exceed 7 (requested 14).",
+                        List.of("Training days per week cannot exceed 7 (requested 14).")
+                ));
+
+        mockMvc.perform(post("/api/v1/ai/workout-plans/generate")
+                        .with(csrf())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request)))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.status").value(422))
+                .andExpect(jsonPath("$.details[0]").value("Training days per week cannot exceed 7 (requested 14)."));
     }
 
     @Test
@@ -140,7 +165,7 @@ class AiWorkoutPlanControllerTest {
                 .active(true)
                 .build();
 
-        when(aiWorkoutPlanService.commitPlan(eq(10L), any(CommitAiWorkoutPlanRequest.class)))
+        when(aiWorkoutPlanService.commitPlan(eq(10L), any(CommitAiWorkoutPlanRequest.class), nullable(String.class)))
                 .thenReturn(response);
 
         mockMvc.perform(post("/api/v1/ai/workout-plans/commit")

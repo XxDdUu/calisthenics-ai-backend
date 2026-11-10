@@ -17,6 +17,7 @@ import com.calisthenics.backend.user.User;
 import com.calisthenics.backend.user.UserRepository;
 import com.calisthenics.backend.workout.WorkoutSession;
 import com.calisthenics.backend.workout.WorkoutSessionRepository;
+import com.calisthenics.backend.workout.WorkoutSessionStatus;
 import com.calisthenics.backend.workoutplan.entity.WorkoutPlan;
 import com.calisthenics.backend.workoutplan.repository.WorkoutPlanRepository;
 import lombok.RequiredArgsConstructor;
@@ -132,10 +133,8 @@ public class ClientProfileServiceImpl implements ClientProfileService {
         authorizeAccessToClient(currentUserId, clientUserId);
 
         long activePlans = workoutPlanRepository.countByUserId(clientUserId);
-        long completedSessions = workoutSessionRepository.countByUserIdAndCompletedAtIsNotNull(clientUserId);
-        if (completedSessions == 0) {
-            completedSessions = workoutSessionRepository.countByUserId(clientUserId);
-        }
+        long completedSessions = workoutSessionRepository.countByUserIdAndStatus(
+                clientUserId, WorkoutSessionStatus.COMPLETED);
 
         Optional<WorkoutPlan> currentPlanOpt = workoutPlanRepository.findFirstByUserIdAndActiveTrueOrderByUpdatedAtDesc(clientUserId)
                 .or(() -> workoutPlanRepository.findFirstByUserIdOrderByUpdatedAtDesc(clientUserId));
@@ -206,10 +205,8 @@ public class ClientProfileServiceImpl implements ClientProfileService {
         Long clientUserId = user.getId();
 
         long activePlans = workoutPlanRepository.countByUserId(clientUserId);
-        long completedSessions = workoutSessionRepository.countByUserIdAndCompletedAtIsNotNull(clientUserId);
-        if (completedSessions == 0) {
-            completedSessions = workoutSessionRepository.countByUserId(clientUserId);
-        }
+        long completedSessions = workoutSessionRepository.countByUserIdAndStatus(
+                clientUserId, WorkoutSessionStatus.COMPLETED);
 
         Optional<WorkoutPlan> currentPlanOpt = workoutPlanRepository.findFirstByUserIdAndActiveTrueOrderByUpdatedAtDesc(clientUserId)
                 .or(() -> workoutPlanRepository.findFirstByUserIdOrderByUpdatedAtDesc(clientUserId));

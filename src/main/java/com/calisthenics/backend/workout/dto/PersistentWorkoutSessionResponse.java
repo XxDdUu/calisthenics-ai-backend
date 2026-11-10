@@ -1,5 +1,6 @@
 package com.calisthenics.backend.workout.dto;
 
+import com.calisthenics.backend.workout.WorkoutSessionClassification;
 import com.calisthenics.backend.workout.WorkoutSessionStatus;
 import com.calisthenics.backend.workout.WorkoutSessionSource;
 
@@ -16,6 +17,7 @@ public record PersistentWorkoutSessionResponse(
         String title,
         LocalDate workoutDate,
         WorkoutSessionStatus status,
+        WorkoutSessionClassification classification,
         ZonedDateTime startedAt,
         ZonedDateTime lastSavedAt,
         ZonedDateTime completedAt,

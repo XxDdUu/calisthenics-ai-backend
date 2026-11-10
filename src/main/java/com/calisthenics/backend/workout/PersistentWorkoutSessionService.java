@@ -1,15 +1,16 @@
 package com.calisthenics.backend.workout;
 
 import com.calisthenics.backend.coachclient.entity.WorkoutPlanAssignment;
+import com.calisthenics.backend.config.AppProperties;
+import com.calisthenics.backend.config.UserTimeResolver;
 import com.calisthenics.backend.workout.dto.*;
 import com.calisthenics.backend.workoutplan.entity.WorkoutPlan;
 import com.calisthenics.backend.workoutplan.entity.WorkoutPlanDay;
 import com.calisthenics.backend.workoutplan.entity.WorkoutPlanExercise;
 import com.calisthenics.backend.workoutplan.repository.WorkoutPlanDayRepository;
 import com.calisthenics.backend.workoutplan.repository.WorkoutPlanExerciseRepository;
-import com.calisthenics.backend.workoutplan.repository.WorkoutPlanRepository;
 import com.calisthenics.backend.workoutplan.type.WorkoutSessionType;
-import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
@@ -19,6 +20,8 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Duration;
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -26,7 +29,6 @@ import java.util.List;
 import java.util.Objects;
 
 @Service
-@RequiredArgsConstructor
 public class PersistentWorkoutSessionService {
 
     private final WorkoutSessionRepository sessionRepository;
@@ -34,13 +36,42 @@ public class PersistentWorkoutSessionService {
     private final WorkoutPlanExerciseRepository planExerciseRepository;
     private final TodayWorkoutResolver todayWorkoutResolver;
     private final com.calisthenics.backend.analytics.service.PersonalRecordService personalRecordService;
+    private final UserTimeResolver userTimeResolver;
+
+    public PersistentWorkoutSessionService(
+            WorkoutSessionRepository sessionRepository,
+            WorkoutPlanDayRepository dayRepository,
+            WorkoutPlanExerciseRepository planExerciseRepository,
+            TodayWorkoutResolver todayWorkoutResolver,
+            com.calisthenics.backend.analytics.service.PersonalRecordService personalRecordService
+    ) {
+        this(sessionRepository, dayRepository, planExerciseRepository, todayWorkoutResolver,
+                personalRecordService, new UserTimeResolver(new AppProperties()));
+    }
+
+    @Autowired
+    public PersistentWorkoutSessionService(
+            WorkoutSessionRepository sessionRepository,
+            WorkoutPlanDayRepository dayRepository,
+            WorkoutPlanExerciseRepository planExerciseRepository,
+            TodayWorkoutResolver todayWorkoutResolver,
+            com.calisthenics.backend.analytics.service.PersonalRecordService personalRecordService,
+            UserTimeResolver userTimeResolver
+    ) {
+        this.sessionRepository = sessionRepository;
+        this.dayRepository = dayRepository;
+        this.planExerciseRepository = planExerciseRepository;
+        this.todayWorkoutResolver = todayWorkoutResolver;
+        this.personalRecordService = personalRecordService;
+        this.userTimeResolver = userTimeResolver;
+    }
 
     @Transactional
     public PersistentWorkoutSessionResponse startOrResume(Long userId, StartWorkoutSessionRequest request) {
         List<WorkoutSession> activeSessions = sessionRepository.findByUserIdAndWorkoutDateAndStatus(
                 userId, request.workoutDate(), WorkoutSessionStatus.IN_PROGRESS);
         if (activeSessions.size() == 1) {
-            return map(activeSessions.getFirst());
+            return resumeAndHydrateIfNeeded(activeSessions.getFirst());
         }
         if (activeSessions.size() > 1) {
             List<WorkoutSession> requestedSession = activeSessions.stream()
@@ -54,10 +85,17 @@ public class PersistentWorkoutSessionService {
                                     request.assignmentId()))
                     .toList();
             if (requestedSession.size() == 1) {
-                return map(requestedSession.getFirst());
+                return resumeAndHydrateIfNeeded(requestedSession.getFirst());
             }
             throw new ResponseStatusException(
                     HttpStatus.CONFLICT, "Choose one of the unfinished workouts before starting another");
+        }
+
+        List<WorkoutSession> scheduledSessions = sessionRepository.findByUserIdAndWorkoutDateAndStatus(
+                userId, request.workoutDate(), WorkoutSessionStatus.SCHEDULED);
+        OptionalScheduledMatch scheduledMatch = findMatchingScheduledSession(scheduledSessions, request);
+        if (scheduledMatch.matched() != null) {
+            return promoteScheduledSession(scheduledMatch.matched());
         }
 
         WorkoutPlanDay day = dayRepository.findByIdAndWorkoutPlanId(request.dayId(), request.planId())
@@ -149,8 +187,27 @@ public class PersistentWorkoutSessionService {
 
     @Transactional(readOnly = true)
     public List<PersistentWorkoutSessionResponse> getActive(Long userId) {
-        return sessionRepository.findByUserIdAndStatusOrderByStartedAtDesc(userId, WorkoutSessionStatus.IN_PROGRESS)
-                .stream().map(this::map).toList();
+        return getActive(userId, null, null);
+    }
+
+    @Transactional(readOnly = true)
+    public List<PersistentWorkoutSessionResponse> getActive(Long userId, LocalDate explicitLocalDate, String timezone) {
+        LocalDate today = userTimeResolver.today(explicitLocalDate, timezone);
+        ZoneId zone = userTimeResolver.resolveZone(timezone);
+        return sessionRepository.findUnfinishedSessionsAsOf(userId, today).stream()
+                .filter(session -> WorkoutSessionClassifier.isUnfinished(session, today, zone))
+                .map(session -> map(session, today, zone))
+                .toList();
+    }
+
+    @Transactional(readOnly = true)
+    public List<PersistentWorkoutSessionResponse> getUpcoming(Long userId, LocalDate explicitLocalDate, String timezone) {
+        LocalDate today = userTimeResolver.today(explicitLocalDate, timezone);
+        ZoneId zone = userTimeResolver.resolveZone(timezone);
+        return sessionRepository.findUpcomingSessionsAfter(userId, today).stream()
+                .filter(session -> WorkoutSessionClassifier.isUpcoming(session, today, zone))
+                .map(session -> map(session, today, zone))
+                .toList();
     }
 
     @Transactional(readOnly = true)
@@ -241,11 +298,103 @@ public class PersistentWorkoutSessionService {
         ZonedDateTime completedAt = ZonedDateTime.now();
         session.setCompletedAt(completedAt);
         session.setLastSavedAt(completedAt);
-        session.setDurationSeconds(Math.max(0, Duration.between(session.getStartedAt(), completedAt).getSeconds()));
+        long elapsedSeconds = session.getStartedAt() != null
+                ? Math.max(0, Duration.between(session.getStartedAt(), completedAt).getSeconds())
+                : 0L;
+        session.setDurationSeconds(elapsedSeconds);
         session.setStatus(WorkoutSessionStatus.COMPLETED);
         sessionRepository.flush();
         personalRecordService.detectAndSavePRs(session);
         return map(session);
+    }
+
+    private record OptionalScheduledMatch(WorkoutSession matched) {}
+
+    private OptionalScheduledMatch findMatchingScheduledSession(
+            List<WorkoutSession> scheduledSessions,
+            StartWorkoutSessionRequest request
+    ) {
+        if (scheduledSessions == null || scheduledSessions.isEmpty()) {
+            return new OptionalScheduledMatch(null);
+        }
+        WorkoutSession exact = scheduledSessions.stream()
+                .filter(session -> session.getWorkoutPlan() != null
+                        && session.getWorkoutPlan().getId().equals(request.planId())
+                        && session.getWorkoutPlanDay() != null
+                        && session.getWorkoutPlanDay().getId().equals(request.dayId()))
+                .findFirst()
+                .orElse(scheduledSessions.size() == 1 ? scheduledSessions.getFirst() : null);
+        return new OptionalScheduledMatch(exact);
+    }
+
+    private PersistentWorkoutSessionResponse resumeAndHydrateIfNeeded(WorkoutSession session) {
+        boolean changed = false;
+        if (session.getStartedAt() == null) {
+            ZonedDateTime now = ZonedDateTime.now();
+            session.setStartedAt(now);
+            if (session.getLastSavedAt() == null) {
+                session.setLastSavedAt(now);
+            }
+            changed = true;
+        }
+        if ((session.getExercises() == null || session.getExercises().isEmpty()) && session.getWorkoutPlanDay() != null) {
+            List<WorkoutPlanExercise> planned = planExerciseRepository
+                    .findByWorkoutPlanDayIdOrderByDisplayOrderAsc(session.getWorkoutPlanDay().getId());
+            if (!planned.isEmpty()) {
+                populateSessionExercises(session, planned);
+                changed = true;
+            }
+        }
+        if (changed) {
+            return map(sessionRepository.saveAndFlush(session));
+        }
+        return map(session);
+    }
+
+    private PersistentWorkoutSessionResponse promoteScheduledSession(WorkoutSession session) {
+        ZonedDateTime now = ZonedDateTime.now();
+        session.setStatus(WorkoutSessionStatus.IN_PROGRESS);
+        if (session.getStartedAt() == null) {
+            session.setStartedAt(now);
+        }
+        session.setLastSavedAt(now);
+        if ((session.getExercises() == null || session.getExercises().isEmpty()) && session.getWorkoutPlanDay() != null) {
+            List<WorkoutPlanExercise> planned = planExerciseRepository
+                    .findByWorkoutPlanDayIdOrderByDisplayOrderAsc(session.getWorkoutPlanDay().getId());
+            if (!planned.isEmpty()) {
+                populateSessionExercises(session, planned);
+            }
+        }
+        return map(sessionRepository.saveAndFlush(session));
+    }
+
+    private void populateSessionExercises(WorkoutSession session, List<WorkoutPlanExercise> plannedExercises) {
+        List<WorkoutSessionExercise> exercises = new ArrayList<>();
+        for (WorkoutPlanExercise planned : plannedExercises) {
+            WorkoutSessionExercise exercise = WorkoutSessionExercise.builder()
+                    .workoutSession(session)
+                    .exercise(planned.getExercise())
+                    .exerciseNameSnapshot(planned.getExercise().getName())
+                    .instructionsSnapshot(planned.getExercise().getInstructions())
+                    .planNotesSnapshot(planned.getNotes())
+                    .orderIndex(planned.getDisplayOrder())
+                    .targetSets(planned.getSets())
+                    .targetReps(planned.getReps())
+                    .targetHoldDurationSeconds(planned.getDurationSeconds())
+                    .restSeconds(planned.getRestSeconds())
+                    .status(WorkoutSessionExerciseStatus.IN_PROGRESS)
+                    .build();
+            for (int setNumber = 1; setNumber <= planned.getSets(); setNumber++) {
+                exercise.getSets().add(WorkoutSessionSet.builder()
+                        .workoutSessionExercise(exercise)
+                        .setNumber(setNumber)
+                        .completed(false)
+                        .build());
+            }
+            exercises.add(exercise);
+        }
+        session.getExercises().clear();
+        session.getExercises().addAll(exercises);
     }
 
     private String workoutDayTitle(WorkoutPlanDay day) {
@@ -276,6 +425,10 @@ public class PersistentWorkoutSessionService {
     }
 
     private PersistentWorkoutSessionResponse map(WorkoutSession session) {
+        return map(session, userTimeResolver.today(null), userTimeResolver.resolveZone(null));
+    }
+
+    private PersistentWorkoutSessionResponse map(WorkoutSession session, LocalDate today, ZoneId zone) {
         List<WorkoutSessionExerciseResponse> exercises = session.getExercises().stream()
                 .sorted(Comparator.comparing(WorkoutSessionExercise::getOrderIndex))
                 .map(exercise -> new WorkoutSessionExerciseResponse(
@@ -327,6 +480,7 @@ public class PersistentWorkoutSessionService {
                 session.getTitle(),
                 session.getWorkoutDate(),
                 session.getStatus(),
+                WorkoutSessionClassifier.classify(session, today, zone),
                 session.getStartedAt(),
                 session.getLastSavedAt(),
                 session.getCompletedAt(),

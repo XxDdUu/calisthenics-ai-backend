@@ -5,10 +5,14 @@ import com.calisthenics.backend.coachclient.repository.WorkoutPlanAssignmentRepo
 import com.calisthenics.backend.coachclient.repository.CoachClientRelationshipRepository;
 import com.calisthenics.backend.coachclient.type.CoachClientRelationshipStatus;
 import com.calisthenics.backend.coachclient.type.WorkoutPlanAssignmentStatus;
+import com.calisthenics.backend.config.UserTimeResolver;
 import com.calisthenics.backend.exercise.Exercise;
 import com.calisthenics.backend.exercise.ExerciseRepository;
 import com.calisthenics.backend.user.User;
 import com.calisthenics.backend.user.UserRepository;
+import com.calisthenics.backend.workout.WorkoutSession;
+import com.calisthenics.backend.workout.WorkoutSessionRepository;
+import com.calisthenics.backend.workout.WorkoutSessionStatus;
 import com.calisthenics.backend.workoutplan.dto.request.CreateWorkoutPlanRequest;
 import com.calisthenics.backend.workoutplan.dto.request.DuplicateWorkoutPlanRequest;
 import com.calisthenics.backend.workoutplan.dto.request.UpdateWorkoutPlanRequest;
@@ -59,6 +63,8 @@ public class WorkoutPlanServiceImpl implements WorkoutPlanService {
     private final WorkoutPlanMapper workoutPlanMapper;
     private final WorkoutPlanAssignmentRepository assignmentRepository;
     private final CoachClientRelationshipRepository relationshipRepository;
+    private final WorkoutSessionRepository workoutSessionRepository;
+    private final UserTimeResolver userTimeResolver;
 
     @Override
     @Transactional
@@ -200,6 +206,17 @@ public class WorkoutPlanServiceImpl implements WorkoutPlanService {
     @Transactional
     public void delete(Long userId, Long planId) {
         WorkoutPlan plan = findOwnedPlan(userId, planId);
+        // Cancel only future unstarted SCHEDULED placeholders for this plan; preserve all historical records.
+        java.time.LocalDate today = userTimeResolver.today(null);
+        List<WorkoutSession> futureUnstarted = workoutSessionRepository
+                .findByUserIdAndStatusAndStartedAtIsNullAndWorkoutDateAfter(userId, WorkoutSessionStatus.SCHEDULED, today);
+        List<WorkoutSession> matchingFuture = futureUnstarted.stream()
+                .filter(s -> s.getWorkoutPlan() != null && planId.equals(s.getWorkoutPlan().getId()))
+                .toList();
+        if (!matchingFuture.isEmpty()) {
+            matchingFuture.forEach(s -> s.setStatus(WorkoutSessionStatus.CANCELLED));
+            workoutSessionRepository.saveAll(matchingFuture);
+        }
         workoutPlanRepository.delete(plan);
     }
 

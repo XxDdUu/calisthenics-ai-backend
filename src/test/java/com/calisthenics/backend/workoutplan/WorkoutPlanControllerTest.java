@@ -445,6 +445,34 @@ class WorkoutPlanControllerTest {
                 workoutPlanRepository.findByUserIdOrderByCreatedAtDesc(owner.getId())).isEmpty();
     }
 
+    @Test
+    void fetchingMultiExercisePlanByIdNeverDuplicatesWeekdays() throws Exception {
+        User owner = createUser("dedup-days@example.com");
+        Exercise pushUp = createExercise("Push-up Dedup", "DEDUP_PUSH");
+        Exercise pullUp = createExercise("Pull-up Dedup", "DEDUP_PULL");
+        WorkoutPlan plan = createPlan(owner, "7 Day Dedup", WorkoutSplitType.CUSTOM, defaultSessions());
+        for (WorkoutPlanDay day : plan.getDays()) {
+            if (!day.isRestDay()) {
+                mockMvc.perform(post(exerciseAssignmentsUrl(plan, day))
+                                .with(authenticatedAs(owner))
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content(objectMapper.writeValueAsString(exerciseRequest(pushUp, 3, 10, null, 60, 1))))
+                        .andExpect(status().isCreated());
+                mockMvc.perform(post(exerciseAssignmentsUrl(plan, day))
+                                .with(authenticatedAs(owner))
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content(objectMapper.writeValueAsString(exerciseRequest(pullUp, 3, 8, null, 90, 2))))
+                        .andExpect(status().isCreated());
+            }
+        }
+        entityManager.flush();
+        entityManager.clear();
+
+        mockMvc.perform(get("/api/v1/workout-plans/{id}", plan.getId()).with(authenticatedAs(owner)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.days.length()").value(7));
+    }
+
     @Autowired
     private WorkoutPlanExerciseRepository workoutPlanExerciseRepository;
 

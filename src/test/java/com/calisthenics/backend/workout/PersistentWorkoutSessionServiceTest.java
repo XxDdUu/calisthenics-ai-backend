@@ -263,4 +263,77 @@ class PersistentWorkoutSessionServiceTest {
 
         assertEquals(HttpStatus.CONFLICT, error.getStatusCode());
     }
+
+    @Test
+    void getActiveExcludesFutureSessionsWhileGetUpcomingIncludesOnlyFutureSessions() {
+        Long userId = 4L;
+        LocalDate nov17 = LocalDate.of(2026, 11, 17);
+        User user = User.builder().id(userId).email("client@example.test").fullName("Client").build();
+
+        WorkoutSession nov17Unfinished = WorkoutSession.builder()
+                .id(1L).user(user).title("Push Nov 17").workoutDate(LocalDate.of(2026, 11, 17))
+                .status(WorkoutSessionStatus.IN_PROGRESS).build();
+        WorkoutSession nov18FutureLegacyInProgress = WorkoutSession.builder()
+                .id(2L).user(user).title("Pull Nov 18").workoutDate(LocalDate.of(2026, 11, 18))
+                .status(WorkoutSessionStatus.IN_PROGRESS).build();
+        WorkoutSession nov25Scheduled = WorkoutSession.builder()
+                .id(3L).user(user).title("Legs Nov 25").workoutDate(LocalDate.of(2026, 11, 25))
+                .status(WorkoutSessionStatus.SCHEDULED).build();
+
+        when(sessionRepository.findUnfinishedSessionsAsOf(userId, nov17))
+                .thenReturn(List.of(nov17Unfinished, nov18FutureLegacyInProgress));
+        when(sessionRepository.findUpcomingSessionsAfter(userId, nov17))
+                .thenReturn(List.of(nov17Unfinished, nov18FutureLegacyInProgress, nov25Scheduled));
+
+        var unfinished = service.getActive(userId, nov17, "Asia/Ho_Chi_Minh");
+        var upcoming = service.getUpcoming(userId, nov17, "Asia/Ho_Chi_Minh");
+
+        assertEquals(1, unfinished.size());
+        assertEquals(1L, unfinished.getFirst().id());
+        assertEquals(WorkoutSessionClassification.UNFINISHED, unfinished.getFirst().classification());
+
+        assertEquals(2, upcoming.size());
+        assertEquals(List.of(2L, 3L), upcoming.stream().map(r -> r.id()).toList());
+        assertTrue(upcoming.stream().allMatch(r -> r.classification() == WorkoutSessionClassification.UPCOMING));
+    }
+
+    @Test
+    void startOrResumePromotesScheduledPlaceholderAndHydratesExercises() {
+        Long userId = 4L;
+        Long planId = 12L;
+        Long dayId = 30L;
+        LocalDate date = LocalDate.of(2026, 11, 17);
+        User user = User.builder().id(userId).email("client@example.test").fullName("Client").build();
+        WorkoutPlan plan = WorkoutPlan.builder().id(planId).user(user).name("Strength").build();
+        WorkoutPlanDay day = WorkoutPlanDay.builder()
+                .id(dayId).workoutPlan(plan)
+                .dayOfWeek(com.calisthenics.backend.workoutplan.type.WorkoutDayOfWeek.TUESDAY)
+                .sessionType(com.calisthenics.backend.workoutplan.type.WorkoutSessionType.PUSH)
+                .build();
+        Exercise pushUp = Exercise.builder().id(8L).name("Push-up").code("PUSH_UP")
+                .category(ExerciseCategory.PUSH).difficulty(DifficultyLevel.BEGINNER).build();
+        WorkoutPlanExercise planned = WorkoutPlanExercise.builder()
+                .id(90L).workoutPlanDay(day).exercise(pushUp).sets(3).reps(10)
+                .restSeconds(60).displayOrder(1).build();
+        WorkoutSession scheduled = WorkoutSession.builder()
+                .id(55L).user(user).workoutPlan(plan).workoutPlanDay(day)
+                .title("Push Day").workoutDate(date).status(WorkoutSessionStatus.SCHEDULED)
+                .build();
+
+        when(sessionRepository.findByUserIdAndWorkoutDateAndStatus(userId, date, WorkoutSessionStatus.IN_PROGRESS))
+                .thenReturn(List.of());
+        when(sessionRepository.findByUserIdAndWorkoutDateAndStatus(userId, date, WorkoutSessionStatus.SCHEDULED))
+                .thenReturn(List.of(scheduled));
+        when(planExerciseRepository.findByWorkoutPlanDayIdOrderByDisplayOrderAsc(dayId))
+                .thenReturn(List.of(planned));
+        when(sessionRepository.saveAndFlush(any(WorkoutSession.class)))
+                .thenAnswer(inv -> inv.getArgument(0));
+
+        var res = service.startOrResume(userId, new StartWorkoutSessionRequest(planId, dayId, date, null));
+
+        assertEquals(WorkoutSessionStatus.IN_PROGRESS, res.status());
+        assertNotNull(res.startedAt());
+        assertEquals(1, res.exercises().size());
+        assertEquals(3, res.exercises().getFirst().sets().size());
+    }
 }

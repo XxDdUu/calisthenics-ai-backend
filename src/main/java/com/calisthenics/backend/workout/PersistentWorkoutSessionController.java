@@ -6,12 +6,14 @@ import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ResponseStatusException;
 import org.springframework.http.HttpStatus;
 
+import java.time.LocalDate;
 import java.util.List;
 
 @RestController
@@ -32,8 +34,18 @@ public class PersistentWorkoutSessionController {
 
     @GetMapping("/active")
     public ResponseEntity<List<PersistentWorkoutSessionResponse>> getActive(
-            @AuthenticationPrincipal UserPrincipal currentUser) {
-        return ResponseEntity.ok(sessionService.getActive(currentUser.getId()));
+            @AuthenticationPrincipal UserPrincipal currentUser,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate localDate,
+            @RequestHeader(value = "X-Timezone", required = false) String timezone) {
+        return ResponseEntity.ok(sessionService.getActive(currentUser.getId(), localDate, timezone));
+    }
+
+    @GetMapping("/upcoming")
+    public ResponseEntity<List<PersistentWorkoutSessionResponse>> getUpcoming(
+            @AuthenticationPrincipal UserPrincipal currentUser,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate localDate,
+            @RequestHeader(value = "X-Timezone", required = false) String timezone) {
+        return ResponseEntity.ok(sessionService.getUpcoming(currentUser.getId(), localDate, timezone));
     }
 
     @GetMapping

@@ -5,14 +5,17 @@ import com.calisthenics.backend.aiworkout.dto.CommitAiWorkoutPlanRequest;
 import com.calisthenics.backend.aiworkout.dto.GenerateAiWorkoutPlanRequest;
 import com.calisthenics.backend.aiworkout.dto.ModifyAiWorkoutPlanRequest;
 import com.calisthenics.backend.aiworkout.entity.AiWorkoutPlanLog;
+import com.calisthenics.backend.aiworkout.exception.AiWorkoutPlanValidationException;
 import com.calisthenics.backend.aiworkout.gemini.GeminiApiClient;
 import com.calisthenics.backend.aiworkout.gemini.dto.GeminiStructuredWorkoutPlan;
 import com.calisthenics.backend.aiworkout.repository.AiWorkoutPlanLogRepository;
 import com.calisthenics.backend.aiworkout.service.AiWorkoutPlanService;
+import com.calisthenics.backend.aiworkout.validation.AiWorkoutPlanPromptAnalyzer;
+import com.calisthenics.backend.aiworkout.validation.AiWorkoutPlanValidator;
 import com.calisthenics.backend.coachclient.repository.CoachClientRelationshipRepository;
-import com.calisthenics.backend.coachclient.type.CoachClientRelationshipStatus;
+import com.calisthenics.backend.config.AppProperties;
+import com.calisthenics.backend.config.UserTimeResolver;
 import com.calisthenics.backend.exercise.Exercise;
-import com.calisthenics.backend.exercise.ExerciseCategory;
 import com.calisthenics.backend.exercise.ExerciseRepository;
 import com.calisthenics.backend.user.User;
 import com.calisthenics.backend.user.UserRepository;
@@ -49,6 +52,12 @@ import java.util.*;
 @RequiredArgsConstructor
 public class AiWorkoutPlanServiceImpl implements AiWorkoutPlanService {
 
+    private static final List<WorkoutSessionStatus> ACTIVE_CALENDAR_STATUSES = List.of(
+            WorkoutSessionStatus.SCHEDULED,
+            WorkoutSessionStatus.IN_PROGRESS,
+            WorkoutSessionStatus.COMPLETED
+    );
+
     private final GeminiApiClient geminiApiClient;
     private final ExerciseRepository exerciseRepository;
     private final WorkoutPlanRepository workoutPlanRepository;
@@ -59,10 +68,65 @@ public class AiWorkoutPlanServiceImpl implements AiWorkoutPlanService {
     private final AiWorkoutPlanLogRepository aiWorkoutPlanLogRepository;
     private final WorkoutSessionRepository sessionRepository;
     private final ObjectMapper objectMapper;
+    private final AiWorkoutPlanPromptAnalyzer promptAnalyzer;
+    private final AiWorkoutPlanValidator planValidator;
+    private final UserTimeResolver userTimeResolver;
+    private final AppProperties appProperties;
 
     @Override
     @Transactional
     public AiWorkoutPlanPreviewResponse generatePlan(Long userId, GenerateAiWorkoutPlanRequest request) {
+        return generatePlan(userId, request, null);
+    }
+
+    @Override
+    @Transactional
+    public AiWorkoutPlanPreviewResponse generatePlan(Long userId, GenerateAiWorkoutPlanRequest request, String timezone) {
+        Long targetUserId = resolveTargetUserId(userId, request.getClientId());
+        User user = userRepository.findById(targetUserId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
+
+        AiWorkoutPlanPromptAnalyzer.PromptConstraints constraints = promptAnalyzer.analyze(
+                request.getPrompt(),
+                request.getFitnessLevel(),
+                request.getDurationWeeks()
+        );
+
+        List<Exercise> catalog = exerciseRepository.findByActiveTrue();
+        if (catalog.isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Exercise catalog is empty");
+        }
+
+        LocalDate today = userTimeResolver.today(timezone);
+        LocalDate defaultStartDate = request.getStartDate() != null
+                ? request.getStartDate()
+                : today.with(TemporalAdjusters.nextOrSame(DayOfWeek.MONDAY));
+
+        String systemPrompt = buildSystemPrompt(catalog, constraints);
+        String userPrompt = buildUserPrompt(request, constraints);
+
+        return executeAndValidateWithCorrection(
+                user,
+                request.getPrompt(),
+                systemPrompt,
+                userPrompt,
+                catalog,
+                constraints,
+                defaultStartDate,
+                targetUserId,
+                "SUCCESS"
+        );
+    }
+
+    @Override
+    @Transactional
+    public AiWorkoutPlanPreviewResponse modifyPlan(Long userId, ModifyAiWorkoutPlanRequest request) {
+        return modifyPlan(userId, request, null);
+    }
+
+    @Override
+    @Transactional
+    public AiWorkoutPlanPreviewResponse modifyPlan(Long userId, ModifyAiWorkoutPlanRequest request, String timezone) {
         Long targetUserId = resolveTargetUserId(userId, request.getClientId());
         User user = userRepository.findById(targetUserId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
@@ -72,34 +136,19 @@ public class AiWorkoutPlanServiceImpl implements AiWorkoutPlanService {
             throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Exercise catalog is empty");
         }
 
-        String systemPrompt = buildSystemPrompt(catalog, request.getFitnessLevel());
-        String userPrompt = buildUserPrompt(request);
+        Integer existingDuration = request.getCurrentPlan() != null ? request.getCurrentPlan().getDurationWeeks() : null;
+        AiWorkoutPlanPromptAnalyzer.PromptConstraints constraints = promptAnalyzer.analyze(
+                request.getPrompt(),
+                null,
+                existingDuration
+        );
 
-        GeminiApiClient.GeminiCallResult result = geminiApiClient.generateWorkoutPlan(systemPrompt, userPrompt);
-        AiWorkoutPlanPreviewResponse preview = mapAndValidateStructuredPlan(result.plan(), catalog, targetUserId);
+        LocalDate today = userTimeResolver.today(timezone);
+        LocalDate defaultStartDate = (request.getCurrentPlan() != null && request.getCurrentPlan().getStartDate() != null)
+                ? request.getCurrentPlan().getStartDate()
+                : today.with(TemporalAdjusters.nextOrSame(DayOfWeek.MONDAY));
 
-        preview.getMetadata().setModelUsed(result.modelUsed());
-        preview.getMetadata().setInputTokens(result.inputTokens());
-        preview.getMetadata().setOutputTokens(result.outputTokens());
-        preview.getMetadata().setLatencyMs(result.latencyMs());
-
-        // Log the AI generation
-        saveLog(user, request.getPrompt(), result.modelUsed(), result.inputTokens(), result.outputTokens(),
-                result.latencyMs(), "SUCCESS", null, null);
-
-        return preview;
-    }
-
-    @Override
-    @Transactional
-    public AiWorkoutPlanPreviewResponse modifyPlan(Long userId, ModifyAiWorkoutPlanRequest request) {
-        Long targetUserId = resolveTargetUserId(userId, request.getClientId());
-        User user = userRepository.findById(targetUserId)
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
-
-        List<Exercise> catalog = exerciseRepository.findByActiveTrue();
-        String systemPrompt = buildSystemPrompt(catalog, null);
-
+        String systemPrompt = buildSystemPrompt(catalog, constraints);
         String currentPlanJson;
         try {
             currentPlanJson = objectMapper.writeValueAsString(request.getCurrentPlan());
@@ -114,21 +163,90 @@ public class AiWorkoutPlanServiceImpl implements AiWorkoutPlanService {
                 User instruction for modifying this workout plan:
                 "%s"
 
-                Apply the requested changes to the plan while preserving the rest of the routine.
-                Ensure all exercises use valid exercise_id values from the catalog.
+                Apply the requested changes while obeying every rule:
+                - Cover all 7 unique days MONDAY through SUNDAY cleanly (training days vs rest days).
+                - Stay within %d to %d exercises per training day (strict maximum %d).
+                - Do not duplicate exercises within the same session.
+                - Use exact exercise_id and exercise_name values from the catalog.
                 Return the complete updated structured workout plan JSON.
-                """, currentPlanJson, request.getPrompt());
+                """,
+                currentPlanJson,
+                request.getPrompt(),
+                constraints.recommendedMinExercises(),
+                constraints.recommendedMaxExercises(),
+                constraints.maxExercisesPerSession());
 
+        return executeAndValidateWithCorrection(
+                user,
+                request.getPrompt(),
+                systemPrompt,
+                userPrompt,
+                catalog,
+                constraints,
+                defaultStartDate,
+                targetUserId,
+                "MODIFIED"
+        );
+    }
+
+    private AiWorkoutPlanPreviewResponse executeAndValidateWithCorrection(
+            User user,
+            String promptForLog,
+            String systemPrompt,
+            String userPrompt,
+            List<Exercise> catalog,
+            AiWorkoutPlanPromptAnalyzer.PromptConstraints constraints,
+            LocalDate defaultStartDate,
+            Long targetUserId,
+            String successLogStatus
+    ) {
         GeminiApiClient.GeminiCallResult result = geminiApiClient.generateWorkoutPlan(systemPrompt, userPrompt);
-        AiWorkoutPlanPreviewResponse preview = mapAndValidateStructuredPlan(result.plan(), catalog, targetUserId);
+        int totalInputTokens = result.inputTokens();
+        int totalOutputTokens = result.outputTokens();
+        long totalLatencyMs = result.latencyMs();
 
-        preview.getMetadata().setModelUsed(result.modelUsed());
-        preview.getMetadata().setInputTokens(result.inputTokens());
-        preview.getMetadata().setOutputTokens(result.outputTokens());
-        preview.getMetadata().setLatencyMs(result.latencyMs());
+        AiWorkoutPlanValidator.ValidationResult validation = planValidator.validateAndNormalizeGeneratedPlan(
+                result.plan(), catalog, constraints, defaultStartDate);
 
-        saveLog(user, request.getPrompt(), result.modelUsed(), result.inputTokens(), result.outputTokens(),
-                result.latencyMs(), "MODIFIED", null, null);
+        int maxCorrections = Math.max(0, appProperties.getWorkoutPlanner().getCorrectionRetries());
+        int attempt = 0;
+        while (!validation.isValid() && attempt < maxCorrections) {
+            attempt++;
+            log.warn("AI workout plan failed validation for user={} (attempt {}): {}",
+                    targetUserId, attempt, validation.violations());
+            String correctionPrompt = buildCorrectionPrompt(userPrompt, result.rawJson(), validation.violations(), constraints);
+            result = geminiApiClient.generateWorkoutPlan(systemPrompt, correctionPrompt);
+            totalInputTokens += result.inputTokens();
+            totalOutputTokens += result.outputTokens();
+            totalLatencyMs += result.latencyMs();
+            validation = planValidator.validateAndNormalizeGeneratedPlan(
+                    result.plan(), catalog, constraints, defaultStartDate);
+        }
+
+        if (!validation.isValid()) {
+            String errorSummary = String.join("; ", validation.violations());
+            log.warn("AI workout plan rejected after correction attempt for user={}: {}", targetUserId, errorSummary);
+            saveLog(user, promptForLog, result.modelUsed(), totalInputTokens, totalOutputTokens,
+                    totalLatencyMs, "VALIDATION_FAILED", errorSummary, null);
+            throw new AiWorkoutPlanValidationException(
+                    "Unable to build a valid workout plan: " + errorSummary,
+                    validation.violations()
+            );
+        }
+
+        AiWorkoutPlanPreviewResponse preview = validation.preview();
+        Optional<WorkoutPlan> existingActive = workoutPlanRepository.findFirstByUserIdAndActiveTrueOrderByUpdatedAtDesc(targetUserId);
+        preview.setMetadata(AiWorkoutPlanPreviewResponse.AiWorkoutMetadata.builder()
+                .modelUsed(result.modelUsed())
+                .inputTokens(totalInputTokens)
+                .outputTokens(totalOutputTokens)
+                .latencyMs(totalLatencyMs)
+                .hasConflicts(existingActive.isPresent())
+                .existingActivePlanName(existingActive.map(WorkoutPlan::getName).orElse(null))
+                .build());
+
+        saveLog(user, promptForLog, result.modelUsed(), totalInputTokens, totalOutputTokens,
+                totalLatencyMs, successLogStatus, null, null);
 
         return preview;
     }
@@ -136,12 +254,16 @@ public class AiWorkoutPlanServiceImpl implements AiWorkoutPlanService {
     @Override
     @Transactional
     public WorkoutPlanResponse commitPlan(Long userId, CommitAiWorkoutPlanRequest request) {
+        return commitPlan(userId, request, null);
+    }
+
+    @Override
+    @Transactional
+    public WorkoutPlanResponse commitPlan(Long userId, CommitAiWorkoutPlanRequest request, String timezone) {
         Long targetUserId = resolveTargetUserId(userId, request.getClientId());
-        // Acquire user row lock BEFORE reading/modifying workout plans to preserve global lock order (User -> WorkoutPlan)
         User user = userRepository.findByIdForUpdate(targetUserId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
 
-        // User-scoped idempotency check: if key was already processed for this user, return the committed plan
         if (request.getIdempotencyKey() != null && !request.getIdempotencyKey().isBlank()) {
             Optional<AiWorkoutPlanLog> existingLog = aiWorkoutPlanLogRepository
                     .findFirstByUserIdAndIdempotencyKeyOrderByCreatedAtDesc(targetUserId, request.getIdempotencyKey());
@@ -193,24 +315,30 @@ public class AiWorkoutPlanServiceImpl implements AiWorkoutPlanService {
             }
         }
 
+        LocalDate today = userTimeResolver.today(timezone);
+        LocalDate defaultStartDate = today.with(TemporalAdjusters.nextOrSame(DayOfWeek.MONDAY));
+        List<Exercise> catalog = exerciseRepository.findByActiveTrue();
+        planValidator.validatePreviewForCommit(planPreview, catalog, defaultStartDate);
+
+        Map<Long, Exercise> catalogById = new HashMap<>();
+        for (Exercise ex : catalog) {
+            catalogById.put(ex.getId(), ex);
+        }
+
         boolean shouldReplaceAndActivate = replaceFlag == null || Boolean.TRUE.equals(replaceFlag);
 
-        // Convert to CreateWorkoutPlanRequest with sanitized DB-safe constraints
         CreateWorkoutPlanRequest createRequest = new CreateWorkoutPlanRequest();
         createRequest.setName(sanitizePlanName(planPreview.getPlanName()));
-        createRequest.setDescription(planPreview.getDescription());
+        createRequest.setDescription(sanitizeDescription(planPreview.getDescription()));
         createRequest.setSplitType(planPreview.getSplitType() != null ? planPreview.getSplitType() : WorkoutSplitType.CUSTOM);
         createRequest.setActive(shouldReplaceAndActivate);
 
-        List<WorkoutPlanDayRequest> dayRequests = new ArrayList<>();
         Map<WorkoutDayOfWeek, AiWorkoutPlanPreviewResponse.AiWorkoutSessionPreview> sessionMap = new EnumMap<>(WorkoutDayOfWeek.class);
         for (AiWorkoutPlanPreviewResponse.AiWorkoutSessionPreview session : planPreview.getSessions()) {
-            if (session.getDayOfWeek() != null) {
-                sessionMap.put(session.getDayOfWeek(), session);
-            }
+            sessionMap.put(session.getDayOfWeek(), session);
         }
 
-        // Guarantee all 7 days of the week are present with canonical display order 1..7
+        List<WorkoutPlanDayRequest> dayRequests = new ArrayList<>();
         for (WorkoutDayOfWeek dayOfWeek : WorkoutDayOfWeek.values()) {
             WorkoutPlanDayRequest dayReq = new WorkoutPlanDayRequest();
             dayReq.setDayOfWeek(dayOfWeek);
@@ -224,23 +352,24 @@ public class AiWorkoutPlanServiceImpl implements AiWorkoutPlanService {
 
                 List<WorkoutPlanExerciseRequest> exRequests = new ArrayList<>();
                 int order = 1;
-                if (session.getExercises() != null) {
-                    for (AiWorkoutPlanPreviewResponse.AiWorkoutExercisePreview ex : session.getExercises()) {
-                        if (ex.getExerciseId() != null && exerciseRepository.existsById(ex.getExerciseId())) {
-                            boolean staticHold = isStaticHoldExercise(ex.getCategory(), ex.getExerciseCode(), ex.getExerciseName());
-                            NormalizedPrescription rx = normalizePrescription(ex.getSets(), ex.getReps(), ex.getHoldSeconds(), ex.getRestSeconds(), staticHold);
-
-                            WorkoutPlanExerciseRequest exReq = new WorkoutPlanExerciseRequest();
-                            exReq.setExerciseId(ex.getExerciseId());
-                            exReq.setSets(rx.sets());
-                            exReq.setReps(rx.reps());
-                            exReq.setDurationSeconds(rx.holdSeconds());
-                            exReq.setRestSeconds(rx.restSeconds());
-                            exReq.setDisplayOrder(order++);
-                            exReq.setNotes(ex.getNotes());
-                            exRequests.add(exReq);
-                        }
+                for (AiWorkoutPlanPreviewResponse.AiWorkoutExercisePreview ex : session.getExercises()) {
+                    Exercise catalogEntry = catalogById.get(ex.getExerciseId());
+                    if (catalogEntry == null) {
+                        continue;
                     }
+                    boolean staticHold = AiWorkoutPlanValidator.isStaticHoldExercise(catalogEntry);
+                    NormalizedPrescription rx = normalizePrescription(
+                            ex.getSets(), ex.getReps(), ex.getHoldSeconds(), ex.getRestSeconds(), staticHold);
+
+                    WorkoutPlanExerciseRequest exReq = new WorkoutPlanExerciseRequest();
+                    exReq.setExerciseId(catalogEntry.getId());
+                    exReq.setSets(rx.sets());
+                    exReq.setReps(rx.reps());
+                    exReq.setDurationSeconds(rx.holdSeconds());
+                    exReq.setRestSeconds(rx.restSeconds());
+                    exReq.setDisplayOrder(order++);
+                    exReq.setNotes(ex.getNotes());
+                    exRequests.add(exReq);
                 }
                 dayReq.setExercises(exRequests);
             } else {
@@ -261,27 +390,27 @@ public class AiWorkoutPlanServiceImpl implements AiWorkoutPlanService {
                     workoutPlanRepository.saveAndFlush(plan);
                 }
             }
+            cancelFutureUnstartedScheduledSessions(targetUserId, today);
         }
 
-        // Transactional plan creation and optional activation
         WorkoutPlanResponse createdPlan = workoutPlanService.create(targetUserId, createRequest);
 
-        // Tag the plan as AI generated
         workoutPlanRepository.findById(createdPlan.getId()).ifPresent(planEntity -> {
             planEntity.setAiGenerated(true);
-            planEntity.setAiPrompt(planPreview.getDescription());
+            planEntity.setAiPrompt(createRequest.getDescription());
             workoutPlanRepository.save(planEntity);
         });
 
-        // Schedule initial calendar sessions if a start date is specified
         LocalDate startDate = request.getStartDate() != null ? request.getStartDate()
-                : (planPreview.getStartDate() != null ? planPreview.getStartDate() : LocalDate.now().with(TemporalAdjusters.nextOrSame(DayOfWeek.MONDAY)));
+                : (planPreview.getStartDate() != null ? planPreview.getStartDate() : defaultStartDate);
 
-        scheduleInitialWorkoutSessions(targetUserId, createdPlan.getId(), startDate, planPreview.getDurationWeeks());
+        if (shouldReplaceAndActivate || currentActivePlan.isEmpty()) {
+            scheduleInitialWorkoutSessions(targetUserId, createdPlan.getId(), startDate, planPreview.getDurationWeeks());
+        }
 
         String loggedModel = (planPreview.getMetadata() != null && planPreview.getMetadata().getModelUsed() != null)
                 ? planPreview.getMetadata().getModelUsed()
-                : "gemini-flash-lite-latest";
+                : appProperties.getGemini().getModel();
         saveLog(user, createRequest.getName(), loggedModel, 0, 0, 0L,
                 "COMMITTED", null, request.getIdempotencyKey());
 
@@ -291,22 +420,38 @@ public class AiWorkoutPlanServiceImpl implements AiWorkoutPlanService {
         return createdPlan;
     }
 
+    private void cancelFutureUnstartedScheduledSessions(Long userId, LocalDate today) {
+        List<WorkoutSession> futureUnstarted = sessionRepository
+                .findByUserIdAndStatusAndStartedAtIsNullAndWorkoutDateAfter(userId, WorkoutSessionStatus.SCHEDULED, today);
+        if (futureUnstarted != null && !futureUnstarted.isEmpty()) {
+            futureUnstarted.forEach(s -> s.setStatus(WorkoutSessionStatus.CANCELLED));
+            sessionRepository.saveAll(futureUnstarted);
+        }
+    }
+
     private void scheduleInitialWorkoutSessions(Long userId, Long planId, LocalDate startDate, Integer durationWeeks) {
-        int weeks = (durationWeeks != null && durationWeeks > 0) ? Math.min(durationWeeks, 8) : 4;
+        int maxWeeks = appProperties.getWorkoutPlanner().getMaxDurationWeeks();
+        int weeks = (durationWeeks != null && durationWeeks > 0) ? Math.min(durationWeeks, maxWeeks) : 4;
         User user = userRepository.getReferenceById(userId);
         WorkoutPlan plan = workoutPlanRepository.getReferenceById(planId);
         List<WorkoutPlanDay> days = workoutPlanDayRepository.findByWorkoutPlanIdOrderByDisplayOrderAsc(planId);
 
+        Set<LocalDate> scheduledDates = new HashSet<>();
         for (WorkoutPlanDay day : days) {
-            if (day.isRestDay() || day.getExercises().isEmpty()) continue;
+            if (day.isRestDay() || day.getExercises().isEmpty()) {
+                continue;
+            }
 
             DayOfWeek targetDow = DayOfWeek.of(day.getDayOfWeek().getOrder());
             LocalDate firstDate = startDate.with(TemporalAdjusters.nextOrSame(targetDow));
 
             for (int w = 0; w < weeks; w++) {
                 LocalDate sessionDate = firstDate.plusWeeks(w);
-                boolean exists = sessionRepository.existsByUserIdAndWorkoutDateAndStatus(
-                        userId, sessionDate, WorkoutSessionStatus.IN_PROGRESS);
+                if (!scheduledDates.add(sessionDate)) {
+                    continue;
+                }
+                boolean exists = sessionRepository.existsByUserIdAndWorkoutDateAndStatusIn(
+                        userId, sessionDate, ACTIVE_CALENDAR_STATUSES);
 
                 if (!exists) {
                     WorkoutSession session = WorkoutSession.builder()
@@ -315,7 +460,7 @@ public class AiWorkoutPlanServiceImpl implements AiWorkoutPlanService {
                             .workoutPlanDay(day)
                             .workoutDate(sessionDate)
                             .title(day.getName() != null ? day.getName() : day.getDayOfWeek().name() + " Workout")
-                            .status(WorkoutSessionStatus.IN_PROGRESS)
+                            .status(WorkoutSessionStatus.SCHEDULED)
                             .build();
                     sessionRepository.save(session);
                 }
@@ -327,7 +472,6 @@ public class AiWorkoutPlanServiceImpl implements AiWorkoutPlanService {
         if (clientId == null || clientId.equals(currentUserId)) {
             return currentUserId;
         }
-        // Verify coach-client authorization
         boolean isAuthorized = relationshipRepository.findActiveRelationshipForUsers(currentUserId, clientId).isPresent();
         if (!isAuthorized) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "You are not authorized to manage workouts for client ID: " + clientId);
@@ -335,15 +479,17 @@ public class AiWorkoutPlanServiceImpl implements AiWorkoutPlanService {
         return clientId;
     }
 
-    private String buildSystemPrompt(List<Exercise> catalog, String fitnessLevel) {
+    private String buildSystemPrompt(
+            List<Exercise> catalog,
+            AiWorkoutPlanPromptAnalyzer.PromptConstraints constraints
+    ) {
         StringBuilder sb = new StringBuilder();
         sb.append("You are an elite calisthenics coach, gymnastics strength training expert, and biomechanics programmer.\n");
-        sb.append("Your task is to design a high-quality, scientifically sound weekly calisthenics workout plan based on the user's instructions.\n\n");
+        sb.append("Design a balanced, structured weekly calisthenics workout plan based on the user's instructions.\n\n");
 
         sb.append("CRITICAL REQUIREMENT - EXERCISE CATALOG USAGE:\n");
-        sb.append("You MUST select exercises exclusively from the following verified catalog.\n");
-        sb.append("For every exercise you include, you MUST set 'exercise_id' to the EXACT numeric ID from this catalog, and 'exercise_name' to the EXACT name.\n");
-        sb.append("DO NOT INVENT EXERCISE IDs OR NAMES.\n\n");
+        sb.append("Select exercises EXCLUSIVELY from the catalog below. Copy BOTH 'exercise_id' and 'exercise_name' verbatim.\n");
+        sb.append("NEVER invent new exercises or IDs.\n\n");
         sb.append("AVAILABLE EXERCISE CATALOG:\n");
 
         for (Exercise ex : catalog) {
@@ -351,140 +497,69 @@ public class AiWorkoutPlanServiceImpl implements AiWorkoutPlanService {
                     ex.getId(), ex.getName(), ex.getCode(), ex.getCategory().name(), ex.getDifficulty().name()));
         }
 
-        sb.append("\nPROGRAMMING RULES:\n");
-        sb.append("1. For static holds (e.g. Planche, Front Lever, Handstand, L-Sit): set 'hold_seconds' (e.g. 8 to 25 seconds) and 'reps' to null.\n");
-        sb.append("2. For dynamic exercises (e.g. Push-Ups, Pull-Ups, Dips, Squats): set 'reps' (e.g. 5 to 15) and 'hold_seconds' to null.\n");
-        sb.append("3. Sets should typically range between 3 and 5.\n");
-        sb.append("4. Rest between sets: 90-180 seconds for strength/skills, 60-90 seconds for hypertrophy/endurance.\n");
-        sb.append("5. Every week MUST cover all 7 days (MONDAY through SUNDAY). Mark non-training days with 'is_rest_day': true and an empty 'exercises' array.\n");
-        sb.append("6. If the user specifies a starting date (e.g. 'start next Monday', 'start tomorrow'), set 'suggested_start_date' formatted as YYYY-MM-DD.\n");
-
-        if (fitnessLevel != null && !fitnessLevel.isBlank()) {
-            sb.append("\nTarget Athlete Fitness Level: ").append(fitnessLevel).append("\n");
+        sb.append("\nSTRICT STRUCTURE & VOLUME RULES:\n");
+        sb.append("1. Output EXACTLY 7 entries in 'sessions', one for each unique weekday MONDAY through SUNDAY (never duplicate weekdays and never output multi-week session arrays > 7 items).\n");
+        sb.append("2. Distinguish 'duration_weeks' (program length in weeks, 1-12) from weekly training frequency (1-7 days per week).\n");
+        if (constraints.requestedTrainingDaysPerWeek().isPresent()) {
+            int reqDays = constraints.requestedTrainingDaysPerWeek().getAsInt();
+            sb.append(String.format("3. The user requested %d training days/week: generate EXACTLY %d training days ('is_rest_day': false) and %d rest days ('is_rest_day': true).\n",
+                    reqDays, reqDays, 7 - reqDays));
+        } else {
+            sb.append("3. Schedule 1 to 7 training days ('is_rest_day': false) matching the user's request, and mark remaining days as rest days ('is_rest_day': true).\n");
         }
+        sb.append("4. Rest days MUST have 'is_rest_day': true and an empty 'exercises' array ([]). Rest days never count as training days.\n");
+        sb.append(String.format("5. Volume per training session: target %d-%d exercises based on fitness level (%s) and workout focus; NEVER exceed %d exercises in any session.\n",
+                constraints.recommendedMinExercises(), constraints.recommendedMaxExercises(),
+                constraints.fitnessLevel(), constraints.maxExercisesPerSession()));
+        sb.append("6. NEVER repeat the same 'exercise_id' within the same session.\n");
+        sb.append("7. Avoid repeating the same dynamic compound strength exercise (PUSH/PULL/LEGS) across consecutive training days; intentional skill (SKILL) or core (CORE) practice may repeat when appropriate.\n");
+        sb.append("8. For static holds (e.g. Planche progressions, Front Lever, Handstand, L-Sit): set 'hold_seconds' (5-60) and 'reps' to null.\n");
+        sb.append("9. For dynamic rep-based exercises (Push-Ups, Pull-Ups, Dips, Squats, Pike Push-Up, Muscle-Up, Planche push up, Front lever pull up): set 'reps' (3-25) and 'hold_seconds' to null.\n");
+        sb.append("10. Sets: 2-6 (typically 3-5). Rest: 60-180 seconds. Do NOT include any AI provider brand names in titles or descriptions.\n");
 
         return sb.toString();
     }
 
-    private String buildUserPrompt(GenerateAiWorkoutPlanRequest request) {
+    private String buildUserPrompt(
+            GenerateAiWorkoutPlanRequest request,
+            AiWorkoutPlanPromptAnalyzer.PromptConstraints constraints
+    ) {
         StringBuilder sb = new StringBuilder();
         sb.append(request.getPrompt()).append("\n\n");
+        sb.append("Target athlete fitness level: ").append(constraints.fitnessLevel()).append("\n");
+        sb.append("Target program duration: ").append(constraints.targetDurationWeeks()).append(" weeks\n");
+        if (constraints.requestedTrainingDaysPerWeek().isPresent()) {
+            sb.append("Required training days per week: ").append(constraints.requestedTrainingDaysPerWeek().getAsInt()).append("\n");
+        }
         if (request.getPreferredSplit() != null) {
             sb.append("Preferred split structure: ").append(request.getPreferredSplit()).append("\n");
         }
         if (request.getStartDate() != null) {
             sb.append("Target starting date: ").append(request.getStartDate()).append("\n");
         }
-        if (request.getDurationWeeks() != null) {
-            sb.append("Target program duration in weeks: ").append(request.getDurationWeeks()).append("\n");
-        }
         return sb.toString();
     }
 
-    private AiWorkoutPlanPreviewResponse mapAndValidateStructuredPlan(
-            GeminiStructuredWorkoutPlan plan,
-            List<Exercise> catalog,
-            Long targetUserId
+    private String buildCorrectionPrompt(
+            String originalUserPrompt,
+            String previousRawJson,
+            List<String> violations,
+            AiWorkoutPlanPromptAnalyzer.PromptConstraints constraints
     ) {
-        Map<Long, Exercise> idMap = new HashMap<>();
-        Map<String, Exercise> nameMap = new HashMap<>();
-        for (Exercise ex : catalog) {
-            idMap.put(ex.getId(), ex);
-            nameMap.put(ex.getName().toLowerCase().trim(), ex);
-            nameMap.put(ex.getCode().toLowerCase().trim(), ex);
+        StringBuilder sb = new StringBuilder();
+        sb.append("Your previous workout plan output violated the following backend validation rules:\n");
+        for (int i = 0; i < violations.size(); i++) {
+            sb.append(i + 1).append(". ").append(violations.get(i)).append("\n");
         }
-
-        List<AiWorkoutPlanPreviewResponse.AiWorkoutSessionPreview> sessionPreviews = new ArrayList<>();
-        Map<String, GeminiStructuredWorkoutPlan.GeminiSession> returnedSessions = new HashMap<>();
-        if (plan.getSessions() != null) {
-            for (GeminiStructuredWorkoutPlan.GeminiSession s : plan.getSessions()) {
-                if (s.getDayOfWeek() != null) {
-                    returnedSessions.put(s.getDayOfWeek().toUpperCase(), s);
-                }
-            }
+        sb.append("\nOriginal user request:\n").append(originalUserPrompt).append("\n");
+        sb.append(String.format("Fix ALL violations listed above while staying within %d-%d exercises per session (hard max %d), ",
+                constraints.recommendedMinExercises(), constraints.recommendedMaxExercises(), constraints.maxExercisesPerSession()));
+        sb.append("exactly 7 unique days MONDAY-SUNDAY, valid active catalog IDs/names only, no duplicate exercises within a session, ");
+        sb.append("and strict rest-day separation.\n");
+        if (previousRawJson != null && !previousRawJson.isBlank()) {
+            sb.append("\nPrevious invalid JSON for reference:\n").append(previousRawJson).append("\n");
         }
-
-        for (WorkoutDayOfWeek dow : WorkoutDayOfWeek.values()) {
-            GeminiStructuredWorkoutPlan.GeminiSession session = returnedSessions.get(dow.name());
-            if (session != null && !Boolean.TRUE.equals(session.getRestDay())) {
-                List<AiWorkoutPlanPreviewResponse.AiWorkoutExercisePreview> exercisePreviews = new ArrayList<>();
-                if (session.getExercises() != null) {
-                    for (GeminiStructuredWorkoutPlan.GeminiExercise ex : session.getExercises()) {
-                        Exercise matched = matchExercise(ex.getExerciseId(), ex.getExerciseName(), idMap, nameMap, catalog);
-                        if (matched != null) {
-                            boolean staticHold = isStaticHoldExercise(
-                                    matched.getCategory() != null ? matched.getCategory().name() : null,
-                                    matched.getCode(),
-                                    matched.getName()
-                            );
-                            NormalizedPrescription rx = normalizePrescription(
-                                    ex.getSets(),
-                                    ex.getReps(),
-                                    ex.getHoldSeconds(),
-                                    ex.getRestSeconds(),
-                                    staticHold
-                            );
-                            exercisePreviews.add(AiWorkoutPlanPreviewResponse.AiWorkoutExercisePreview.builder()
-                                    .exerciseId(matched.getId())
-                                    .exerciseName(matched.getName())
-                                    .exerciseCode(matched.getCode())
-                                    .category(matched.getCategory().name())
-                                    .sets(rx.sets())
-                                    .reps(rx.reps())
-                                    .holdSeconds(rx.holdSeconds())
-                                    .restSeconds(rx.restSeconds())
-                                    .notes(ex.getNotes())
-                                    .requiresReview(false)
-                                    .build());
-                        }
-                    }
-                }
-
-                sessionPreviews.add(AiWorkoutPlanPreviewResponse.AiWorkoutSessionPreview.builder()
-                        .dayOfWeek(dow)
-                        .title(session.getTitle() != null ? session.getTitle() : dow.name() + " Workout")
-                        .restDay(false)
-                        .exercises(exercisePreviews)
-                        .build());
-            } else {
-                sessionPreviews.add(AiWorkoutPlanPreviewResponse.AiWorkoutSessionPreview.builder()
-                        .dayOfWeek(dow)
-                        .title(session != null && session.getTitle() != null ? session.getTitle() : "Rest Day")
-                        .restDay(true)
-                        .exercises(Collections.emptyList())
-                        .build());
-            }
-        }
-
-        // Check for conflicts with existing active plans
-        Optional<WorkoutPlan> existingActive = workoutPlanRepository.findFirstByUserIdAndActiveTrueOrderByUpdatedAtDesc(targetUserId);
-
-        LocalDate startDate = LocalDate.now().with(TemporalAdjusters.nextOrSame(DayOfWeek.MONDAY));
-        if (plan.getSuggestedStartDate() != null) {
-            try {
-                startDate = LocalDate.parse(plan.getSuggestedStartDate().trim());
-            } catch (Exception ignored) {}
-        }
-
-        WorkoutSplitType splitType = WorkoutSplitType.CUSTOM;
-        if (plan.getSplitType() != null) {
-            try {
-                splitType = WorkoutSplitType.valueOf(plan.getSplitType().toUpperCase().trim());
-            } catch (Exception ignored) {}
-        }
-
-        return AiWorkoutPlanPreviewResponse.builder()
-                .planName(sanitizePlanName(plan.getPlanName()))
-                .description(plan.getDescription() != null ? plan.getDescription() : "Custom workout plan generated by Gemini AI")
-                .durationWeeks(plan.getDurationWeeks() != null ? plan.getDurationWeeks() : 4)
-                .startDate(startDate)
-                .splitType(splitType)
-                .sessions(sessionPreviews)
-                .metadata(AiWorkoutPlanPreviewResponse.AiWorkoutMetadata.builder()
-                        .hasConflicts(existingActive.isPresent())
-                        .existingActivePlanName(existingActive.map(WorkoutPlan::getName).orElse(null))
-                        .build())
-                .build();
+        return sb.toString();
     }
 
     private record NormalizedPrescription(int sets, Integer reps, Integer holdSeconds, int restSeconds) {}
@@ -496,79 +571,44 @@ public class AiWorkoutPlanServiceImpl implements AiWorkoutPlanService {
             Integer rawRestSeconds,
             boolean staticHold
     ) {
-        int sets = (rawSets != null && rawSets > 0) ? rawSets : 3;
-        int rest = (rawRestSeconds != null && rawRestSeconds >= 0) ? rawRestSeconds : 90;
+        int sets = (rawSets != null && rawSets > 0) ? Math.min(rawSets, 10) : 3;
+        int rest = (rawRestSeconds != null && rawRestSeconds >= 0) ? Math.min(rawRestSeconds, 600) : 90;
 
-        // DB constraint workout_plan_exercises_reps_check requires reps IS NULL OR reps > 0;
-        // workout_plan_exercises_duration_seconds_check requires duration_seconds IS NULL OR duration_seconds > 0.
-        Integer reps = (rawReps != null && rawReps > 0) ? rawReps : null;
-        Integer hold = (rawHoldSeconds != null && rawHoldSeconds > 0) ? rawHoldSeconds : null;
+        Integer reps = (rawReps != null && rawReps > 0) ? Math.min(rawReps, 100) : null;
+        Integer hold = (rawHoldSeconds != null && rawHoldSeconds > 0) ? Math.min(rawHoldSeconds, 300) : null;
 
-        if (reps == null && hold == null) {
-            if (staticHold) {
+        if (staticHold) {
+            reps = null;
+            if (hold == null) {
                 hold = 15;
-            } else {
+            }
+        } else {
+            hold = null;
+            if (reps == null) {
                 reps = 10;
             }
         }
         return new NormalizedPrescription(sets, reps, hold, rest);
     }
 
-    private boolean isStaticHoldExercise(String category, String code, String name) {
-        if (ExerciseCategory.SKILL.name().equalsIgnoreCase(category)
-                || ExerciseCategory.ISOMETRIC.name().equalsIgnoreCase(category)) {
-            return true;
-        }
-        String joined = ((code != null ? code : "") + " " + (name != null ? name : "")).toLowerCase(Locale.US);
-        return joined.contains("planche")
-                || joined.contains("front lever")
-                || joined.contains("front_lever")
-                || joined.contains("back lever")
-                || joined.contains("handstand")
-                || joined.contains("l-sit")
-                || joined.contains("l_sit")
-                || joined.contains("hold")
-                || joined.contains("plank")
-                || joined.contains("flag");
-    }
-
     private String sanitizePlanName(String rawName) {
         if (rawName == null || rawName.trim().isEmpty()) {
-            return "AI Calisthenics Plan";
+            return "Structured Calisthenics Plan";
         }
         String trimmed = rawName.trim();
         return trimmed.length() <= 100 ? trimmed : trimmed.substring(0, 100);
     }
 
+    private String sanitizeDescription(String rawDescription) {
+        if (rawDescription == null || rawDescription.isBlank()) {
+            return "Personalized structured calisthenics workout plan.";
+        }
+        return rawDescription.replaceAll("(?i)\\b(google\\s+)?gemini(\\s+ai)?\\b", "AI").trim();
+    }
+
     private String sanitizeDayName(String rawName, String fallback) {
         String value = (rawName == null || rawName.trim().isEmpty()) ? fallback : rawName.trim();
         return value.length() <= 100 ? value : value.substring(0, 100);
-    }
-
-    private Exercise matchExercise(
-            Long id,
-            String name,
-            Map<Long, Exercise> idMap,
-            Map<String, Exercise> nameMap,
-            List<Exercise> catalog
-    ) {
-        if (id != null && idMap.containsKey(id)) {
-            return idMap.get(id);
-        }
-        if (name != null) {
-            String clean = name.toLowerCase().trim();
-            if (nameMap.containsKey(clean)) {
-                return nameMap.get(clean);
-            }
-            // Substring search
-            for (Exercise ex : catalog) {
-                if (clean.contains(ex.getName().toLowerCase()) || ex.getName().toLowerCase().contains(clean)) {
-                    return ex;
-                }
-            }
-        }
-        // Fallback: default to push-up if catalog is not empty
-        return catalog.isEmpty() ? null : catalog.getFirst();
     }
 
     private WorkoutSessionType resolveSessionType(String title) {
@@ -580,6 +620,10 @@ public class AiWorkoutPlanServiceImpl implements AiWorkoutPlanService {
         if (lower.contains("upper")) return WorkoutSessionType.UPPER;
         if (lower.contains("lower")) return WorkoutSessionType.LOWER;
         if (lower.contains("full")) return WorkoutSessionType.FULL_BODY;
+        if (lower.contains("handstand")) return WorkoutSessionType.HANDSTAND;
+        if (lower.contains("planche")) return WorkoutSessionType.PLANCHE;
+        if (lower.contains("front lever") || lower.contains("lever")) return WorkoutSessionType.FRONT_LEVER;
+        if (lower.contains("mobility") || lower.contains("stretch")) return WorkoutSessionType.MOBILITY;
         return null;
     }
 

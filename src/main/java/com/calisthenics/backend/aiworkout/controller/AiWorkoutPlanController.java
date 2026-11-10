@@ -20,7 +20,7 @@ import org.springframework.web.bind.annotation.*;
 @RestController
 @RequestMapping("/api/v1/ai/workout-plans")
 @RequiredArgsConstructor
-@Tag(name = "AI Workout Planner", description = "Natural-language workout planning powered by Google Gemini API")
+@Tag(name = "AI Workout Planner", description = "Natural-language structured AI workout planning")
 @SecurityRequirement(name = "Bearer Authentication")
 public class AiWorkoutPlanController {
 
@@ -30,27 +30,30 @@ public class AiWorkoutPlanController {
     @Operation(summary = "Generate a structured workout plan preview from natural language")
     public ResponseEntity<AiWorkoutPlanPreviewResponse> generate(
             @AuthenticationPrincipal UserPrincipal currentUser,
+            @RequestHeader(value = "X-Timezone", required = false) String timezone,
             @Valid @RequestBody GenerateAiWorkoutPlanRequest request
     ) {
-        return ResponseEntity.ok(aiWorkoutPlanService.generatePlan(currentUser.getId(), request));
+        return ResponseEntity.ok(aiWorkoutPlanService.generatePlan(currentUser.getId(), request, timezone));
     }
 
     @PostMapping("/modify")
     @Operation(summary = "Iteratively modify an existing plan preview using natural language")
     public ResponseEntity<AiWorkoutPlanPreviewResponse> modify(
             @AuthenticationPrincipal UserPrincipal currentUser,
+            @RequestHeader(value = "X-Timezone", required = false) String timezone,
             @Valid @RequestBody ModifyAiWorkoutPlanRequest request
     ) {
-        return ResponseEntity.ok(aiWorkoutPlanService.modifyPlan(currentUser.getId(), request));
+        return ResponseEntity.ok(aiWorkoutPlanService.modifyPlan(currentUser.getId(), request, timezone));
     }
 
     @PostMapping("/commit")
     @Operation(summary = "Commit and persist the validated AI workout plan and schedule into calendar")
     public ResponseEntity<WorkoutPlanResponse> commit(
             @AuthenticationPrincipal UserPrincipal currentUser,
+            @RequestHeader(value = "X-Timezone", required = false) String timezone,
             @Valid @RequestBody CommitAiWorkoutPlanRequest request
     ) {
         return ResponseEntity.status(HttpStatus.CREATED)
-                .body(aiWorkoutPlanService.commitPlan(currentUser.getId(), request));
+                .body(aiWorkoutPlanService.commitPlan(currentUser.getId(), request, timezone));
     }
 }

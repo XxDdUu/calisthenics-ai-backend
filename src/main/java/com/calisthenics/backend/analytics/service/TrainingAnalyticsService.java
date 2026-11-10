@@ -4,6 +4,8 @@ import com.calisthenics.backend.analytics.dto.*;
 import com.calisthenics.backend.analytics.model.PersonalRecord;
 import com.calisthenics.backend.analytics.repository.PersonalRecordRepository;
 import com.calisthenics.backend.coachclient.repository.CoachClientRelationshipRepository;
+import com.calisthenics.backend.config.AppProperties;
+import com.calisthenics.backend.config.UserTimeResolver;
 import com.calisthenics.backend.exercise.Exercise;
 import com.calisthenics.backend.exercise.ExerciseCategory;
 import com.calisthenics.backend.exercise.ExerciseRepository;
@@ -12,8 +14,8 @@ import com.calisthenics.backend.workout.WorkoutSessionExercise;
 import com.calisthenics.backend.workout.WorkoutSessionRepository;
 import com.calisthenics.backend.workout.WorkoutSessionSet;
 import com.calisthenics.backend.workout.WorkoutSessionStatus;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -23,6 +25,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.DayOfWeek;
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.temporal.ChronoUnit;
 import java.time.temporal.TemporalAdjusters;
@@ -31,7 +34,6 @@ import java.util.stream.Collectors;
 
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class TrainingAnalyticsService {
 
     private final WorkoutSessionRepository workoutSessionRepository;
@@ -39,16 +41,51 @@ public class TrainingAnalyticsService {
     private final ExerciseRepository exerciseRepository;
     private final CoachClientRelationshipRepository coachClientRelationshipRepository;
     private final PersonalRecordService personalRecordService;
+    private final UserTimeResolver userTimeResolver;
+
+    public TrainingAnalyticsService(
+            WorkoutSessionRepository workoutSessionRepository,
+            PersonalRecordRepository personalRecordRepository,
+            ExerciseRepository exerciseRepository,
+            CoachClientRelationshipRepository coachClientRelationshipRepository,
+            PersonalRecordService personalRecordService
+    ) {
+        this(workoutSessionRepository, personalRecordRepository, exerciseRepository,
+                coachClientRelationshipRepository, personalRecordService, new UserTimeResolver(new AppProperties()));
+    }
+
+    @Autowired
+    public TrainingAnalyticsService(
+            WorkoutSessionRepository workoutSessionRepository,
+            PersonalRecordRepository personalRecordRepository,
+            ExerciseRepository exerciseRepository,
+            CoachClientRelationshipRepository coachClientRelationshipRepository,
+            PersonalRecordService personalRecordService,
+            UserTimeResolver userTimeResolver
+    ) {
+        this.workoutSessionRepository = workoutSessionRepository;
+        this.personalRecordRepository = personalRecordRepository;
+        this.exerciseRepository = exerciseRepository;
+        this.coachClientRelationshipRepository = coachClientRelationshipRepository;
+        this.personalRecordService = personalRecordService;
+        this.userTimeResolver = userTimeResolver;
+    }
 
     @Transactional(readOnly = true)
     public ExerciseProgressResponse getExerciseProgress(Long userId, Long exerciseId, String filter) {
+        return getExerciseProgress(userId, exerciseId, filter, null);
+    }
+
+    @Transactional(readOnly = true)
+    public ExerciseProgressResponse getExerciseProgress(Long userId, Long exerciseId, String filter, String timezone) {
         Exercise exercise = exerciseRepository.findById(exerciseId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Exercise not found"));
 
         List<WorkoutSession> allSessions = workoutSessionRepository.findCompletedSessionsByExercise(
                 userId, WorkoutSessionStatus.COMPLETED, exerciseId);
 
-        LocalDate filterStartDate = resolveFilterStartDate(filter);
+        LocalDate today = userTimeResolver.today(timezone);
+        LocalDate filterStartDate = resolveFilterStartDate(filter, today);
         List<WorkoutSession> filteredSessions = allSessions.stream()
                 .filter(s -> filterStartDate == null || (s.getWorkoutDate() != null && !s.getWorkoutDate().isBefore(filterStartDate)))
                 .toList();
@@ -326,17 +363,24 @@ public class TrainingAnalyticsService {
 
     @Transactional(readOnly = true)
     public TrainingOverviewResponse getTrainingOverview(Long userId) {
+        return getTrainingOverview(userId, null);
+    }
+
+    @Transactional(readOnly = true)
+    public TrainingOverviewResponse getTrainingOverview(Long userId, String timezone) {
+        LocalDate today = userTimeResolver.today(timezone);
         List<LocalDate> distinctDates = workoutSessionRepository.findDistinctCompletedWorkoutDates(
                 userId, WorkoutSessionStatus.COMPLETED);
 
-        int totalWorkouts = (int) workoutSessionRepository.countByUserIdAndCompletedAtIsNotNull(userId);
+        int totalWorkouts = (int) workoutSessionRepository.countByUserIdAndStatus(
+                userId, WorkoutSessionStatus.COMPLETED);
         int totalActiveDays = distinctDates.size();
 
-        int currentStreak = calculateCurrentStreak(distinctDates);
+        int currentStreak = calculateCurrentStreak(distinctDates, today);
         int longestStreak = calculateLongestStreak(distinctDates);
 
         // Weekly frequency over last 28 days
-        LocalDate fourWeeksAgo = LocalDate.now().minusWeeks(4);
+        LocalDate fourWeeksAgo = today.minusWeeks(4);
         long recentActiveDays = distinctDates.stream().filter(d -> !d.isBefore(fourWeeksAgo)).count();
         double weeklyFrequency = Math.round((recentActiveDays / 4.0) * 10.0) / 10.0;
 
@@ -359,7 +403,12 @@ public class TrainingAnalyticsService {
 
     @Transactional(readOnly = true)
     public WeeklyAnalyticsResponse getWeeklyAnalytics(Long userId) {
-        LocalDate today = LocalDate.now();
+        return getWeeklyAnalytics(userId, null);
+    }
+
+    @Transactional(readOnly = true)
+    public WeeklyAnalyticsResponse getWeeklyAnalytics(Long userId, String timezone) {
+        LocalDate today = userTimeResolver.today(timezone);
         LocalDate currentWeekStart = today.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY));
         LocalDate currentWeekEnd = today.with(TemporalAdjusters.nextOrSame(DayOfWeek.SUNDAY));
 
@@ -443,7 +492,13 @@ public class TrainingAnalyticsService {
 
     @Transactional(readOnly = true)
     public MonthlyAnalyticsResponse getMonthlyAnalytics(Long userId) {
-        LocalDate today = LocalDate.now();
+        return getMonthlyAnalytics(userId, null);
+    }
+
+    @Transactional(readOnly = true)
+    public MonthlyAnalyticsResponse getMonthlyAnalytics(Long userId, String timezone) {
+        LocalDate today = userTimeResolver.today(timezone);
+        ZoneId zone = userTimeResolver.resolveZone(timezone);
         LocalDate currentMonthStart = today.withDayOfMonth(1);
         LocalDate currentMonthEnd = today.with(TemporalAdjusters.lastDayOfMonth());
 
@@ -464,8 +519,8 @@ public class TrainingAnalyticsService {
         BigDecimal prevVol = calculateSessionsVolume(prevMonthSessions);
         BigDecimal volumeChange = calculatePercentage(currVol, prevVol);
 
-        ZonedDateTime startZoned = currentMonthStart.atStartOfDay(java.time.ZoneId.systemDefault());
-        ZonedDateTime endZoned = currentMonthEnd.plusDays(1).atStartOfDay(java.time.ZoneId.systemDefault());
+        ZonedDateTime startZoned = currentMonthStart.atStartOfDay(zone);
+        ZonedDateTime endZoned = currentMonthEnd.plusDays(1).atStartOfDay(zone);
         int prsAchieved = (int) personalRecordRepository.countByUserIdAndAchievedAtBetween(userId, startZoned, endZoned);
 
         return MonthlyAnalyticsResponse.builder()
@@ -480,6 +535,12 @@ public class TrainingAnalyticsService {
 
     @Transactional(readOnly = true)
     public TrainingInsightsResponse getTrainingInsights(Long userId) {
+        return getTrainingInsights(userId, null);
+    }
+
+    @Transactional(readOnly = true)
+    public TrainingInsightsResponse getTrainingInsights(Long userId, String timezone) {
+        LocalDate today = userTimeResolver.today(timezone);
         List<WorkoutSession> recentSessions = workoutSessionRepository.findByUserIdAndStatusOrderByWorkoutDateDesc(
                 userId, WorkoutSessionStatus.COMPLETED);
 
@@ -493,7 +554,7 @@ public class TrainingAnalyticsService {
         List<String> insights = new ArrayList<>();
 
         // 1. Weekly Volume Insight
-        WeeklyAnalyticsResponse weekly = getWeeklyAnalytics(userId);
+        WeeklyAnalyticsResponse weekly = getWeeklyAnalytics(userId, timezone);
         if (weekly.getPreviousWeekVolume().compareTo(BigDecimal.ZERO) > 0 && weekly.getVolumeChangePercentage() != null) {
             BigDecimal change = weekly.getVolumeChangePercentage();
             if (change.compareTo(BigDecimal.valueOf(5)) >= 0) {
@@ -504,7 +565,7 @@ public class TrainingAnalyticsService {
         }
 
         // 2. Exercise Specific Overload Insights over the last 4 weeks
-        LocalDate fourWeeksAgo = LocalDate.now().minusWeeks(4);
+        LocalDate fourWeeksAgo = today.minusWeeks(4);
         Map<Long, List<WorkoutSession>> sessionsByExercise = new HashMap<>();
 
         for (WorkoutSession s : recentSessions) {
@@ -564,7 +625,7 @@ public class TrainingAnalyticsService {
         }
 
         // 3. Streak / Consistency insight
-        TrainingOverviewResponse overview = getTrainingOverview(userId);
+        TrainingOverviewResponse overview = getTrainingOverview(userId, timezone);
         if (overview.getCurrentStreak() >= 3) {
             insights.add("You're on a " + overview.getCurrentStreak() + "-day training streak! Keep up the consistency.");
         }
@@ -602,10 +663,9 @@ public class TrainingAnalyticsService {
 
     // --- Helper calculations ---
 
-    private int calculateCurrentStreak(List<LocalDate> sortedDistinctDates) {
+    private int calculateCurrentStreak(List<LocalDate> sortedDistinctDates, LocalDate today) {
         if (sortedDistinctDates.isEmpty()) return 0;
 
-        LocalDate today = LocalDate.now();
         LocalDate yesterday = today.minusDays(1);
         LocalDate firstDate = sortedDistinctDates.get(0);
 
@@ -722,9 +782,8 @@ public class TrainingAnalyticsService {
         return best;
     }
 
-    private LocalDate resolveFilterStartDate(String filter) {
+    private LocalDate resolveFilterStartDate(String filter, LocalDate now) {
         if (filter == null || filter.isBlank()) return null;
-        LocalDate now = LocalDate.now();
         return switch (filter.trim().toLowerCase()) {
             case "7d", "7 days" -> now.minusDays(7);
             case "30d", "30 days" -> now.minusDays(30);

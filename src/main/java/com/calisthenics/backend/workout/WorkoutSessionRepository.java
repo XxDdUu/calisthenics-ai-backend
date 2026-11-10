@@ -9,6 +9,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.stereotype.Repository;
 
 import java.time.LocalDate;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 
@@ -34,6 +35,8 @@ public interface WorkoutSessionRepository extends JpaRepository<WorkoutSession, 
 
     long countByUserId(Long userId);
 
+    long countByUserIdAndStatus(Long userId, WorkoutSessionStatus status);
+
     long countByUserIdAndCompletedAtIsNotNull(Long userId);
 
     List<WorkoutSession> findTop5ByUserIdOrderByCreatedAtDesc(Long userId);
@@ -46,10 +49,36 @@ public interface WorkoutSessionRepository extends JpaRepository<WorkoutSession, 
     List<WorkoutSession> findByUserIdAndWorkoutDateAndStatus(
             Long userId, LocalDate workoutDate, WorkoutSessionStatus status);
 
+    List<WorkoutSession> findByUserIdAndWorkoutDateAndStatusIn(
+            Long userId, LocalDate workoutDate, Collection<WorkoutSessionStatus> statuses);
+
     boolean existsByUserIdAndWorkoutDateAndStatus(
             Long userId, LocalDate workoutDate, WorkoutSessionStatus status);
 
+    boolean existsByUserIdAndWorkoutDateAndStatusIn(
+            Long userId, LocalDate workoutDate, Collection<WorkoutSessionStatus> statuses);
+
+    List<WorkoutSession> findByUserIdAndStatusAndStartedAtIsNullAndWorkoutDateAfter(
+            Long userId, WorkoutSessionStatus status, LocalDate date);
+
     List<WorkoutSession> findByUserIdAndStatusOrderByStartedAtDesc(Long userId, WorkoutSessionStatus status);
+
+    @Query("SELECT s FROM WorkoutSession s WHERE s.user.id = :userId " +
+           "AND s.status IN ('IN_PROGRESS', 'SCHEDULED') " +
+           "AND ((s.workoutDate IS NOT NULL AND s.workoutDate <= :today) " +
+           "OR (s.workoutDate IS NULL AND s.status = 'IN_PROGRESS')) " +
+           "ORDER BY s.workoutDate DESC, s.startedAt DESC")
+    List<WorkoutSession> findUnfinishedSessionsAsOf(
+            @org.springframework.data.repository.query.Param("userId") Long userId,
+            @org.springframework.data.repository.query.Param("today") LocalDate today);
+
+    @Query("SELECT s FROM WorkoutSession s WHERE s.user.id = :userId " +
+           "AND s.status IN ('SCHEDULED', 'IN_PROGRESS') " +
+           "AND s.workoutDate IS NOT NULL AND s.workoutDate > :today " +
+           "ORDER BY s.workoutDate ASC, s.id ASC")
+    List<WorkoutSession> findUpcomingSessionsAfter(
+            @org.springframework.data.repository.query.Param("userId") Long userId,
+            @org.springframework.data.repository.query.Param("today") LocalDate today);
 
     Page<WorkoutSession> findByUserIdAndStatus(Long userId, WorkoutSessionStatus status, Pageable pageable);
 

@@ -3,15 +3,19 @@ package com.calisthenics.backend.aiworkout;
 import com.calisthenics.backend.aiworkout.dto.AiWorkoutPlanPreviewResponse;
 import com.calisthenics.backend.aiworkout.dto.CommitAiWorkoutPlanRequest;
 import com.calisthenics.backend.aiworkout.dto.GenerateAiWorkoutPlanRequest;
-import com.calisthenics.backend.aiworkout.dto.ModifyAiWorkoutPlanRequest;
 import com.calisthenics.backend.aiworkout.entity.AiWorkoutPlanLog;
+import com.calisthenics.backend.aiworkout.exception.AiWorkoutPlanValidationException;
 import com.calisthenics.backend.aiworkout.gemini.GeminiApiClient;
 import com.calisthenics.backend.aiworkout.gemini.dto.GeminiStructuredWorkoutPlan;
 import com.calisthenics.backend.aiworkout.repository.AiWorkoutPlanLogRepository;
 import com.calisthenics.backend.aiworkout.service.impl.AiWorkoutPlanServiceImpl;
+import com.calisthenics.backend.aiworkout.validation.AiWorkoutPlanPromptAnalyzer;
+import com.calisthenics.backend.aiworkout.validation.AiWorkoutPlanValidator;
 import com.calisthenics.backend.coachclient.entity.CoachClientRelationship;
 import com.calisthenics.backend.coachclient.repository.CoachClientRelationshipRepository;
 import com.calisthenics.backend.coachclient.type.CoachClientRelationshipStatus;
+import com.calisthenics.backend.config.AppProperties;
+import com.calisthenics.backend.config.UserTimeResolver;
 import com.calisthenics.backend.exercise.DifficultyLevel;
 import com.calisthenics.backend.exercise.Exercise;
 import com.calisthenics.backend.exercise.ExerciseCategory;
@@ -38,14 +42,15 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
-import org.mockito.InjectMocks;
 import org.mockito.Mock;
-import org.mockito.Spy;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.server.ResponseStatusException;
 
+import java.time.Clock;
+import java.time.Instant;
 import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.*;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -82,10 +87,11 @@ class AiWorkoutPlanServiceTest {
     @Mock
     private WorkoutSessionRepository sessionRepository;
 
-    @Spy
-    private ObjectMapper objectMapper = new ObjectMapper();
-
-    @InjectMocks
+    private ObjectMapper objectMapper;
+    private AppProperties appProperties;
+    private AiWorkoutPlanPromptAnalyzer promptAnalyzer;
+    private AiWorkoutPlanValidator validator;
+    private UserTimeResolver userTimeResolver;
     private AiWorkoutPlanServiceImpl aiWorkoutPlanService;
 
     private User testAthlete;
@@ -94,6 +100,31 @@ class AiWorkoutPlanServiceTest {
 
     @BeforeEach
     void setUp() {
+        objectMapper = new ObjectMapper();
+        appProperties = new AppProperties();
+        promptAnalyzer = new AiWorkoutPlanPromptAnalyzer(appProperties);
+        validator = new AiWorkoutPlanValidator(appProperties, promptAnalyzer);
+        userTimeResolver = new UserTimeResolver(
+                appProperties,
+                Clock.fixed(Instant.parse("2026-11-10T05:00:00Z"), ZoneOffset.UTC)
+        );
+        aiWorkoutPlanService = new AiWorkoutPlanServiceImpl(
+                geminiApiClient,
+                exerciseRepository,
+                workoutPlanRepository,
+                workoutPlanDayRepository,
+                workoutPlanService,
+                userRepository,
+                relationshipRepository,
+                aiWorkoutPlanLogRepository,
+                sessionRepository,
+                objectMapper,
+                promptAnalyzer,
+                validator,
+                userTimeResolver,
+                appProperties
+        );
+
         testAthlete = User.builder()
                 .id(10L)
                 .email("athlete@test.com")
@@ -115,7 +146,9 @@ class AiWorkoutPlanServiceTest {
                 Exercise.builder().id(4L).name("Parallel Bar Dips").code("DIPS").category(ExerciseCategory.PUSH).difficulty(DifficultyLevel.BEGINNER).active(true).build(),
                 Exercise.builder().id(5L).name("Handstand").code("HANDSTAND").category(ExerciseCategory.SKILL).difficulty(DifficultyLevel.INTERMEDIATE).active(true).build(),
                 Exercise.builder().id(6L).name("Planche").code("PLANCHE").category(ExerciseCategory.SKILL).difficulty(DifficultyLevel.ADVANCED).active(true).build(),
-                Exercise.builder().id(7L).name("Front Lever").code("FRONT_LEVER").category(ExerciseCategory.SKILL).difficulty(DifficultyLevel.ADVANCED).active(true).build()
+                Exercise.builder().id(7L).name("Front Lever").code("FRONT_LEVER").category(ExerciseCategory.SKILL).difficulty(DifficultyLevel.ADVANCED).active(true).build(),
+                Exercise.builder().id(8L).name("Pike Push-Up").code("PIKE_PUSH_UP").category(ExerciseCategory.PUSH).difficulty(DifficultyLevel.INTERMEDIATE).active(true).build(),
+                Exercise.builder().id(9L).name("L-Sit").code("L_SIT").category(ExerciseCategory.CORE).difficulty(DifficultyLevel.INTERMEDIATE).active(true).build()
         );
     }
 
@@ -132,34 +165,31 @@ class AiWorkoutPlanServiceTest {
                 .durationWeeks(4)
                 .splitType("CUSTOM")
                 .sessions(List.of(
-                        GeminiStructuredWorkoutPlan.GeminiSession.builder()
-                                .dayOfWeek("MONDAY")
-                                .title("Planche + Push")
-                                .restDay(false)
-                                .exercises(List.of(
-                                        GeminiStructuredWorkoutPlan.GeminiExercise.builder()
-                                                .exerciseId(6L)
-                                                .exerciseName("Planche")
-                                                .sets(4)
-                                                .holdSeconds(15)
-                                                .restSeconds(180)
-                                                .notes("Maintain scapular protraction")
-                                                .build(),
-                                        GeminiStructuredWorkoutPlan.GeminiExercise.builder()
-                                                .exerciseId(1L)
-                                                .exerciseName("Push-Up")
-                                                .sets(4)
-                                                .reps(12)
-                                                .restSeconds(90)
-                                                .build()
-                                ))
-                                .build(),
-                        GeminiStructuredWorkoutPlan.GeminiSession.builder()
-                                .dayOfWeek("SUNDAY")
-                                .title("Rest Day")
-                                .restDay(true)
-                                .exercises(Collections.emptyList())
-                                .build()
+                        session("MONDAY", "Planche + Push", false, List.of(
+                                holdEx(6L, "Planche", 4, 15, 180),
+                                repEx(1L, "Push-Up", 4, 12, 90)
+                        )),
+                        session("TUESDAY", "Front Lever + Pull", false, List.of(
+                                holdEx(7L, "Front Lever", 4, 12, 180),
+                                repEx(3L, "Pull-Up", 4, 8, 120)
+                        )),
+                        session("WEDNESDAY", "Legs & Core", false, List.of(
+                                repEx(2L, "Bodyweight Squat", 4, 15, 90),
+                                holdEx(9L, "L-Sit", 3, 20, 90)
+                        )),
+                        session("THURSDAY", "Handstand & Push", false, List.of(
+                                holdEx(5L, "Handstand", 5, 20, 90),
+                                repEx(8L, "Pike Push-Up", 4, 8, 120)
+                        )),
+                        session("FRIDAY", "Planche Strength", false, List.of(
+                                holdEx(6L, "Planche", 4, 15, 180),
+                                repEx(4L, "Parallel Bar Dips", 4, 10, 120)
+                        )),
+                        session("SATURDAY", "Front Lever Strength", false, List.of(
+                                holdEx(7L, "Front Lever", 4, 12, 180),
+                                repEx(3L, "Pull-Up", 4, 8, 120)
+                        )),
+                        session("SUNDAY", "Rest Day", true, Collections.emptyList())
                 ))
                 .build();
 
@@ -179,8 +209,8 @@ class AiWorkoutPlanServiceTest {
         assertEquals(4, preview.getDurationWeeks());
         assertEquals(WorkoutSplitType.CUSTOM, preview.getSplitType());
         assertFalse(preview.getMetadata().isHasConflicts());
+        assertEquals(6, preview.getSessions().stream().filter(s -> !s.isRestDay()).count());
 
-        // Verify Monday session has Planche with hold seconds and Push-Up with reps
         AiWorkoutPlanPreviewResponse.AiWorkoutSessionPreview monday = preview.getSessions().stream()
                 .filter(s -> s.getDayOfWeek() == WorkoutDayOfWeek.MONDAY)
                 .findFirst().orElseThrow();
@@ -196,7 +226,6 @@ class AiWorkoutPlanServiceTest {
         assertEquals(12, pushUp.getReps());
         assertNull(pushUp.getHoldSeconds());
 
-        // Verify Sunday is rest day
         AiWorkoutPlanPreviewResponse.AiWorkoutSessionPreview sunday = preview.getSessions().stream()
                 .filter(s -> s.getDayOfWeek() == WorkoutDayOfWeek.SUNDAY)
                 .findFirst().orElseThrow();
@@ -221,7 +250,11 @@ class AiWorkoutPlanServiceTest {
         GeminiStructuredWorkoutPlan geminiPlan = GeminiStructuredWorkoutPlan.builder()
                 .planName("New 3-Day Plan")
                 .durationWeeks(4)
-                .sessions(Collections.emptyList())
+                .sessions(List.of(
+                        session("MONDAY", "Full Body A", false, List.of(repEx(1L, "Push-Up", 3, 12, 90), repEx(2L, "Bodyweight Squat", 3, 15, 90))),
+                        session("WEDNESDAY", "Full Body B", false, List.of(repEx(3L, "Pull-Up", 3, 8, 120), holdEx(9L, "L-Sit", 3, 15, 90))),
+                        session("FRIDAY", "Full Body C", false, List.of(repEx(4L, "Parallel Bar Dips", 3, 10, 120), holdEx(5L, "Handstand", 3, 20, 90)))
+                ))
                 .build();
 
         when(geminiApiClient.generateWorkoutPlan(anyString(), anyString())).thenReturn(
@@ -236,61 +269,41 @@ class AiWorkoutPlanServiceTest {
 
         assertTrue(preview.getMetadata().isHasConflicts());
         assertEquals("Old PPL Program", preview.getMetadata().getExistingActivePlanName());
+        assertEquals(3, preview.getSessions().stream().filter(s -> !s.isRestDay()).count());
     }
 
     @Test
-    @DisplayName("Match unknown exercise by name or fallback cleanly")
-    void testExerciseMatching() {
+    @DisplayName("Exact catalog matching resolves missing ID by exact name and rejects unknown/fallback exercises")
+    void testExerciseMatchingRejectsUnknownAndDoesNotFallbackToFirstCatalog() {
         when(userRepository.findById(10L)).thenReturn(Optional.of(testAthlete));
         when(exerciseRepository.findByActiveTrue()).thenReturn(exerciseCatalog);
-        when(workoutPlanRepository.findFirstByUserIdAndActiveTrueOrderByUpdatedAtDesc(10L)).thenReturn(Optional.empty());
 
-        // Gemini returned null ID or wrong ID, but correct name "Push-Up"
-        GeminiStructuredWorkoutPlan geminiPlan = GeminiStructuredWorkoutPlan.builder()
-                .planName("Beginner Routine")
+        GeminiStructuredWorkoutPlan invalidPlan = GeminiStructuredWorkoutPlan.builder()
+                .planName("Invalid Exercise Plan")
                 .durationWeeks(4)
                 .sessions(List.of(
-                        GeminiStructuredWorkoutPlan.GeminiSession.builder()
-                                .dayOfWeek("MONDAY")
-                                .title("Push Day")
-                                .restDay(false)
-                                .exercises(List.of(
-                                        GeminiStructuredWorkoutPlan.GeminiExercise.builder()
-                                                .exerciseId(null) // missing ID
-                                                .exerciseName("Push-Up") // matches catalog name
-                                                .sets(3)
-                                                .reps(10)
-                                                .restSeconds(90)
-                                                .build(),
-                                        GeminiStructuredWorkoutPlan.GeminiExercise.builder()
-                                                .exerciseId(9999L) // invalid ID
-                                                .exerciseName("standard push up variation") // substring match
-                                                .sets(3)
-                                                .reps(10)
-                                                .restSeconds(90)
-                                                .build()
-                                ))
-                                .build()
+                        session("MONDAY", "Push Day", false, List.of(
+                                repEx(null, "Push-Up", 3, 10, 90),
+                                repEx(9999L, "Unknown Made Up Movement", 3, 10, 90)
+                        ))
                 ))
                 .build();
 
         when(geminiApiClient.generateWorkoutPlan(anyString(), anyString())).thenReturn(
-                new GeminiApiClient.GeminiCallResult(geminiPlan, "{}", 100, 200, 200L, "gemini-2.5-flash-lite")
+                new GeminiApiClient.GeminiCallResult(invalidPlan, "{}", 100, 200, 200L, "gemini-flash-lite-latest")
         );
 
         GenerateAiWorkoutPlanRequest request = GenerateAiWorkoutPlanRequest.builder()
                 .prompt("simple push workout")
                 .build();
 
-        AiWorkoutPlanPreviewResponse preview = aiWorkoutPlanService.generatePlan(10L, request);
-
-        AiWorkoutPlanPreviewResponse.AiWorkoutSessionPreview monday = preview.getSessions().stream()
-                .filter(s -> s.getDayOfWeek() == WorkoutDayOfWeek.MONDAY)
-                .findFirst().orElseThrow();
-
-        assertEquals(2, monday.getExercises().size());
-        assertEquals(1L, monday.getExercises().get(0).getExerciseId());
-        assertEquals("Push-Up", monday.getExercises().get(0).getExerciseName());
+        AiWorkoutPlanValidationException ex = assertThrows(
+                AiWorkoutPlanValidationException.class,
+                () -> aiWorkoutPlanService.generatePlan(10L, request)
+        );
+        assertFalse(ex.getViolations().isEmpty());
+        // Verified 1 initial attempt + 1 controlled correction retry
+        verify(geminiApiClient, times(2)).generateWorkoutPlan(anyString(), anyString());
     }
 
     @Test
@@ -306,7 +319,10 @@ class AiWorkoutPlanServiceTest {
         GeminiStructuredWorkoutPlan geminiPlan = GeminiStructuredWorkoutPlan.builder()
                 .planName("Coach Designed Plan")
                 .durationWeeks(6)
-                .sessions(Collections.emptyList())
+                .sessions(List.of(
+                        session("MONDAY", "Skill Day", false, List.of(holdEx(5L, "Handstand", 4, 20, 90))),
+                        session("THURSDAY", "Push Strength", false, List.of(repEx(4L, "Parallel Bar Dips", 4, 8, 120)))
+                ))
                 .build();
 
         when(geminiApiClient.generateWorkoutPlan(anyString(), anyString())).thenReturn(
@@ -321,6 +337,7 @@ class AiWorkoutPlanServiceTest {
         AiWorkoutPlanPreviewResponse preview = aiWorkoutPlanService.generatePlan(20L, request);
         assertNotNull(preview);
         assertEquals("Coach Designed Plan", preview.getPlanName());
+        assertEquals(6, preview.getDurationWeeks());
     }
 
     @Test
@@ -337,11 +354,10 @@ class AiWorkoutPlanServiceTest {
     }
 
     @Test
-    @DisplayName("Commit plan creates active workout plan and schedules calendar sessions")
+    @DisplayName("Commit plan creates active workout plan and schedules future calendar sessions as SCHEDULED")
     void testCommitPlanSuccessfully() {
         when(userRepository.findByIdForUpdate(10L)).thenReturn(Optional.of(testAthlete));
-        when(userRepository.getReferenceById(10L)).thenReturn(testAthlete);
-        when(exerciseRepository.existsById(anyLong())).thenReturn(true);
+        when(exerciseRepository.findByActiveTrue()).thenReturn(exerciseCatalog);
         when(workoutPlanRepository.findByUserIdForUpdate(10L)).thenReturn(Collections.emptyList());
 
         AiWorkoutPlanPreviewResponse.AiWorkoutSessionPreview mondaySession = AiWorkoutPlanPreviewResponse.AiWorkoutSessionPreview.builder()
@@ -402,7 +418,7 @@ class AiWorkoutPlanServiceTest {
                 .build();
 
         when(workoutPlanDayRepository.findByWorkoutPlanIdOrderByDisplayOrderAsc(101L)).thenReturn(List.of(mondayDay));
-        when(sessionRepository.existsByUserIdAndWorkoutDateAndStatus(eq(10L), any(LocalDate.class), eq(WorkoutSessionStatus.IN_PROGRESS)))
+        when(sessionRepository.existsByUserIdAndWorkoutDateAndStatusIn(eq(10L), any(LocalDate.class), anyList()))
                 .thenReturn(false);
 
         WorkoutPlanResponse response = aiWorkoutPlanService.commitPlan(10L, commitRequest);
@@ -411,10 +427,10 @@ class AiWorkoutPlanServiceTest {
         assertEquals(101L, response.getId());
         assertTrue(response.isActive());
 
-        // Verify sessionRepository saved 4 workout sessions (one for each of the 4 weeks on Monday)
-        verify(sessionRepository, times(4)).save(any(WorkoutSession.class));
+        ArgumentCaptor<WorkoutSession> sessionCaptor = ArgumentCaptor.forClass(WorkoutSession.class);
+        verify(sessionRepository, times(4)).save(sessionCaptor.capture());
+        assertTrue(sessionCaptor.getAllValues().stream().allMatch(s -> s.getStatus() == WorkoutSessionStatus.SCHEDULED));
 
-        // Verify log was recorded with COMMITTED status
         ArgumentCaptor<AiWorkoutPlanLog> logCaptor = ArgumentCaptor.forClass(AiWorkoutPlanLog.class);
         verify(aiWorkoutPlanLogRepository).save(logCaptor.capture());
         assertEquals("COMMITTED", logCaptor.getValue().getStatus());
@@ -459,9 +475,7 @@ class AiWorkoutPlanServiceTest {
     void testNormalizeZeroRepsOnStaticHoldExercise() {
         when(userRepository.findById(10L)).thenReturn(Optional.of(testAthlete));
         when(userRepository.findByIdForUpdate(10L)).thenReturn(Optional.of(testAthlete));
-        when(userRepository.getReferenceById(10L)).thenReturn(testAthlete);
         when(exerciseRepository.findByActiveTrue()).thenReturn(exerciseCatalog);
-        when(exerciseRepository.existsById(6L)).thenReturn(true);
         when(workoutPlanRepository.findFirstByUserIdAndActiveTrueOrderByUpdatedAtDesc(10L)).thenReturn(Optional.empty());
         when(workoutPlanRepository.findByUserIdForUpdate(10L)).thenReturn(Collections.emptyList());
 
@@ -469,21 +483,16 @@ class AiWorkoutPlanServiceTest {
                 .planName("Planche Specialization")
                 .durationWeeks(4)
                 .sessions(List.of(
-                        GeminiStructuredWorkoutPlan.GeminiSession.builder()
-                                .dayOfWeek("MONDAY")
-                                .title("Planche Focus")
-                                .restDay(false)
-                                .exercises(List.of(
-                                        GeminiStructuredWorkoutPlan.GeminiExercise.builder()
-                                                .exerciseId(6L)
-                                                .exerciseName("Planche")
-                                                .sets(4)
-                                                .reps(0)
-                                                .holdSeconds(12)
-                                                .restSeconds(180)
-                                                .build()
-                                ))
-                                .build()
+                        session("MONDAY", "Planche Focus", false, List.of(
+                                GeminiStructuredWorkoutPlan.GeminiExercise.builder()
+                                        .exerciseId(6L)
+                                        .exerciseName("Planche")
+                                        .sets(4)
+                                        .reps(0)
+                                        .holdSeconds(12)
+                                        .restSeconds(180)
+                                        .build()
+                        ))
                 ))
                 .build();
 
@@ -501,7 +510,6 @@ class AiWorkoutPlanServiceTest {
         assertNull(mondayPlanche.getReps());
         assertEquals(12, mondayPlanche.getHoldSeconds());
 
-        // Even if a stale or raw preview still contains reps=0, commitPlan sanitizes it before persistence
         mondayPlanche.setReps(0);
         WorkoutPlan created = WorkoutPlan.builder().id(301L).name("Planche Specialization").user(testAthlete).active(true).build();
         when(workoutPlanService.create(eq(10L), any(CreateWorkoutPlanRequest.class))).thenReturn(
@@ -561,7 +569,7 @@ class AiWorkoutPlanServiceTest {
     @DisplayName("Commit with replaceExisting=false creates inactive plan and keeps existing active plan intact")
     void testCommitReplaceExistingFalseKeepsActivePlan() {
         when(userRepository.findByIdForUpdate(10L)).thenReturn(Optional.of(testAthlete));
-        when(userRepository.getReferenceById(10L)).thenReturn(testAthlete);
+        when(exerciseRepository.findByActiveTrue()).thenReturn(exerciseCatalog);
         WorkoutPlan existingActive = WorkoutPlan.builder().id(88L).name("Existing Active Plan").active(true).build();
         when(workoutPlanRepository.findByUserIdForUpdate(10L)).thenReturn(List.of(existingActive));
 
@@ -570,16 +578,25 @@ class AiWorkoutPlanServiceTest {
                 WorkoutPlanResponse.builder().id(305L).name("Saved Draft AI Plan").active(false).build()
         );
         when(workoutPlanRepository.findById(305L)).thenReturn(Optional.of(createdEntity));
-        when(workoutPlanRepository.getReferenceById(305L)).thenReturn(createdEntity);
-        when(workoutPlanDayRepository.findByWorkoutPlanIdOrderByDisplayOrderAsc(305L)).thenReturn(Collections.emptyList());
 
         AiWorkoutPlanPreviewResponse preview = AiWorkoutPlanPreviewResponse.builder()
                 .planName("Saved Draft AI Plan")
+                .durationWeeks(4)
+                .startDate(LocalDate.of(2026, 11, 16))
                 .sessions(List.of(
                         AiWorkoutPlanPreviewResponse.AiWorkoutSessionPreview.builder()
                                 .dayOfWeek(WorkoutDayOfWeek.MONDAY)
-                                .restDay(true)
-                                .exercises(Collections.emptyList())
+                                .title("Push Day")
+                                .restDay(false)
+                                .exercises(List.of(
+                                        AiWorkoutPlanPreviewResponse.AiWorkoutExercisePreview.builder()
+                                                .exerciseId(1L)
+                                                .exerciseName("Push-Up")
+                                                .sets(3)
+                                                .reps(12)
+                                                .restSeconds(90)
+                                                .build()
+                                ))
                                 .build()
                 ))
                 .build();
@@ -594,5 +611,39 @@ class AiWorkoutPlanServiceTest {
         ArgumentCaptor<CreateWorkoutPlanRequest> captor = ArgumentCaptor.forClass(CreateWorkoutPlanRequest.class);
         verify(workoutPlanService).create(eq(10L), captor.capture());
         assertEquals(Boolean.FALSE, captor.getValue().getActive());
+    }
+
+    private GeminiStructuredWorkoutPlan.GeminiSession session(
+            String dow,
+            String title,
+            boolean rest,
+            List<GeminiStructuredWorkoutPlan.GeminiExercise> exercises
+    ) {
+        return GeminiStructuredWorkoutPlan.GeminiSession.builder()
+                .dayOfWeek(dow)
+                .title(title)
+                .restDay(rest)
+                .exercises(exercises)
+                .build();
+    }
+
+    private GeminiStructuredWorkoutPlan.GeminiExercise repEx(Long id, String name, int sets, int reps, int rest) {
+        return GeminiStructuredWorkoutPlan.GeminiExercise.builder()
+                .exerciseId(id)
+                .exerciseName(name)
+                .sets(sets)
+                .reps(reps)
+                .restSeconds(rest)
+                .build();
+    }
+
+    private GeminiStructuredWorkoutPlan.GeminiExercise holdEx(Long id, String name, int sets, int holdSeconds, int rest) {
+        return GeminiStructuredWorkoutPlan.GeminiExercise.builder()
+                .exerciseId(id)
+                .exerciseName(name)
+                .sets(sets)
+                .holdSeconds(holdSeconds)
+                .restSeconds(rest)
+                .build();
     }
 }

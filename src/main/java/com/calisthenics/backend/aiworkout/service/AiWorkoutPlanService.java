@@ -10,7 +10,19 @@ public interface AiWorkoutPlanService {
 
     AiWorkoutPlanPreviewResponse generatePlan(Long userId, GenerateAiWorkoutPlanRequest request);
 
+    default AiWorkoutPlanPreviewResponse generatePlan(Long userId, GenerateAiWorkoutPlanRequest request, String timezone) {
+        return generatePlan(userId, request);
+    }
+
     AiWorkoutPlanPreviewResponse modifyPlan(Long userId, ModifyAiWorkoutPlanRequest request);
 
+    default AiWorkoutPlanPreviewResponse modifyPlan(Long userId, ModifyAiWorkoutPlanRequest request, String timezone) {
+        return modifyPlan(userId, request);
+    }
+
     WorkoutPlanResponse commitPlan(Long userId, CommitAiWorkoutPlanRequest request);
+
+    default WorkoutPlanResponse commitPlan(Long userId, CommitAiWorkoutPlanRequest request, String timezone) {
+        return commitPlan(userId, request);
+    }
 }

@@ -17,6 +17,26 @@ public class AppProperties {
     private Firebase firebase = new Firebase();
     private Google google = new Google();
     private Gemini gemini = new Gemini();
+    private String timezone = "Asia/Ho_Chi_Minh";
+    private WorkoutPlanner workoutPlanner = new WorkoutPlanner();
+
+    @Getter
+    @Setter
+    public static class WorkoutPlanner {
+        private int minExercisesPerSession = 1;
+        private int recommendedMinExercises = 4;
+        private int recommendedMaxExercises = 8;
+        private int maxExercisesPerSession = 10;
+        private int beginnerMaxExercises = 8;
+        private int intermediateMaxExercises = 10;
+        private int advancedMaxExercises = 10;
+        private int skillMobilityMaxExercises = 8;
+        private int minTrainingDaysPerWeek = 1;
+        private int maxTrainingDaysPerWeek = 7;
+        private int minDurationWeeks = 1;
+        private int maxDurationWeeks = 12;
+        private int correctionRetries = 1;
+    }
 
     @Getter
     @Setter
