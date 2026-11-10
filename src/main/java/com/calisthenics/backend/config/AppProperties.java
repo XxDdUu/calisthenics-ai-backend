@@ -45,6 +45,10 @@ public class AppProperties {
         private String model = "gemini-flash-lite-latest";
         private String baseUrl = "https://generativelanguage.googleapis.com/v1beta";
         private int timeoutSeconds = 30;
+        private int maxRetries = 2;
+        private long initialRetryDelayMs = 1000L;
+        private long maxRetryDelayMs = 8000L;
+        private long maxRetryAfterMs = 15000L;
     }
 
     @Getter

@@ -189,6 +189,66 @@ class AiWorkoutPlanValidationAndRegressionTest {
     }
 
     @Test
+    @DisplayName("Case 4-Day & Schema-Independent Validation: 4 days/week accepted; 12 exercises in raw JSON rejected even without Gemini maxItems")
+    void fourDayPlanAndSchemaIndependentValidation() {
+        when(userRepository.findById(1L)).thenReturn(Optional.of(athlete));
+        when(exerciseRepository.findByActiveTrue()).thenReturn(catalog);
+        when(workoutPlanRepository.findFirstByUserIdAndActiveTrueOrderByUpdatedAtDesc(1L)).thenReturn(Optional.empty());
+
+        GeminiStructuredWorkoutPlan valid4Day = GeminiStructuredWorkoutPlan.builder()
+                .planName("4-Day Upper Lower Split")
+                .durationWeeks(4)
+                .sessions(List.of(
+                        training("MONDAY", "Upper Push/Pull", List.of(rep(11L, "Push-Up"), rep(13L, "Pull-Up"), rep(8L, "Parallel Bar Dips"), rep(18L, "Pike Push-Up"))),
+                        training("TUESDAY", "Lower & Core", List.of(rep(12L, "Bodyweight Squat"), hold(19L, "L-Sit"), hold(5L, "Handstand"), rep(6L, "Muscle-Up"))),
+                        rest("WEDNESDAY"),
+                        training("THURSDAY", "Upper Skills", List.of(hold(1L, "Tuck Planche"), hold(7L, "Front Lever"), rep(9L, "Planche push up"), rep(10L, "Front lever pull up"))),
+                        training("FRIDAY", "Lower & Conditioning", List.of(rep(12L, "Bodyweight Squat"), hold(19L, "L-Sit"), rep(11L, "Push-Up"), rep(13L, "Pull-Up"))),
+                        rest("SATURDAY"),
+                        rest("SUNDAY")
+                ))
+                .build();
+
+        when(geminiApiClient.generateWorkoutPlan(anyString(), anyString()))
+                .thenReturn(new GeminiApiClient.GeminiCallResult(valid4Day, "{}", 100, 300, 200L, "test-model"));
+
+        AiWorkoutPlanPreviewResponse preview = service.generatePlan(1L, GenerateAiWorkoutPlanRequest.builder()
+                .prompt("Create a 4-day/week upper lower calisthenics program with 4 exercises per session")
+                .build());
+
+        assertEquals(7, preview.getSessions().size());
+        assertEquals(4, preview.getSessions().stream().filter(s -> !s.isRestDay()).count());
+        assertEquals(3, preview.getSessions().stream().filter(AiWorkoutPlanPreviewResponse.AiWorkoutSessionPreview::isRestDay).count());
+        assertTrue(preview.getSessions().stream().filter(s -> !s.isRestDay()).allMatch(s -> s.getExercises().size() == 4));
+
+        // Even when Gemini schema has no minItems/maxItems, backend rejects >10 exercises per session
+        reset(geminiApiClient);
+        List<GeminiStructuredWorkoutPlan.GeminiExercise> elevenExercises = new ArrayList<>();
+        for (int i = 0; i < 11; i++) {
+            Exercise ex = catalog.get(i);
+            elevenExercises.add(GeminiStructuredWorkoutPlan.GeminiExercise.builder()
+                    .exerciseId(ex.getId())
+                    .exerciseName(ex.getName())
+                    .sets(3)
+                    .reps(10)
+                    .holdSeconds(10)
+                    .restSeconds(60)
+                    .build());
+        }
+        GeminiStructuredWorkoutPlan bloated = GeminiStructuredWorkoutPlan.builder()
+                .planName("Excess Volume")
+                .durationWeeks(4)
+                .sessions(List.of(training("MONDAY", "Push", elevenExercises)))
+                .build();
+        when(geminiApiClient.generateWorkoutPlan(anyString(), anyString()))
+                .thenReturn(new GeminiApiClient.GeminiCallResult(bloated, "{}", 100, 300, 150L, "test-model"));
+
+        assertThrows(AiWorkoutPlanValidationException.class, () -> service.generatePlan(1L, GenerateAiWorkoutPlanRequest.builder()
+                .prompt("1-day/week push session")
+                .build()));
+    }
+
+    @Test
     @DisplayName("Case C: 7-day/week plan + 14-day hallucination retry & Mapper deduplication never returns 14 days")
     void caseC_7DayPerWeekNeverDisplays14Days() {
         when(userRepository.findById(1L)).thenReturn(Optional.of(athlete));

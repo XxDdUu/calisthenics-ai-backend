@@ -46,5 +46,10 @@ public interface WorkoutPlanAssignmentRepository extends JpaRepository<WorkoutPl
     List<WorkoutPlanAssignment> findByRelationshipIdAndStatus(
             Long relationshipId, WorkoutPlanAssignmentStatus status);
 
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @EntityGraph(attributePaths = {"workoutPlan", "workoutPlan.days", "coach", "client", "relationship"})
+    Optional<WorkoutPlanAssignment> findFirstByRelationshipIdAndWorkoutPlanIdAndStatusOrderByCreatedAtDesc(
+            Long relationshipId, Long workoutPlanId, WorkoutPlanAssignmentStatus status);
+
     long countByCoachIdAndStatus(Long coachId, WorkoutPlanAssignmentStatus status);
 }

@@ -2,6 +2,7 @@ package com.calisthenics.backend.coachclient.service;
 
 import com.calisthenics.backend.coachclient.dto.request.CreateWorkoutPlanAssignmentRequest;
 import com.calisthenics.backend.coachclient.dto.request.UpdateWorkoutPlanAssignmentRequest;
+import com.calisthenics.backend.coachclient.dto.request.UpdateWorkoutPlanAssignmentStatusRequest;
 import com.calisthenics.backend.coachclient.dto.response.WorkoutPlanAssignmentResponse;
 
 import java.util.List;
@@ -19,4 +20,7 @@ public interface WorkoutPlanAssignmentService {
 
     WorkoutPlanAssignmentResponse update(
             Long coachId, Long relationshipId, Long assignmentId, UpdateWorkoutPlanAssignmentRequest request);
+
+    WorkoutPlanAssignmentResponse updateStatus(
+            Long coachId, Long assignmentId, UpdateWorkoutPlanAssignmentStatusRequest request);
 }

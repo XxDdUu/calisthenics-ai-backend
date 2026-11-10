@@ -2,6 +2,7 @@ package com.calisthenics.backend.coachclient.service.impl;
 
 import com.calisthenics.backend.coachclient.dto.request.CreateWorkoutPlanAssignmentRequest;
 import com.calisthenics.backend.coachclient.dto.request.UpdateWorkoutPlanAssignmentRequest;
+import com.calisthenics.backend.coachclient.dto.request.UpdateWorkoutPlanAssignmentStatusRequest;
 import com.calisthenics.backend.coachclient.dto.response.WorkoutPlanAssignmentResponse;
 import com.calisthenics.backend.coachclient.entity.CoachClientRelationship;
 import com.calisthenics.backend.coachclient.entity.WorkoutPlanAssignment;
@@ -53,6 +54,20 @@ public class WorkoutPlanAssignmentServiceImpl implements WorkoutPlanAssignmentSe
         LocalDate start = request.getStartDate() == null ? LocalDate.now() : request.getStartDate();
         validateDates(start, request.getEndDate());
 
+        // Reuse an inactive row so re-assigning a previously deactivated plan does not
+        // create a duplicate assignment or discard its history.
+        WorkoutPlanAssignment inactiveAssignment = assignmentRepository
+                .findFirstByRelationshipIdAndWorkoutPlanIdAndStatusOrderByCreatedAtDesc(
+                        relationshipId, request.getWorkoutPlanId(), WorkoutPlanAssignmentStatus.INACTIVE)
+                .orElse(null);
+        if (inactiveAssignment != null) {
+            inactiveAssignment.setStatus(WorkoutPlanAssignmentStatus.ACTIVE);
+            inactiveAssignment.setStartDate(start);
+            inactiveAssignment.setEndDate(request.getEndDate());
+            inactiveAssignment.setNotes(request.getNotes());
+            return toResponse(assignmentRepository.saveAndFlush(inactiveAssignment));
+        }
+
         WorkoutPlanAssignment assignment = WorkoutPlanAssignment.builder()
                 .relationship(relationship)
                 .workoutPlan(plan)
@@ -63,7 +78,7 @@ public class WorkoutPlanAssignmentServiceImpl implements WorkoutPlanAssignmentSe
                 .endDate(request.getEndDate())
                 .notes(request.getNotes())
                 .build();
-        return toResponse(assignmentRepository.save(assignment));
+        return toResponse(assignmentRepository.saveAndFlush(assignment));
     }
 
     @Override
@@ -131,6 +146,38 @@ public class WorkoutPlanAssignmentServiceImpl implements WorkoutPlanAssignmentSe
         return toResponse(assignmentRepository.save(assignment));
     }
 
+    @Override
+    @Transactional
+    public WorkoutPlanAssignmentResponse updateStatus(
+            Long coachId, Long assignmentId, UpdateWorkoutPlanAssignmentStatusRequest request) {
+        WorkoutPlanAssignment assignment = assignmentRepository.findByIdForUpdate(assignmentId)
+                .orElseThrow(WorkoutPlanAssignmentNotFoundException::new);
+        if (!assignment.getCoach().getId().equals(coachId)) {
+            // Do not disclose another coach's assignment to the caller.
+            throw new WorkoutPlanAssignmentNotFoundException();
+        }
+
+        WorkoutPlanAssignmentStatus targetStatus = request.getStatus();
+        if (targetStatus != WorkoutPlanAssignmentStatus.ACTIVE
+                && targetStatus != WorkoutPlanAssignmentStatus.INACTIVE) {
+            throw new IllegalArgumentException("Assignment status must be ACTIVE or INACTIVE");
+        }
+
+        WorkoutPlanAssignmentStatus currentStatus = assignment.getStatus();
+        if (currentStatus != targetStatus) {
+            if (currentStatus != WorkoutPlanAssignmentStatus.ACTIVE
+                    && currentStatus != WorkoutPlanAssignmentStatus.INACTIVE) {
+                throw new WorkoutPlanAssignmentConflictException();
+            }
+            if (targetStatus == WorkoutPlanAssignmentStatus.ACTIVE) {
+                requireActiveRelationship(assignment.getRelationship());
+            }
+            assignment.setStatus(targetStatus);
+        }
+
+        return toResponse(assignmentRepository.saveAndFlush(assignment));
+    }
+
     private CoachClientRelationship findRelationship(Long relationshipId) {
         return relationshipRepository.findById(relationshipId)
                 .orElseThrow(CoachClientRelationshipNotFoundException::new);
@@ -159,9 +206,11 @@ public class WorkoutPlanAssignmentServiceImpl implements WorkoutPlanAssignmentSe
         return WorkoutPlanAssignmentResponse.builder()
                 .id(assignment.getId())
                 .relationshipId(assignment.getRelationship().getId())
+                .workoutPlanId(assignment.getWorkoutPlan().getId())
                 .coachId(assignment.getCoach().getId())
                 .coachName(assignment.getCoach().getFullName())
                 .clientId(assignment.getClient().getId())
+                .athleteId(assignment.getClient().getId())
                 .clientName(assignment.getClient().getFullName())
                 .status(assignment.getStatus())
                 .startDate(assignment.getStartDate())

@@ -221,7 +221,7 @@ class PersistentWorkoutSessionServiceTest {
                 .id(55L).coach(coach).client(client).status(CoachClientRelationshipStatus.ACTIVE).build();
         WorkoutPlanAssignment originalAssignment = WorkoutPlanAssignment.builder()
                 .id(70L).relationship(relationship).workoutPlan(plan).coach(coach).client(client)
-                .status(WorkoutPlanAssignmentStatus.ENDED).startDate(LocalDate.of(2026, 1, 1)).build();
+                .status(WorkoutPlanAssignmentStatus.INACTIVE).startDate(LocalDate.of(2026, 1, 1)).build();
         WorkoutSessionSet set = WorkoutSessionSet.builder()
                 .id(20L).setNumber(1).completed(false).build();
         WorkoutSessionExercise exercise = WorkoutSessionExercise.builder()
@@ -279,11 +279,19 @@ class PersistentWorkoutSessionServiceTest {
         WorkoutSession nov25Scheduled = WorkoutSession.builder()
                 .id(3L).user(user).title("Legs Nov 25").workoutDate(LocalDate.of(2026, 11, 25))
                 .status(WorkoutSessionStatus.SCHEDULED).build();
+        WorkoutPlanAssignment inactiveAssignment = WorkoutPlanAssignment.builder()
+                .id(44L).status(WorkoutPlanAssignmentStatus.INACTIVE)
+                .startDate(LocalDate.of(2026, 1, 1)).build();
+        WorkoutSession nov26InactiveAssignment = WorkoutSession.builder()
+                .id(4L).user(user).title("Inactive coach workout")
+                .workoutDate(LocalDate.of(2026, 11, 26))
+                .workoutPlanAssignment(inactiveAssignment)
+                .status(WorkoutSessionStatus.SCHEDULED).build();
 
         when(sessionRepository.findUnfinishedSessionsAsOf(userId, nov17))
                 .thenReturn(List.of(nov17Unfinished, nov18FutureLegacyInProgress));
         when(sessionRepository.findUpcomingSessionsAfter(userId, nov17))
-                .thenReturn(List.of(nov17Unfinished, nov18FutureLegacyInProgress, nov25Scheduled));
+                .thenReturn(List.of(nov17Unfinished, nov18FutureLegacyInProgress, nov25Scheduled, nov26InactiveAssignment));
 
         var unfinished = service.getActive(userId, nov17, "Asia/Ho_Chi_Minh");
         var upcoming = service.getUpcoming(userId, nov17, "Asia/Ho_Chi_Minh");

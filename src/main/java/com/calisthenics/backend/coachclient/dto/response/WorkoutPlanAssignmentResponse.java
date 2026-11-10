@@ -18,10 +18,12 @@ public class WorkoutPlanAssignmentResponse {
 
     private Long id;
     private Long relationshipId;
+    private Long workoutPlanId;
     private Long coachId;
     private String coachName;
     private String coachAvatarUrl;
     private Long clientId;
+    private Long athleteId;
     private String clientName;
     private String clientAvatarUrl;
     private WorkoutPlanAssignmentStatus status;

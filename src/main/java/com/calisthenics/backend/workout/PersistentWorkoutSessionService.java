@@ -1,6 +1,7 @@
 package com.calisthenics.backend.workout;
 
 import com.calisthenics.backend.coachclient.entity.WorkoutPlanAssignment;
+import com.calisthenics.backend.coachclient.type.WorkoutPlanAssignmentStatus;
 import com.calisthenics.backend.config.AppProperties;
 import com.calisthenics.backend.config.UserTimeResolver;
 import com.calisthenics.backend.workout.dto.*;
@@ -206,6 +207,10 @@ public class PersistentWorkoutSessionService {
         ZoneId zone = userTimeResolver.resolveZone(timezone);
         return sessionRepository.findUpcomingSessionsAfter(userId, today).stream()
                 .filter(session -> WorkoutSessionClassifier.isUpcoming(session, today, zone))
+                // Keep scheduled rows for audit/history, but do not present an inactive
+                // assignment as an active assigned workout.
+                .filter(session -> session.getWorkoutPlanAssignment() == null
+                        || session.getWorkoutPlanAssignment().getStatus() == WorkoutPlanAssignmentStatus.ACTIVE)
                 .map(session -> map(session, today, zone))
                 .toList();
     }

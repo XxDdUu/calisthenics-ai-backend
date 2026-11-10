@@ -5,6 +5,7 @@ import com.calisthenics.backend.aiworkout.gemini.dto.GeminiResponseDto;
 import com.calisthenics.backend.aiworkout.gemini.dto.GeminiStructuredPerformanceSummary;
 import com.calisthenics.backend.aiworkout.gemini.dto.GeminiStructuredWorkoutPlan;
 import com.calisthenics.backend.config.AppProperties;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -12,11 +13,16 @@ import org.springframework.boot.web.client.RestTemplateBuilder;
 import org.springframework.http.*;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.HttpStatusCodeException;
+import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.concurrent.ThreadLocalRandom;
 
 @Slf4j
 @Component
@@ -53,16 +59,27 @@ public class GeminiApiClient {
             String modelUsed
     ) {}
 
+    private record GeminiCallAttempt<T>(
+            Optional<GeminiStructuredRawResult<T>> result,
+            boolean nonRetryableClientError
+    ) {}
+
     public GeminiCallResult generateWorkoutPlan(String systemPrompt, String userPrompt) {
-        Optional<GeminiStructuredRawResult<GeminiStructuredWorkoutPlan>> result = callGeminiStructured(
+        GeminiCallAttempt<GeminiStructuredWorkoutPlan> outcome = callGeminiStructured(
                 systemPrompt,
                 userPrompt,
                 buildResponseSchema(),
                 GeminiStructuredWorkoutPlan.class
         );
-        if (result.isPresent()) {
-            GeminiStructuredRawResult<GeminiStructuredWorkoutPlan> res = result.get();
+        if (outcome.result().isPresent()) {
+            GeminiStructuredRawResult<GeminiStructuredWorkoutPlan> res = outcome.result().get();
             return new GeminiCallResult(res.payload(), res.rawJson(), res.inputTokens(), res.outputTokens(), res.latencyMs(), res.modelUsed());
+        }
+        if (outcome.nonRetryableClientError()) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_GATEWAY,
+                    "AI workout service rejected the structured plan request. Please try rephrasing your prompt."
+            );
         }
         throw new ResponseStatusException(
                 HttpStatus.SERVICE_UNAVAILABLE,
@@ -76,7 +93,7 @@ public class GeminiApiClient {
                 userPrompt,
                 buildPerformanceSummaryResponseSchema(),
                 GeminiStructuredPerformanceSummary.class
-        ).map(res -> new GeminiSummaryResult(
+        ).result().map(res -> new GeminiSummaryResult(
                 res.payload(),
                 res.rawJson(),
                 res.inputTokens(),
@@ -98,7 +115,20 @@ public class GeminiApiClient {
                 .build();
     }
 
-    private <T> Optional<GeminiStructuredRawResult<T>> callGeminiStructured(
+    protected void sleepBeforeRetry(long delayMs) throws InterruptedException {
+        if (delayMs > 0L) {
+            Thread.sleep(delayMs);
+        }
+    }
+
+    protected long computeJitterMs(long maxJitterMs) {
+        if (maxJitterMs <= 0L) {
+            return 0L;
+        }
+        return ThreadLocalRandom.current().nextLong(0L, maxJitterMs + 1L);
+    }
+
+    private <T> GeminiCallAttempt<T> callGeminiStructured(
             String systemPrompt,
             String userPrompt,
             Map<String, Object> schema,
@@ -109,7 +139,7 @@ public class GeminiApiClient {
 
         if (apiKey == null || apiKey.isBlank() || apiKey.startsWith("placeholder")) {
             log.warn("GEMINI_API_KEY is not configured or empty. Skipping remote Gemini call for {}", responseType.getSimpleName());
-            return Optional.empty();
+            return new GeminiCallAttempt<>(Optional.empty(), false);
         }
 
         long startTime = System.currentTimeMillis();
@@ -127,9 +157,10 @@ public class GeminiApiClient {
 
         HttpEntity<GeminiRequestDto> entity = new HttpEntity<>(requestDto, headers);
 
-        int maxRetries = 2;
+        int maxRetries = Math.min(3, Math.max(0, appProperties.getGemini().getMaxRetries()));
         int attempt = 0;
         Exception lastException = null;
+        boolean nonRetryableClientError = false;
 
         while (attempt <= maxRetries) {
             try {
@@ -159,17 +190,37 @@ public class GeminiApiClient {
                         ? body.getUsageMetadata().getCandidatesTokenCount() : 0;
 
                 log.info("Gemini API call succeeded in {}ms ({}). Tokens: in={}, out={}", latency, responseType.getSimpleName(), inputTokens, outputTokens);
-                return Optional.of(new GeminiStructuredRawResult<>(parsed, jsonText, inputTokens, outputTokens, latency, model));
+                return new GeminiCallAttempt<>(
+                        Optional.of(new GeminiStructuredRawResult<>(parsed, jsonText, inputTokens, outputTokens, latency, model)),
+                        false
+                );
 
             } catch (HttpStatusCodeException ex) {
                 lastException = ex;
                 log.warn("Gemini HTTP error (status={}): {}", ex.getStatusCode(), ex.getResponseBodyAsString());
-                boolean retryable = ex.getStatusCode() == HttpStatus.TOO_MANY_REQUESTS || ex.getStatusCode().is5xxServerError();
-                if (retryable && attempt <= maxRetries) {
-                    try {
-                        Thread.sleep(1500L * attempt);
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
+                if (!isTransientHttpStatus(ex.getStatusCode())) {
+                    nonRetryableClientError = ex.getStatusCode().is4xxClientError();
+                    break;
+                }
+                if (attempt <= maxRetries) {
+                    long delayMs = resolveRetryDelayMs(attempt, ex.getResponseHeaders());
+                    if (!waitForRetry(delayMs)) {
+                        break;
+                    }
+                    continue;
+                }
+                break;
+            } catch (JsonProcessingException ex) {
+                // Deterministic JSON deserialization mismatch: do not retry and waste API quota.
+                lastException = ex;
+                log.warn("Gemini returned non-deserializable JSON for {}: {}", responseType.getSimpleName(), ex.getMessage());
+                break;
+            } catch (ResourceAccessException ex) {
+                lastException = ex;
+                log.warn("Gemini network/timeout failure on attempt {}: {}", attempt, ex.getMessage());
+                if (attempt <= maxRetries) {
+                    long delayMs = resolveRetryDelayMs(attempt, null);
+                    if (!waitForRetry(delayMs)) {
                         break;
                     }
                     continue;
@@ -178,15 +229,6 @@ public class GeminiApiClient {
             } catch (Exception ex) {
                 lastException = ex;
                 log.warn("Gemini API call failed on attempt {}: {}", attempt, ex.getMessage());
-                if (attempt <= maxRetries) {
-                    try {
-                        Thread.sleep(1000L * attempt);
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        break;
-                    }
-                    continue;
-                }
                 break;
             }
         }
@@ -194,7 +236,60 @@ public class GeminiApiClient {
         log.error("All Gemini API attempts failed for {}. Cause: {}",
                 responseType.getSimpleName(),
                 lastException != null ? lastException.getMessage() : "Unknown");
-        return Optional.empty();
+        return new GeminiCallAttempt<>(Optional.empty(), nonRetryableClientError);
+    }
+
+    private boolean isTransientHttpStatus(HttpStatusCode statusCode) {
+        return statusCode == HttpStatus.TOO_MANY_REQUESTS
+                || statusCode == HttpStatus.SERVICE_UNAVAILABLE
+                || statusCode.is5xxServerError();
+    }
+
+    private boolean waitForRetry(long delayMs) {
+        try {
+            sleepBeforeRetry(delayMs);
+            return true;
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+    }
+
+    private long resolveRetryDelayMs(int attemptNumber, HttpHeaders responseHeaders) {
+        long maxRetryAfterMs = Math.max(0L, appProperties.getGemini().getMaxRetryAfterMs());
+        OptionalLong retryAfter = parseRetryAfterMs(responseHeaders);
+        if (retryAfter.isPresent()) {
+            return Math.min(maxRetryAfterMs, Math.max(0L, retryAfter.getAsLong()));
+        }
+        long initialDelay = Math.max(50L, appProperties.getGemini().getInitialRetryDelayMs());
+        long maxDelay = Math.max(initialDelay, appProperties.getGemini().getMaxRetryDelayMs());
+        long expBase = Math.min(maxDelay, initialDelay * (1L << Math.min(attemptNumber - 1, 10)));
+        long jitter = computeJitterMs(Math.max(1L, expBase / 2L));
+        return Math.min(maxDelay, expBase + jitter);
+    }
+
+    private OptionalLong parseRetryAfterMs(HttpHeaders headers) {
+        if (headers == null) {
+            return OptionalLong.empty();
+        }
+        String raw = headers.getFirst(HttpHeaders.RETRY_AFTER);
+        if (raw == null || raw.isBlank()) {
+            return OptionalLong.empty();
+        }
+        String trimmed = raw.trim();
+        try {
+            long seconds = Long.parseLong(trimmed);
+            return OptionalLong.of(Math.max(0L, seconds * 1000L));
+        } catch (NumberFormatException ignored) {
+            // Try RFC-1123 HTTP-date format next.
+        }
+        try {
+            Instant retryAt = ZonedDateTime.parse(trimmed, DateTimeFormatter.RFC_1123_DATE_TIME).toInstant();
+            long deltaMs = Duration.between(Instant.now(), retryAt).toMillis();
+            return OptionalLong.of(Math.max(0L, deltaMs));
+        } catch (Exception ignored) {
+            return OptionalLong.empty();
+        }
     }
 
     private GeminiRequestDto buildRequest(String systemPrompt, String userPrompt, Map<String, Object> schema) {
@@ -253,7 +348,6 @@ public class GeminiApiClient {
 
         Map<String, Object> exercisesArraySchema = new LinkedHashMap<>();
         exercisesArraySchema.put("type", "ARRAY");
-        exercisesArraySchema.put("maxItems", 10);
         exercisesArraySchema.put("description", "4-8 exercises per training session (maximum 10), empty array for rest days, no duplicate exercise_ids");
         exercisesArraySchema.put("items", exerciseSchema);
 
@@ -273,8 +367,6 @@ public class GeminiApiClient {
 
         Map<String, Object> sessionsArraySchema = new LinkedHashMap<>();
         sessionsArraySchema.put("type", "ARRAY");
-        sessionsArraySchema.put("minItems", 7);
-        sessionsArraySchema.put("maxItems", 7);
         sessionsArraySchema.put("description", "Exactly 7 unique weekday entries covering MONDAY through SUNDAY");
         sessionsArraySchema.put("items", sessionSchema);
 

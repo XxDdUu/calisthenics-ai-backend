@@ -84,6 +84,25 @@ class TodayWorkoutResolverTest {
     }
 
     @Test
+    void inactiveCoachAssignmentDoesNotOverridePersonalPlan() {
+        CoachClientRelationship activeRelationship = relationship(10L, CoachClientRelationshipStatus.ACTIVE);
+        WorkoutPlanAssignment inactiveAssignment = assignment(30L, activeRelationship, plan(20L, 8L, "Inactive coach plan"), DATE);
+        inactiveAssignment.setStatus(WorkoutPlanAssignmentStatus.INACTIVE);
+        when(relationshipRepository.findFirstByClientIdAndStatusOrderByUpdatedAtDesc(
+                CLIENT_ID, CoachClientRelationshipStatus.ACTIVE)).thenReturn(Optional.of(activeRelationship));
+        when(assignmentRepository.findByClientIdOrderByCreatedAtDesc(CLIENT_ID))
+                .thenReturn(List.of(inactiveAssignment));
+        when(planRepository.findByUserIdOrderByCreatedAtDesc(CLIENT_ID))
+                .thenReturn(List.of(plan(40L, CLIENT_ID, "Personal plan")));
+
+        var result = resolver.resolveCandidates(CLIENT_ID, DATE);
+
+        assertTrue(result.activeCoach());
+        assertEquals(WorkoutSessionSource.PERSONAL, result.source());
+        assertEquals(List.of(40L), result.candidates().stream().map(item -> item.plan().getId()).toList());
+    }
+
+    @Test
     void pendingCoachRequestDoesNotSuppressPersonalPlan() {
         when(relationshipRepository.findFirstByClientIdAndStatusOrderByUpdatedAtDesc(
                 CLIENT_ID, CoachClientRelationshipStatus.ACTIVE)).thenReturn(Optional.empty());

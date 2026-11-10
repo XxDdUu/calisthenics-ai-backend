@@ -2,6 +2,7 @@ package com.calisthenics.backend.coachclient.controller;
 
 import com.calisthenics.backend.coachclient.dto.request.CreateWorkoutPlanAssignmentRequest;
 import com.calisthenics.backend.coachclient.dto.request.UpdateWorkoutPlanAssignmentRequest;
+import com.calisthenics.backend.coachclient.dto.request.UpdateWorkoutPlanAssignmentStatusRequest;
 import com.calisthenics.backend.coachclient.dto.response.WorkoutPlanAssignmentResponse;
 import com.calisthenics.backend.coachclient.service.WorkoutPlanAssignmentService;
 import com.calisthenics.backend.security.UserPrincipal;
@@ -45,6 +46,15 @@ public class WorkoutPlanAssignmentController {
             @Valid @RequestBody UpdateWorkoutPlanAssignmentRequest request) {
         return ResponseEntity.ok(assignmentService.update(
                 currentUser.getId(), relationshipId, assignmentId, request));
+    }
+
+    @PatchMapping("/coach/assignments/{assignmentId}/status")
+    public ResponseEntity<WorkoutPlanAssignmentResponse> updateStatus(
+            @AuthenticationPrincipal UserPrincipal currentUser,
+            @PathVariable Long assignmentId,
+            @Valid @RequestBody UpdateWorkoutPlanAssignmentStatusRequest request) {
+        return ResponseEntity.ok(assignmentService.updateStatus(
+                currentUser.getId(), assignmentId, request));
     }
 
     @GetMapping("/clients/me/workout-plan-assignments")
