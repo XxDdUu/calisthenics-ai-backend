@@ -88,6 +88,13 @@ public class GeminiApiClient {
         return (model == null || model.isBlank()) ? "gemini-flash-lite-latest" : model;
     }
 
+    protected RestTemplate createRestTemplate() {
+        return new RestTemplateBuilder()
+                .setConnectTimeout(Duration.ofSeconds(10))
+                .setReadTimeout(Duration.ofSeconds(appProperties.getGemini().getTimeoutSeconds()))
+                .build();
+    }
+
     private <T> Optional<GeminiStructuredRawResult<T>> callGeminiStructured(
             String systemPrompt,
             String userPrompt,
@@ -109,10 +116,7 @@ public class GeminiApiClient {
 
         GeminiRequestDto requestDto = buildRequest(systemPrompt, userPrompt, schema);
 
-        RestTemplate restTemplate = new RestTemplateBuilder()
-                .setConnectTimeout(Duration.ofSeconds(10))
-                .setReadTimeout(Duration.ofSeconds(appProperties.getGemini().getTimeoutSeconds()))
-                .build();
+        RestTemplate restTemplate = createRestTemplate();
 
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
@@ -157,10 +161,14 @@ public class GeminiApiClient {
             } catch (HttpStatusCodeException ex) {
                 lastException = ex;
                 log.warn("Gemini HTTP error (status={}): {}", ex.getStatusCode(), ex.getResponseBodyAsString());
-                if (ex.getStatusCode() == HttpStatus.TOO_MANY_REQUESTS && attempt <= maxRetries) {
+                boolean retryable = ex.getStatusCode() == HttpStatus.TOO_MANY_REQUESTS || ex.getStatusCode().is5xxServerError();
+                if (retryable && attempt <= maxRetries) {
                     try {
                         Thread.sleep(1500L * attempt);
-                    } catch (InterruptedException ignored) {}
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
                     continue;
                 }
                 break;
@@ -170,7 +178,10 @@ public class GeminiApiClient {
                 if (attempt <= maxRetries) {
                     try {
                         Thread.sleep(1000L * attempt);
-                    } catch (InterruptedException ignored) {}
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
                     continue;
                 }
                 break;
