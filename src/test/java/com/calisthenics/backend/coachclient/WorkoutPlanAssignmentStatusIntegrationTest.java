@@ -161,6 +161,38 @@ class WorkoutPlanAssignmentStatusIntegrationTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"status\":\"COMPLETED\"}"))
                 .andExpect(status().isBadRequest());
+
+        mockMvc.perform(patch("/api/v1/coach/assignments/{assignmentId}/status", assignment.getId())
+                        .with(authenticatedAs(coach))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"status\":\"CANCELLED\"}"))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void cancelledAssignmentCannotBeManuallyDeactivatedOrReactivated() throws Exception {
+        User coach = createUser("cancelled-lock-coach");
+        User athlete = createUser("cancelled-lock-athlete");
+        WorkoutPlan plan = createPlan(coach);
+        CoachClientRelationship relationship = connect(coach, athlete);
+        WorkoutPlanAssignment assignment = createAssignment(coach, relationship, plan);
+
+        relationshipService.terminate(coach.getId(), relationship.getId());
+
+        mockMvc.perform(patch("/api/v1/coach/assignments/{assignmentId}/status", assignment.getId())
+                        .with(authenticatedAs(coach))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"status\":\"ACTIVE\"}"))
+                .andExpect(status().isConflict());
+
+        mockMvc.perform(patch("/api/v1/coach/assignments/{assignmentId}/status", assignment.getId())
+                        .with(authenticatedAs(coach))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"status\":\"INACTIVE\"}"))
+                .andExpect(status().isConflict());
+
+        assertThat(assignmentRepository.findById(assignment.getId()).orElseThrow().getStatus())
+                .isEqualTo(WorkoutPlanAssignmentStatus.CANCELLED);
     }
 
     private WorkoutPlanAssignment createAssignment(User coach, CoachClientRelationship relationship, WorkoutPlan plan) {

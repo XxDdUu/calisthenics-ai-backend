@@ -1,6 +1,7 @@
 package com.calisthenics.backend.workout;
 
 import com.calisthenics.backend.coachclient.entity.WorkoutPlanAssignment;
+import com.calisthenics.backend.coachclient.type.CoachClientRelationshipStatus;
 import com.calisthenics.backend.coachclient.type.WorkoutPlanAssignmentStatus;
 import com.calisthenics.backend.config.AppProperties;
 import com.calisthenics.backend.config.UserTimeResolver;
@@ -70,7 +71,9 @@ public class PersistentWorkoutSessionService {
     @Transactional
     public PersistentWorkoutSessionResponse startOrResume(Long userId, StartWorkoutSessionRequest request) {
         List<WorkoutSession> activeSessions = sessionRepository.findByUserIdAndWorkoutDateAndStatus(
-                userId, request.workoutDate(), WorkoutSessionStatus.IN_PROGRESS);
+                        userId, request.workoutDate(), WorkoutSessionStatus.IN_PROGRESS).stream()
+                .filter(session -> isSessionAssignmentUsable(session, true))
+                .toList();
         if (activeSessions.size() == 1) {
             return resumeAndHydrateIfNeeded(activeSessions.getFirst());
         }
@@ -93,7 +96,9 @@ public class PersistentWorkoutSessionService {
         }
 
         List<WorkoutSession> scheduledSessions = sessionRepository.findByUserIdAndWorkoutDateAndStatus(
-                userId, request.workoutDate(), WorkoutSessionStatus.SCHEDULED);
+                        userId, request.workoutDate(), WorkoutSessionStatus.SCHEDULED).stream()
+                .filter(session -> isSessionAssignmentUsable(session, false))
+                .toList();
         OptionalScheduledMatch scheduledMatch = findMatchingScheduledSession(scheduledSessions, request);
         if (scheduledMatch.matched() != null) {
             return promoteScheduledSession(scheduledMatch.matched());
@@ -197,6 +202,8 @@ public class PersistentWorkoutSessionService {
         ZoneId zone = userTimeResolver.resolveZone(timezone);
         return sessionRepository.findUnfinishedSessionsAsOf(userId, today).stream()
                 .filter(session -> WorkoutSessionClassifier.isUnfinished(session, today, zone))
+                .filter(session -> isSessionAssignmentUsable(
+                        session, session.getStatus() == WorkoutSessionStatus.IN_PROGRESS))
                 .map(session -> map(session, today, zone))
                 .toList();
     }
@@ -207,10 +214,9 @@ public class PersistentWorkoutSessionService {
         ZoneId zone = userTimeResolver.resolveZone(timezone);
         return sessionRepository.findUpcomingSessionsAfter(userId, today).stream()
                 .filter(session -> WorkoutSessionClassifier.isUpcoming(session, today, zone))
-                // Keep scheduled rows for audit/history, but do not present an inactive
-                // assignment as an active assigned workout.
-                .filter(session -> session.getWorkoutPlanAssignment() == null
-                        || session.getWorkoutPlanAssignment().getStatus() == WorkoutPlanAssignmentStatus.ACTIVE)
+                // Keep scheduled rows for audit/history, but do not present an inactive or
+                // cancelled assignment as an active assigned workout.
+                .filter(session -> isSessionAssignmentUsable(session, false))
                 .map(session -> map(session, today, zone))
                 .toList();
     }
@@ -419,7 +425,27 @@ public class PersistentWorkoutSessionService {
         if (session.getStatus() != WorkoutSessionStatus.IN_PROGRESS) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Workout session is not in progress");
         }
+        if (session.getWorkoutPlanAssignment() != null && !isSessionAssignmentUsable(session, true)) {
+            throw new ResponseStatusException(
+                    HttpStatus.CONFLICT, "This coach workout assignment has been canceled and can no longer be continued");
+        }
         return session;
+    }
+
+    private boolean isSessionAssignmentUsable(WorkoutSession session, boolean allowInactive) {
+        WorkoutPlanAssignment assignment = session.getWorkoutPlanAssignment();
+        if (assignment == null) {
+            return true;
+        }
+        if (assignment.getRelationship() != null
+                && assignment.getRelationship().getStatus() != CoachClientRelationshipStatus.ACTIVE) {
+            return false;
+        }
+        if (allowInactive) {
+            return assignment.getStatus() == WorkoutPlanAssignmentStatus.ACTIVE
+                    || assignment.getStatus() == WorkoutPlanAssignmentStatus.INACTIVE;
+        }
+        return assignment.getStatus() == WorkoutPlanAssignmentStatus.ACTIVE;
     }
 
     private WorkoutSessionExercise sessionExercise(WorkoutSession session, Long exerciseId) {

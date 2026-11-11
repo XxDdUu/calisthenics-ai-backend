@@ -5,6 +5,7 @@ public enum WorkoutPlanAssignmentStatus {
     ACTIVE,
     INACTIVE,
     COMPLETED,
+    CANCELLED,
     REVOKED,
     ENDED
 }

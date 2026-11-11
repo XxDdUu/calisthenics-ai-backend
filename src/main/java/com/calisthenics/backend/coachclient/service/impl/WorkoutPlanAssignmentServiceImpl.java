@@ -32,6 +32,12 @@ import java.util.List;
 @RequiredArgsConstructor
 public class WorkoutPlanAssignmentServiceImpl implements WorkoutPlanAssignmentService {
 
+    private static final List<WorkoutPlanAssignmentStatus> EXCLUDED_TERMINAL_STATUSES = List.of(
+            WorkoutPlanAssignmentStatus.CANCELLED,
+            WorkoutPlanAssignmentStatus.ENDED,
+            WorkoutPlanAssignmentStatus.REVOKED
+    );
+
     private final CoachClientRelationshipRepository relationshipRepository;
     private final WorkoutPlanAssignmentRepository assignmentRepository;
     private final WorkoutPlanRepository workoutPlanRepository;
@@ -84,9 +90,26 @@ public class WorkoutPlanAssignmentServiceImpl implements WorkoutPlanAssignmentSe
     @Override
     @Transactional(readOnly = true)
     public List<WorkoutPlanAssignmentResponse> listForRelationship(Long coachId, Long relationshipId) {
+        return listForRelationship(coachId, relationshipId, false, null);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public List<WorkoutPlanAssignmentResponse> listForRelationship(
+            Long coachId, Long relationshipId, boolean includeCancelled, WorkoutPlanAssignmentStatus status) {
         CoachClientRelationship relationship = findRelationship(relationshipId);
         requireCoach(relationship, coachId);
-        return assignmentRepository.findByRelationshipIdOrderByCreatedAtDesc(relationshipId).stream()
+        List<WorkoutPlanAssignment> assignments;
+        if (status != null) {
+            assignments = assignmentRepository.findByRelationshipIdAndStatusOrderByCreatedAtDesc(relationshipId, status);
+        } else if (includeCancelled) {
+            assignments = assignmentRepository.findByRelationshipIdOrderByCreatedAtDesc(relationshipId);
+        } else {
+            assignments = assignmentRepository.findByRelationshipIdAndStatusNotInOrderByCreatedAtDesc(
+                    relationshipId, EXCLUDED_TERMINAL_STATUSES);
+        }
+        return assignments.stream()
+                .filter(assignment -> status != null || includeCancelled || isActiveOrManuallyPaused(assignment))
                 .map(this::toResponse)
                 .toList();
     }
@@ -94,7 +117,24 @@ public class WorkoutPlanAssignmentServiceImpl implements WorkoutPlanAssignmentSe
     @Override
     @Transactional(readOnly = true)
     public List<WorkoutPlanAssignmentResponse> listForClient(Long clientId) {
-        return assignmentRepository.findByClientIdOrderByCreatedAtDesc(clientId).stream()
+        return listForClient(clientId, false, null);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public List<WorkoutPlanAssignmentResponse> listForClient(
+            Long clientId, boolean includeCancelled, WorkoutPlanAssignmentStatus status) {
+        List<WorkoutPlanAssignment> assignments;
+        if (status != null) {
+            assignments = assignmentRepository.findByClientIdAndStatusOrderByCreatedAtDesc(clientId, status);
+        } else if (includeCancelled) {
+            assignments = assignmentRepository.findByClientIdOrderByCreatedAtDesc(clientId);
+        } else {
+            assignments = assignmentRepository.findByClientIdAndStatusNotInOrderByCreatedAtDesc(
+                    clientId, EXCLUDED_TERMINAL_STATUSES);
+        }
+        return assignments.stream()
+                .filter(assignment -> status != null || includeCancelled || isActiveOrManuallyPaused(assignment))
                 .map(this::toResponse)
                 .toList();
     }
@@ -102,7 +142,24 @@ public class WorkoutPlanAssignmentServiceImpl implements WorkoutPlanAssignmentSe
     @Override
     @Transactional(readOnly = true)
     public List<WorkoutPlanAssignmentResponse> listForCoach(Long coachId) {
-        return assignmentRepository.findByCoachIdOrderByCreatedAtDesc(coachId).stream()
+        return listForCoach(coachId, false, null);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public List<WorkoutPlanAssignmentResponse> listForCoach(
+            Long coachId, boolean includeCancelled, WorkoutPlanAssignmentStatus status) {
+        List<WorkoutPlanAssignment> assignments;
+        if (status != null) {
+            assignments = assignmentRepository.findByCoachIdAndStatusOrderByCreatedAtDesc(coachId, status);
+        } else if (includeCancelled) {
+            assignments = assignmentRepository.findByCoachIdOrderByCreatedAtDesc(coachId);
+        } else {
+            assignments = assignmentRepository.findByCoachIdAndStatusNotInOrderByCreatedAtDesc(
+                    coachId, EXCLUDED_TERMINAL_STATUSES);
+        }
+        return assignments.stream()
+                .filter(assignment -> status != null || includeCancelled || isActiveOrManuallyPaused(assignment))
                 .map(this::toResponse)
                 .toList();
     }
@@ -128,9 +185,14 @@ public class WorkoutPlanAssignmentServiceImpl implements WorkoutPlanAssignmentSe
         LocalDate end = request.getEndDate() == null ? assignment.getEndDate() : request.getEndDate();
         validateDates(start, end);
 
-        if (status == WorkoutPlanAssignmentStatus.ACTIVE
-                && assignment.getStatus() == WorkoutPlanAssignmentStatus.ENDED) {
-            throw new IllegalArgumentException("Ended plan assignments cannot be reactivated");
+        if (assignment.getStatus() == WorkoutPlanAssignmentStatus.CANCELLED
+                || assignment.getStatus() == WorkoutPlanAssignmentStatus.ENDED
+                || assignment.getStatus() == WorkoutPlanAssignmentStatus.REVOKED
+                || assignment.getStatus() == WorkoutPlanAssignmentStatus.COMPLETED) {
+            throw new WorkoutPlanAssignmentConflictException();
+        }
+        if (status == WorkoutPlanAssignmentStatus.CANCELLED) {
+            throw new IllegalArgumentException("Assignments cannot be manually set to CANCELLED");
         }
         if (status == WorkoutPlanAssignmentStatus.ACTIVE) {
             requireActiveRelationship(assignment.getRelationship());
@@ -187,6 +249,14 @@ public class WorkoutPlanAssignmentServiceImpl implements WorkoutPlanAssignmentSe
         if (!relationship.getCoach().getId().equals(coachId)) {
             throw new CoachClientRelationshipNotFoundException();
         }
+    }
+
+    private boolean isActiveOrManuallyPaused(WorkoutPlanAssignment assignment) {
+        if (EXCLUDED_TERMINAL_STATUSES.contains(assignment.getStatus())) {
+            return false;
+        }
+        return assignment.getRelationship() == null
+                || assignment.getRelationship().getStatus() == CoachClientRelationshipStatus.ACTIVE;
     }
 
     private void requireActiveRelationship(CoachClientRelationship relationship) {

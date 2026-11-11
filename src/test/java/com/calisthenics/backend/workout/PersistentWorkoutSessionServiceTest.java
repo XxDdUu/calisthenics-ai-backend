@@ -344,4 +344,48 @@ class PersistentWorkoutSessionServiceTest {
         assertEquals(1, res.exercises().size());
         assertEquals(3, res.exercises().getFirst().sets().size());
     }
+
+    @Test
+    void cancelledAssignmentExcludesActiveUpcomingAndBlocksContinuingOrMutatingSession() {
+        Long userId = 4L;
+        LocalDate nov17 = LocalDate.of(2026, 11, 17);
+        User client = User.builder().id(userId).email("client@example.test").fullName("Client").build();
+        User coach = User.builder().id(8L).email("coach@example.test").fullName("Coach").build();
+        CoachClientRelationship terminated = CoachClientRelationship.builder()
+                .id(55L).coach(coach).client(client).status(CoachClientRelationshipStatus.TERMINATED).build();
+        WorkoutPlanAssignment cancelledAssignment = WorkoutPlanAssignment.builder()
+                .id(71L).relationship(terminated).coach(coach).client(client)
+                .status(WorkoutPlanAssignmentStatus.CANCELLED).startDate(LocalDate.of(2026, 1, 1)).build();
+        WorkoutSessionSet set = WorkoutSessionSet.builder()
+                .id(20L).setNumber(1).completed(false).build();
+        WorkoutSessionExercise exercise = WorkoutSessionExercise.builder()
+                .id(10L).exerciseNameSnapshot("Push-up")
+                .orderIndex(0).targetSets(1).targetReps(8).restSeconds(45)
+                .status(WorkoutSessionExerciseStatus.IN_PROGRESS).build();
+        set.setWorkoutSessionExercise(exercise);
+        exercise.getSets().add(set);
+        WorkoutSession cancelledInProgress = WorkoutSession.builder()
+                .id(88L).user(client).workoutPlanAssignment(cancelledAssignment)
+                .source(WorkoutSessionSource.COACH).title("Cancelled today")
+                .workoutDate(nov17).status(WorkoutSessionStatus.IN_PROGRESS)
+                .exercises(List.of(exercise)).startedAt(java.time.ZonedDateTime.now()).build();
+        WorkoutSession cancelledScheduledFuture = WorkoutSession.builder()
+                .id(89L).user(client).workoutPlanAssignment(cancelledAssignment)
+                .source(WorkoutSessionSource.COACH).title("Cancelled upcoming")
+                .workoutDate(nov17.plusDays(2)).status(WorkoutSessionStatus.SCHEDULED).build();
+
+        when(sessionRepository.findUnfinishedSessionsAsOf(userId, nov17))
+                .thenReturn(List.of(cancelledInProgress));
+        when(sessionRepository.findUpcomingSessionsAfter(userId, nov17))
+                .thenReturn(List.of(cancelledScheduledFuture));
+        when(sessionRepository.findByIdAndUserId(88L, userId)).thenReturn(Optional.of(cancelledInProgress));
+
+        assertTrue(service.getActive(userId, nov17, "Asia/Ho_Chi_Minh").isEmpty());
+        assertTrue(service.getUpcoming(userId, nov17, "Asia/Ho_Chi_Minh").isEmpty());
+
+        ResponseStatusException error = assertThrows(ResponseStatusException.class, () ->
+                service.updateSet(userId, 88L, 10L, 20L,
+                        new UpdateWorkoutSessionSetRequest(10, null, BigDecimal.ZERO, null, true, null, 0L)));
+        assertEquals(HttpStatus.CONFLICT, error.getStatusCode());
+    }
 }

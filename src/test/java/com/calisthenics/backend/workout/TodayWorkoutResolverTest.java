@@ -117,6 +117,25 @@ class TodayWorkoutResolverTest {
     }
 
     @Test
+    void cancelledCoachAssignmentAndTerminatedRelationshipExcludeCoachWorkout() {
+        CoachClientRelationship terminated = relationship(10L, CoachClientRelationshipStatus.TERMINATED);
+        WorkoutPlanAssignment cancelledAssignment = assignment(30L, terminated, plan(20L, 8L, "Cancelled coach plan"), DATE);
+        cancelledAssignment.setStatus(WorkoutPlanAssignmentStatus.CANCELLED);
+        when(relationshipRepository.findFirstByClientIdAndStatusOrderByUpdatedAtDesc(
+                CLIENT_ID, CoachClientRelationshipStatus.ACTIVE)).thenReturn(Optional.empty());
+        lenient().when(assignmentRepository.findByClientIdOrderByCreatedAtDesc(CLIENT_ID))
+                .thenReturn(List.of(cancelledAssignment));
+        when(planRepository.findByUserIdOrderByCreatedAtDesc(CLIENT_ID))
+                .thenReturn(List.of(plan(40L, CLIENT_ID, "Personal plan")));
+
+        var result = resolver.resolveCandidates(CLIENT_ID, DATE);
+
+        assertFalse(result.activeCoach());
+        assertEquals(WorkoutSessionSource.PERSONAL, result.source());
+        assertEquals(List.of(40L), result.candidates().stream().map(item -> item.plan().getId()).toList());
+    }
+
+    @Test
     void noApplicableSourceProducesEmptyResolution() {
         when(relationshipRepository.findFirstByClientIdAndStatusOrderByUpdatedAtDesc(
                 CLIENT_ID, CoachClientRelationshipStatus.ACTIVE)).thenReturn(Optional.empty());

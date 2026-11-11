@@ -16,6 +16,9 @@ import com.calisthenics.backend.coachclient.type.WorkoutPlanAssignmentStatus;
 import com.calisthenics.backend.user.Role;
 import com.calisthenics.backend.user.User;
 import com.calisthenics.backend.user.UserRepository;
+import com.calisthenics.backend.workout.WorkoutSession;
+import com.calisthenics.backend.workout.WorkoutSessionRepository;
+import com.calisthenics.backend.workout.WorkoutSessionStatus;
 import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -33,9 +36,17 @@ public class CoachClientRelationshipServiceImpl implements CoachClientRelationsh
     private static final Logger log = LoggerFactory.getLogger(CoachClientRelationshipServiceImpl.class);
     private static final List<CoachClientRelationshipStatus> DUPLICATE_BLOCKING_STATUSES =
             List.of(CoachClientRelationshipStatus.PENDING, CoachClientRelationshipStatus.ACTIVE);
+    private static final List<WorkoutPlanAssignmentStatus> CANCELLABLE_ASSIGNMENT_STATUSES =
+            List.of(
+                    WorkoutPlanAssignmentStatus.ACTIVE,
+                    WorkoutPlanAssignmentStatus.INACTIVE,
+                    WorkoutPlanAssignmentStatus.UPCOMING);
+    private static final List<WorkoutSessionStatus> CANCELLABLE_SESSION_STATUSES =
+            List.of(WorkoutSessionStatus.SCHEDULED, WorkoutSessionStatus.IN_PROGRESS);
 
     private final CoachClientRelationshipRepository relationshipRepository;
     private final WorkoutPlanAssignmentRepository assignmentRepository;
+    private final WorkoutSessionRepository workoutSessionRepository;
     private final UserRepository userRepository;
 
     @Override
@@ -166,7 +177,7 @@ public class CoachClientRelationshipServiceImpl implements CoachClientRelationsh
                     throw new CoachClientForbiddenException();
                 }
                 relationship.setStatus(CoachClientRelationshipStatus.CANCELLED);
-                endActiveAssignments(relationship.getId());
+                cancelRelationshipAssignments(relationship.getId());
             } else {
                 throw new IllegalArgumentException("Unsupported relationship state transition");
             }
@@ -212,7 +223,7 @@ public class CoachClientRelationshipServiceImpl implements CoachClientRelationsh
             }
 
             relationship.setStatus(CoachClientRelationshipStatus.TERMINATED);
-            endActiveAssignments(relationship.getId());
+            cancelRelationshipAssignments(relationship.getId());
 
             CoachClientRelationship saved = relationshipRepository.saveAndFlush(relationship);
             log.info(
@@ -235,17 +246,34 @@ public class CoachClientRelationshipServiceImpl implements CoachClientRelationsh
         return respondentId.equals(userId);
     }
 
-    private void endActiveAssignments(Long relationshipId) {
+    private void cancelRelationshipAssignments(Long relationshipId) {
+        List<WorkoutPlanAssignment> assignments = assignmentRepository.findByRelationshipIdAndStatusInForUpdate(
+                relationshipId, CANCELLABLE_ASSIGNMENT_STATUSES);
+        if (assignments.isEmpty()) {
+            return;
+        }
         LocalDate today = LocalDate.now();
-        for (WorkoutPlanAssignment assignment : assignmentRepository.findByRelationshipIdAndStatus(
-                relationshipId, WorkoutPlanAssignmentStatus.ACTIVE)) {
-            assignment.setStatus(WorkoutPlanAssignmentStatus.ENDED);
+        for (WorkoutPlanAssignment assignment : assignments) {
+            assignment.setStatus(WorkoutPlanAssignmentStatus.CANCELLED);
             LocalDate endDate = assignment.getStartDate().isAfter(today)
                     ? assignment.getStartDate()
                     : today;
             if (assignment.getEndDate() == null || assignment.getEndDate().isAfter(endDate)) {
                 assignment.setEndDate(endDate);
             }
+        }
+        assignmentRepository.saveAllAndFlush(assignments);
+
+        List<Long> canceledAssignmentIds = assignments.stream()
+                .map(WorkoutPlanAssignment::getId)
+                .toList();
+        List<WorkoutSession> uncompletedSessions = workoutSessionRepository
+                .findByWorkoutPlanAssignmentIdInAndStatusIn(canceledAssignmentIds, CANCELLABLE_SESSION_STATUSES);
+        if (!uncompletedSessions.isEmpty()) {
+            for (WorkoutSession session : uncompletedSessions) {
+                session.setStatus(WorkoutSessionStatus.CANCELLED);
+            }
+            workoutSessionRepository.saveAllAndFlush(uncompletedSessions);
         }
     }
 

@@ -5,6 +5,7 @@ import com.calisthenics.backend.coachclient.dto.request.UpdateWorkoutPlanAssignm
 import com.calisthenics.backend.coachclient.dto.request.UpdateWorkoutPlanAssignmentStatusRequest;
 import com.calisthenics.backend.coachclient.dto.response.WorkoutPlanAssignmentResponse;
 import com.calisthenics.backend.coachclient.service.WorkoutPlanAssignmentService;
+import com.calisthenics.backend.coachclient.type.WorkoutPlanAssignmentStatus;
 import com.calisthenics.backend.security.UserPrincipal;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -34,8 +35,20 @@ public class WorkoutPlanAssignmentController {
     @GetMapping("/coach-client-relationships/{relationshipId}/assignments")
     public ResponseEntity<List<WorkoutPlanAssignmentResponse>> listForRelationship(
             @AuthenticationPrincipal UserPrincipal currentUser,
+            @PathVariable Long relationshipId,
+            @RequestParam(required = false, defaultValue = "false") boolean includeCancelled,
+            @RequestParam(required = false, defaultValue = "false") boolean includeHistory,
+            @RequestParam(required = false) WorkoutPlanAssignmentStatus status) {
+        return ResponseEntity.ok(assignmentService.listForRelationship(
+                currentUser.getId(), relationshipId, includeCancelled || includeHistory, status));
+    }
+
+    @GetMapping("/coach-client-relationships/{relationshipId}/assignments/history")
+    public ResponseEntity<List<WorkoutPlanAssignmentResponse>> listHistoryForRelationship(
+            @AuthenticationPrincipal UserPrincipal currentUser,
             @PathVariable Long relationshipId) {
-        return ResponseEntity.ok(assignmentService.listForRelationship(currentUser.getId(), relationshipId));
+        return ResponseEntity.ok(assignmentService.listForRelationship(
+                currentUser.getId(), relationshipId, true, null));
     }
 
     @PutMapping("/coach-client-relationships/{relationshipId}/assignments/{assignmentId}")
@@ -59,13 +72,33 @@ public class WorkoutPlanAssignmentController {
 
     @GetMapping("/clients/me/workout-plan-assignments")
     public ResponseEntity<List<WorkoutPlanAssignmentResponse>> listForCurrentClient(
+            @AuthenticationPrincipal UserPrincipal currentUser,
+            @RequestParam(required = false, defaultValue = "false") boolean includeCancelled,
+            @RequestParam(required = false, defaultValue = "false") boolean includeHistory,
+            @RequestParam(required = false) WorkoutPlanAssignmentStatus status) {
+        return ResponseEntity.ok(assignmentService.listForClient(
+                currentUser.getId(), includeCancelled || includeHistory, status));
+    }
+
+    @GetMapping("/clients/me/workout-plan-assignments/history")
+    public ResponseEntity<List<WorkoutPlanAssignmentResponse>> listHistoryForCurrentClient(
             @AuthenticationPrincipal UserPrincipal currentUser) {
-        return ResponseEntity.ok(assignmentService.listForClient(currentUser.getId()));
+        return ResponseEntity.ok(assignmentService.listForClient(currentUser.getId(), true, null));
     }
 
     @GetMapping("/coach/me/workout-plan-assignments")
     public ResponseEntity<List<WorkoutPlanAssignmentResponse>> listForCurrentCoach(
+            @AuthenticationPrincipal UserPrincipal currentUser,
+            @RequestParam(required = false, defaultValue = "false") boolean includeCancelled,
+            @RequestParam(required = false, defaultValue = "false") boolean includeHistory,
+            @RequestParam(required = false) WorkoutPlanAssignmentStatus status) {
+        return ResponseEntity.ok(assignmentService.listForCoach(
+                currentUser.getId(), includeCancelled || includeHistory, status));
+    }
+
+    @GetMapping("/coach/me/workout-plan-assignments/history")
+    public ResponseEntity<List<WorkoutPlanAssignmentResponse>> listHistoryForCurrentCoach(
             @AuthenticationPrincipal UserPrincipal currentUser) {
-        return ResponseEntity.ok(assignmentService.listForCoach(currentUser.getId()));
+        return ResponseEntity.ok(assignmentService.listForCoach(currentUser.getId(), true, null));
     }
 }

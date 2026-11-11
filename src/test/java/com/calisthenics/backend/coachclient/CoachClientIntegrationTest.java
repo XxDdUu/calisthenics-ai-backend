@@ -349,8 +349,9 @@ class CoachClientIntegrationTest {
         relationshipService.transition(
                 client.getId(), relationship.getId(), CoachClientRelationshipStatus.CANCELLED);
         assertThat(assignmentRepository.findById(assignment.getId()).orElseThrow().getStatus())
-                .isEqualTo(WorkoutPlanAssignmentStatus.ENDED);
-        assertThat(assignmentService.listForClient(client.getId()))
+                .isEqualTo(WorkoutPlanAssignmentStatus.CANCELLED);
+        assertThat(assignmentService.listForClient(client.getId())).isEmpty();
+        assertThat(assignmentService.listForClient(client.getId(), true, null))
                 .extracting(WorkoutPlanAssignmentResponse::getId)
                 .containsExactly(assignment.getId());
     }
@@ -547,9 +548,13 @@ class CoachClientIntegrationTest {
         // Status is TERMINATED
         assertThat(relationshipRepository.findById(relationship.getId()).orElseThrow().getStatus())
                 .isEqualTo(CoachClientRelationshipStatus.TERMINATED);
-        // Workout plan assignment is ended
+        // Workout plan assignment is soft-cancelled
         assertThat(assignmentRepository.findById(assignment.getId()).orElseThrow().getStatus())
-                .isEqualTo(WorkoutPlanAssignmentStatus.ENDED);
+                .isEqualTo(WorkoutPlanAssignmentStatus.CANCELLED);
+        assertThat(assignmentService.listForClient(client.getId())).isEmpty();
+        assertThat(assignmentService.listForClient(client.getId(), true, null))
+                .extracting(WorkoutPlanAssignmentResponse::getId)
+                .containsExactly(assignment.getId());
         // Historical plan still exists in repository
         assertThat(workoutPlanRepository.findById(plan.getId())).isPresent();
         // User accounts still exist

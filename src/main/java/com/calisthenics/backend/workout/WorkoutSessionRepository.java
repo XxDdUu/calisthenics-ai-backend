@@ -63,6 +63,9 @@ public interface WorkoutSessionRepository extends JpaRepository<WorkoutSession, 
     List<WorkoutSession> findByUserIdAndStatusAndStartedAtIsNullAndWorkoutDateAfter(
             Long userId, WorkoutSessionStatus status, LocalDate date);
 
+    List<WorkoutSession> findByWorkoutPlanAssignmentIdInAndStatusIn(
+            Collection<Long> assignmentIds, Collection<WorkoutSessionStatus> statuses);
+
     List<WorkoutSession> findByUserIdAndStatusOrderByStartedAtDesc(Long userId, WorkoutSessionStatus status);
 
     @Query("SELECT s FROM WorkoutSession s WHERE s.user.id = :userId " +
