@@ -1,6 +1,7 @@
 package com.calisthenics.backend.workoutplan.service.impl;
 
 import com.calisthenics.backend.coachclient.entity.WorkoutPlanAssignment;
+import com.calisthenics.backend.coachclient.repository.CoachClientRelationshipRepository;
 import com.calisthenics.backend.coachclient.repository.WorkoutPlanAssignmentRepository;
 import com.calisthenics.backend.coachclient.type.CoachClientRelationshipStatus;
 import com.calisthenics.backend.coachclient.type.WorkoutPlanAssignmentStatus;
@@ -35,6 +36,7 @@ public class WorkoutPlanExerciseServiceImpl implements WorkoutPlanExerciseServic
     private final WorkoutPlanExerciseRepository workoutPlanExerciseRepository;
     private final ExerciseRepository exerciseRepository;
     private final WorkoutPlanAssignmentRepository assignmentRepository;
+    private final CoachClientRelationshipRepository relationshipRepository;
 
     @Override
     @Transactional(readOnly = true)
@@ -279,11 +281,21 @@ public class WorkoutPlanExerciseServiceImpl implements WorkoutPlanExerciseServic
                 .anyMatch(assignment -> assignment.getWorkoutPlan().getId().equals(planId)
                         && assignment.getStatus() == WorkoutPlanAssignmentStatus.ACTIVE
                         && assignment.getRelationship().getStatus() == CoachClientRelationshipStatus.ACTIVE);
-        if (!ownsPlan && !hasActiveAssignment) {
+        boolean isActiveCoachOfOwner = !ownsPlan && !hasActiveAssignment && isActiveCoachOfPlanOwner(userId, planId);
+        if (!ownsPlan && !hasActiveAssignment && !isActiveCoachOfOwner) {
             throw new WorkoutPlanNotFoundException();
         }
         return workoutPlanDayRepository.findByIdAndWorkoutPlanId(dayId, planId)
                 .orElseThrow(WorkoutPlanNotFoundException::new);
+    }
+
+    private boolean isActiveCoachOfPlanOwner(Long coachId, Long planId) {
+        return workoutPlanRepository.findWithDetailsById(planId)
+                .map(plan -> relationshipRepository.existsByCoachIdAndClientIdAndStatusIn(
+                        coachId,
+                        plan.getUser().getId(),
+                        List.of(CoachClientRelationshipStatus.ACTIVE)))
+                .orElse(false);
     }
 
     private WorkoutPlanExercise findAssignment(Long dayId, Long assignmentId) {

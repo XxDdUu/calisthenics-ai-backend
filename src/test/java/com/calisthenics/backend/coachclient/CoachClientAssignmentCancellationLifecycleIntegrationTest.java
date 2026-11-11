@@ -329,6 +329,63 @@ class CoachClientAssignmentCancellationLifecycleIntegrationTest {
                 .isEqualTo(WorkoutPlanAssignmentStatus.CANCELLED);
     }
 
+    @Test
+    void activeCoachCanLoadClientPersonalPlanDetailsAndDayExercisesUntilTermination() throws Exception {
+        User coach = createUser("plan-reader-coach");
+        User client = createUser("plan-reader-client");
+        Exercise dip = createExercise("Coach View Dip");
+
+        WorkoutPlan clientPersonalPlan = createFullWeekPlan(client, "Client Personal Plan", dip);
+        WorkoutPlan coachPrivatePlan = createFullWeekPlan(coach, "Coach Private Plan", dip);
+        WorkoutPlanDay clientPlanDay = clientPersonalPlan.getDays().iterator().next();
+
+        CoachClientRelationship relationship = connect(coach, client);
+
+        // Active coach can list client's personal plans and load both plan details and day exercises.
+        mockMvc.perform(get("/api/v1/workout-plans/clients/{clientId}/personal", client.getId())
+                        .with(authenticatedAs(coach)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].id").value(clientPersonalPlan.getId()));
+
+        mockMvc.perform(get("/api/v1/workout-plans/{id}", clientPersonalPlan.getId())
+                        .with(authenticatedAs(coach)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value(clientPersonalPlan.getId()))
+                .andExpect(jsonPath("$.name").value("Client Personal Plan"));
+
+        mockMvc.perform(get("/api/v1/workout-plans/{planId}/days/{dayId}/exercises",
+                        clientPersonalPlan.getId(), clientPlanDay.getId())
+                        .with(authenticatedAs(coach)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$", hasSize(1)))
+                .andExpect(jsonPath("$[0].exercise.id").value(dip.getId()));
+
+        // Client cannot browse coach's unassigned personal plan in reverse.
+        mockMvc.perform(get("/api/v1/workout-plans/clients/{clientId}/personal", coach.getId())
+                        .with(authenticatedAs(client)))
+                .andExpect(status().isNotFound());
+        mockMvc.perform(get("/api/v1/workout-plans/{id}", coachPrivatePlan.getId())
+                        .with(authenticatedAs(client)))
+                .andExpect(status().isNotFound());
+
+        // Terminating relationship immediately revokes coach's read access to client's personal plans.
+        mockMvc.perform(post("/api/v1/coach-client-relationships/{id}/terminate", relationship.getId())
+                        .with(authenticatedAs(client)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("TERMINATED"));
+
+        mockMvc.perform(get("/api/v1/workout-plans/clients/{clientId}/personal", client.getId())
+                        .with(authenticatedAs(coach)))
+                .andExpect(status().isNotFound());
+        mockMvc.perform(get("/api/v1/workout-plans/{id}", clientPersonalPlan.getId())
+                        .with(authenticatedAs(coach)))
+                .andExpect(status().isNotFound());
+        mockMvc.perform(get("/api/v1/workout-plans/{planId}/days/{dayId}/exercises",
+                        clientPersonalPlan.getId(), clientPlanDay.getId())
+                        .with(authenticatedAs(coach)))
+                .andExpect(status().isNotFound());
+    }
+
     private WorkoutSession persistCompletedSessionWithPr(
             User client, WorkoutPlan plan, WorkoutPlanAssignment assignment, Exercise exercise, LocalDate date) {
         WorkoutPlanDay day = plan.getDays().iterator().next();

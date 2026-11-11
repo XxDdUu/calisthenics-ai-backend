@@ -101,7 +101,7 @@ public class WorkoutPlanServiceImpl implements WorkoutPlanService {
     @Override
     @Transactional(readOnly = true)
     public List<WorkoutPlanResponse> listForAuthorizedClient(Long coachId, Long clientId) {
-        if (relationshipRepository.findActiveRelationshipForUsers(coachId, clientId).isEmpty()) {
+        if (!isActiveCoachOfClient(coachId, clientId)) {
             throw new WorkoutPlanNotFoundException();
         }
         return listForUser(clientId);
@@ -119,7 +119,7 @@ public class WorkoutPlanServiceImpl implements WorkoutPlanService {
     @Transactional(readOnly = true)
     public WorkoutPlanResponse get(Long userId, Long planId) {
         WorkoutPlan plan = workoutPlanRepository.findByIdAndUserId(planId, userId)
-                .orElseGet(() -> findAssignedPlan(userId, planId));
+                .orElseGet(() -> findReadableExternalPlan(userId, planId));
         return workoutPlanMapper.toResponse(plan);
     }
 
@@ -237,13 +237,27 @@ public class WorkoutPlanServiceImpl implements WorkoutPlanService {
                 .orElseThrow(WorkoutPlanNotFoundException::new);
     }
 
-    private WorkoutPlan findAssignedPlan(Long clientId, Long planId) {
-        return assignmentRepository.findByClientIdOrderByCreatedAtDesc(clientId).stream()
+    private WorkoutPlan findReadableExternalPlan(Long userId, Long planId) {
+        return assignmentRepository.findByClientIdOrderByCreatedAtDesc(userId).stream()
                 .filter(assignment -> assignment.getWorkoutPlan().getId().equals(planId)
                         && isReadableAssignment(assignment))
                 .map(WorkoutPlanAssignment::getWorkoutPlan)
                 .findFirst()
+                .orElseGet(() -> findClientPlanForActiveCoach(userId, planId));
+    }
+
+    private WorkoutPlan findClientPlanForActiveCoach(Long coachId, Long planId) {
+        WorkoutPlan plan = workoutPlanRepository.findWithDetailsById(planId)
                 .orElseThrow(WorkoutPlanNotFoundException::new);
+        if (!isActiveCoachOfClient(coachId, plan.getUser().getId())) {
+            throw new WorkoutPlanNotFoundException();
+        }
+        return plan;
+    }
+
+    private boolean isActiveCoachOfClient(Long coachId, Long clientId) {
+        return relationshipRepository.existsByCoachIdAndClientIdAndStatusIn(
+                coachId, clientId, List.of(CoachClientRelationshipStatus.ACTIVE));
     }
 
     private boolean isReadableAssignment(WorkoutPlanAssignment assignment) {
