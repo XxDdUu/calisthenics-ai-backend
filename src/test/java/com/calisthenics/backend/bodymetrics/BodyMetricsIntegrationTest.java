@@ -14,6 +14,8 @@ import com.calisthenics.backend.security.UserPrincipal;
 import com.calisthenics.backend.user.Role;
 import com.calisthenics.backend.user.User;
 import com.calisthenics.backend.user.UserRepository;
+import com.calisthenics.backend.workout.WorkoutSessionExerciseRepository;
+import com.calisthenics.backend.workout.WorkoutSessionRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -64,6 +66,12 @@ class BodyMetricsIntegrationTest {
     @Autowired
     private WorkoutPlanAssignmentRepository assignmentRepository;
 
+    @Autowired
+    private WorkoutSessionRepository workoutSessionRepository;
+
+    @Autowired
+    private WorkoutSessionExerciseRepository workoutSessionExerciseRepository;
+
     private User clientUser;
     private User assignedCoach;
     private User unassignedCoach;
@@ -71,6 +79,8 @@ class BodyMetricsIntegrationTest {
     @BeforeEach
     void setUp() {
         measurementRepository.deleteAll();
+        workoutSessionExerciseRepository.deleteAll();
+        workoutSessionRepository.deleteAll();
         assignmentRepository.deleteAll();
         relationshipRepository.deleteAll();
         clientProfileRepository.deleteAll();

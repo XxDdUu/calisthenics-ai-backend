@@ -13,6 +13,7 @@ import com.calisthenics.backend.aichat.repository.AiConversationRepository;
 import com.calisthenics.backend.analytics.model.PersonalRecord;
 import com.calisthenics.backend.analytics.model.PersonalRecordType;
 import com.calisthenics.backend.analytics.repository.PersonalRecordRepository;
+import com.calisthenics.backend.bodymetrics.repository.ClientBodyMeasurementRepository;
 import com.calisthenics.backend.coachclient.entity.CoachClientRelationship;
 import com.calisthenics.backend.coachclient.repository.CoachClientRelationshipRepository;
 import com.calisthenics.backend.coachclient.repository.WorkoutPlanAssignmentRepository;
@@ -34,6 +35,7 @@ import com.calisthenics.backend.workoutplan.entity.WorkoutPlan;
 import com.calisthenics.backend.workoutplan.repository.WorkoutPlanRepository;
 import com.calisthenics.backend.workoutplan.type.WorkoutSplitType;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -114,14 +116,16 @@ class AdminAiIntegrationAndSecurityTest {
     @Autowired
     private AdminAiAuditLogRepository adminAiAuditLogRepository;
 
+    @Autowired
+    private ClientBodyMeasurementRepository clientBodyMeasurementRepository;
+
     private User adminUser;
     private User coachUser;
     private User clientUser;
     private Exercise existingTuckPlanche;
     private Exercise existingPullUp;
 
-    @BeforeEach
-    void setUp() {
+    private void cleanDb() {
         adminAiAuditLogRepository.deleteAll();
         adminAiRecommendationRepository.deleteAll();
         adminAiMessageRepository.deleteAll();
@@ -133,10 +137,21 @@ class AdminAiIntegrationAndSecurityTest {
         assignmentRepository.deleteAll();
         workoutPlanRepository.deleteAll();
         relationshipRepository.deleteAll();
+        clientBodyMeasurementRepository.deleteAll();
         clientProfileRepository.deleteAll();
         coachProfileRepository.deleteAll();
         exerciseRepository.deleteAll();
         userRepository.deleteAll();
+    }
+
+    @AfterEach
+    void tearDown() {
+        cleanDb();
+    }
+
+    @BeforeEach
+    void setUp() {
+        cleanDb();
 
         adminUser = userRepository.save(User.builder()
                 .email("admin@calisthenics.ai")
