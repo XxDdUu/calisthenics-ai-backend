@@ -49,6 +49,7 @@ public class SecurityConfig {
                         .dispatcherTypeMatchers(DispatcherType.ASYNC, DispatcherType.ERROR, DispatcherType.FORWARD).permitAll()
                         .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                         .requestMatchers(HttpMethod.POST, "/api/v1/admin/bootstrap").permitAll()
+                        .requestMatchers("/api/v1/admin/**", "/api/admin/**").hasRole("ADMIN")
                         .requestMatchers(
                                 "/api/v1/auth/**",
                                 "/v3/api-docs/**",

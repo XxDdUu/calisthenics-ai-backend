@@ -1,5 +1,7 @@
 package com.calisthenics.backend.aiworkout.gemini;
 
+import com.calisthenics.backend.adminai.dto.GeminiAdminAgentOutput;
+import com.calisthenics.backend.aichat.dto.GeminiAssistantOutput;
 import com.calisthenics.backend.aiworkout.gemini.dto.GeminiRequestDto;
 import com.calisthenics.backend.aiworkout.gemini.dto.GeminiResponseDto;
 import com.calisthenics.backend.aiworkout.gemini.dto.GeminiStructuredPerformanceSummary;
@@ -103,6 +105,30 @@ public class GeminiApiClient {
         ));
     }
 
+    public Optional<GeminiAssistantOutput> callAssistant(
+            String systemPrompt,
+            List<GeminiRequestDto.Content> conversationContents
+    ) {
+        return callGeminiConversation(
+                systemPrompt,
+                conversationContents,
+                buildAssistantResponseSchema(),
+                GeminiAssistantOutput.class
+        ).result().map(GeminiStructuredRawResult::payload);
+    }
+
+    public Optional<GeminiAdminAgentOutput> callAdminAgent(
+            String systemPrompt,
+            List<GeminiRequestDto.Content> conversationContents
+    ) {
+        return callGeminiConversation(
+                systemPrompt,
+                conversationContents,
+                buildAdminAgentResponseSchema(),
+                GeminiAdminAgentOutput.class
+        ).result().map(GeminiStructuredRawResult::payload);
+    }
+
     private String resolveModel() {
         String model = appProperties.getGemini().getModel();
         return (model == null || model.isBlank()) ? "gemini-flash-lite-latest" : model;
@@ -134,6 +160,23 @@ public class GeminiApiClient {
             Map<String, Object> schema,
             Class<T> responseType
     ) {
+        return callGeminiConversation(
+                systemPrompt,
+                List.of(GeminiRequestDto.Content.builder()
+                        .role("user")
+                        .parts(List.of(new GeminiRequestDto.Part(userPrompt)))
+                        .build()),
+                schema,
+                responseType
+        );
+    }
+
+    private <T> GeminiCallAttempt<T> callGeminiConversation(
+            String systemPrompt,
+            List<GeminiRequestDto.Content> conversationContents,
+            Map<String, Object> schema,
+            Class<T> responseType
+    ) {
         String apiKey = appProperties.getGemini().getApiKey();
         String model = resolveModel();
 
@@ -147,7 +190,7 @@ public class GeminiApiClient {
                 appProperties.getGemini().getBaseUrl().replaceAll("/+$", ""),
                 model);
 
-        GeminiRequestDto requestDto = buildRequest(systemPrompt, userPrompt, schema);
+        GeminiRequestDto requestDto = buildRequest(systemPrompt, conversationContents, schema);
 
         RestTemplate restTemplate = createRestTemplate();
 
@@ -293,10 +336,21 @@ public class GeminiApiClient {
     }
 
     private GeminiRequestDto buildRequest(String systemPrompt, String userPrompt, Map<String, Object> schema) {
+        return buildRequest(
+                systemPrompt,
+                List.of(GeminiRequestDto.Content.builder()
+                        .role("user")
+                        .parts(List.of(new GeminiRequestDto.Part(userPrompt)))
+                        .build()),
+                schema
+        );
+    }
+
+    private GeminiRequestDto buildRequest(String systemPrompt, List<GeminiRequestDto.Content> contents, Map<String, Object> schema) {
         GeminiRequestDto.GenerationConfig config = GeminiRequestDto.GenerationConfig.builder()
                 .responseMimeType("application/json")
                 .responseSchema(schema)
-                .temperature(0.2)
+                .temperature(0.3)
                 .maxOutputTokens(8192)
                 .build();
 
@@ -304,16 +358,116 @@ public class GeminiApiClient {
                 .parts(List.of(new GeminiRequestDto.Part(systemPrompt)))
                 .build();
 
-        GeminiRequestDto.Content content = GeminiRequestDto.Content.builder()
-                .role("user")
-                .parts(List.of(new GeminiRequestDto.Part(userPrompt)))
-                .build();
-
         return GeminiRequestDto.builder()
                 .systemInstruction(systemInstruction)
-                .contents(List.of(content))
+                .contents(contents)
                 .generationConfig(config)
                 .build();
+    }
+
+    public static Map<String, Object> buildAssistantResponseSchema() {
+        Map<String, Object> prProperties = new LinkedHashMap<>();
+        prProperties.put("exercise_name", Map.of("type", "STRING", "description", "Name of the exercise for the PR, e.g. Pull Up, Muscle Up, Weighted Dip"));
+        prProperties.put("value", Map.of("type", "NUMBER", "description", "Numeric record value achieved (e.g. 15, 30.5)"));
+        prProperties.put("unit", Map.of("type", "STRING", "description", "Unit of measurement, e.g. reps, kg, s"));
+        prProperties.put("pr_type", Map.of("type", "STRING", "enum", List.of("MAX_REPS", "MAX_WEIGHT", "MAX_HOLD")));
+        prProperties.put("is_ambiguous", Map.of("type", "BOOLEAN", "description", "True if critical PR details like exercise or value were missing"));
+        prProperties.put("notes", Map.of("type", "STRING", "description", "Optional notes or form conditions"));
+
+        Map<String, Object> prSchema = new LinkedHashMap<>();
+        prSchema.put("type", "OBJECT");
+        prSchema.put("properties", prProperties);
+
+        Map<String, Object> planProperties = new LinkedHashMap<>();
+        planProperties.put("prompt", Map.of("type", "STRING", "description", "Distilled workout plan generation prompt"));
+        planProperties.put("fitness_level", Map.of("type", "STRING", "enum", List.of("BEGINNER", "INTERMEDIATE", "ADVANCED")));
+        planProperties.put("duration_weeks", Map.of("type", "INTEGER", "description", "Program duration in weeks (1-12)"));
+
+        Map<String, Object> planSchema = new LinkedHashMap<>();
+        planSchema.put("type", "OBJECT");
+        planSchema.put("properties", planProperties);
+
+        Map<String, Object> progressProperties = new LinkedHashMap<>();
+        progressProperties.put("exercise_name", Map.of("type", "STRING", "description", "Target exercise for progress analysis, if any"));
+        progressProperties.put("focus_area", Map.of("type", "STRING", "description", "Focus area: plateaus, strength, consistency, or overall"));
+
+        Map<String, Object> progressSchema = new LinkedHashMap<>();
+        progressSchema.put("type", "OBJECT");
+        progressSchema.put("properties", progressProperties);
+
+        Map<String, Object> rootProperties = new LinkedHashMap<>();
+        rootProperties.put("intent", Map.of(
+                "type", "STRING",
+                "enum", List.of("WORKOUT_PLAN", "PR_RECORD", "PROGRESS_ANALYSIS", "GENERAL_CHAT"),
+                "description", "Detected user intent"
+        ));
+        rootProperties.put("reply", Map.of(
+                "type", "STRING",
+                "description", "Personalized, motivational, and Markdown-formatted assistant response"
+        ));
+        rootProperties.put("pr_action", prSchema);
+        rootProperties.put("workout_plan_action", planSchema);
+        rootProperties.put("progress_analysis_action", progressSchema);
+
+        Map<String, Object> rootSchema = new LinkedHashMap<>();
+        rootSchema.put("type", "OBJECT");
+        rootSchema.put("properties", rootProperties);
+        rootSchema.put("required", List.of("intent", "reply"));
+
+        return rootSchema;
+    }
+
+    public static Map<String, Object> buildAdminAgentResponseSchema() {
+        Map<String, Object> rootProperties = new LinkedHashMap<>();
+        rootProperties.put("intent", Map.of(
+                "type", "STRING",
+                "enum", List.of(
+                        "PLATFORM_OVERVIEW",
+                        "USER_TRAINING_ANALYTICS",
+                        "EXERCISE_RECOMMENDATION",
+                        "WORKOUT_PROGRAM_RECOMMENDATION",
+                        "OPERATIONAL_INSIGHTS",
+                        "GENERAL_ADMIN_ADVISORY"
+                ),
+                "description", "Detected administrative intent"
+        ));
+        rootProperties.put("reply", Map.of(
+                "type", "STRING",
+                "description", "Detailed, factual, Markdown-formatted administrative advisory response grounded strictly in the provided platform metrics"
+        ));
+        rootProperties.put("target_skill", Map.of(
+                "type", "STRING",
+                "description", "Target calisthenics skill if applicable (e.g. Planche, Front Lever, Back Lever, Handstand, Muscle-up, Human Flag)"
+        ));
+        rootProperties.put("target_level", Map.of(
+                "type", "STRING",
+                "enum", List.of("BEGINNER", "INTERMEDIATE", "ADVANCED", "ELITE"),
+                "description", "Target difficulty level if applicable"
+        ));
+        rootProperties.put("generate_exercise_recommendations", Map.of(
+                "type", "BOOLEAN",
+                "description", "True if the admin is asking for exercise or progression additions"
+        ));
+        rootProperties.put("generate_workout_program", Map.of(
+                "type", "BOOLEAN",
+                "description", "True if the admin is asking for a draft workout program recommendation"
+        ));
+        rootProperties.put("generate_operational_insights", Map.of(
+                "type", "BOOLEAN",
+                "description", "True if the admin is asking for operational improvements or platform bottlenecks"
+        ));
+        rootProperties.put("suggested_follow_ups", Map.of(
+                "type", "ARRAY",
+                "items", Map.of("type", "STRING"),
+                "description", "Up to 3 relevant administrative follow-up prompts"
+        ));
+
+        Map<String, Object> rootSchema = new LinkedHashMap<>();
+        rootSchema.put("type", "OBJECT");
+        rootSchema.put("properties", rootProperties);
+        rootSchema.put("required", List.of("intent", "reply"));
+
+        return rootSchema;
     }
 
     public static Map<String, Object> buildPerformanceSummaryResponseSchema() {

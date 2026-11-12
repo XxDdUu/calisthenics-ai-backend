@@ -1,0 +1,10 @@
+package com.calisthenics.backend.adminai.type;
+
+public enum AdminAiIntent {
+    PLATFORM_OVERVIEW,
+    USER_TRAINING_ANALYTICS,
+    EXERCISE_RECOMMENDATION,
+    WORKOUT_PROGRAM_RECOMMENDATION,
+    OPERATIONAL_INSIGHTS,
+    GENERAL_ADMIN_ADVISORY
+}

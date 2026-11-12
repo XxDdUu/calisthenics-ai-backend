@@ -195,6 +195,64 @@ class WorkoutPlanAssignmentStatusIntegrationTest {
                 .isEqualTo(WorkoutPlanAssignmentStatus.CANCELLED);
     }
 
+    @Test
+    void assignWorkoutToConnectedClientSuccess() throws Exception {
+        User coach = createUser("assign-success-coach");
+        User athlete = createUser("assign-success-athlete");
+        WorkoutPlan plan = createPlan(coach);
+        CoachClientRelationship relationship = connect(coach, athlete);
+
+        mockMvc.perform(post("/api/v1/coach-client-relationships/{relationshipId}/assignments", relationship.getId())
+                        .with(authenticatedAs(coach))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"workoutPlanId\":" + plan.getId() + "}"))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.relationshipId").value(relationship.getId()))
+                .andExpect(jsonPath("$.workoutPlanId").value(plan.getId()))
+                .andExpect(jsonPath("$.status").value("ACTIVE"))
+                .andExpect(jsonPath("$.clientId").value(athlete.getId()))
+                .andExpect(jsonPath("$.coachId").value(coach.getId()));
+    }
+
+    @Test
+    void assignWorkoutToDisconnectedRelationshipFailsWithConflict() throws Exception {
+        User coach = createUser("assign-disc-coach");
+        User athlete = createUser("assign-disc-athlete");
+        WorkoutPlan plan = createPlan(coach);
+        CoachClientRelationship relationship = connect(coach, athlete);
+
+        relationshipService.terminate(coach.getId(), relationship.getId());
+
+        mockMvc.perform(post("/api/v1/coach-client-relationships/{relationshipId}/assignments", relationship.getId())
+                        .with(authenticatedAs(coach))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"workoutPlanId\":" + plan.getId() + "}"))
+                .andExpect(status().isConflict());
+    }
+
+    @Test
+    void assignWorkoutToAnotherCoachRelationshipFailsWithNotFound() throws Exception {
+        User coachA = createUser("coach-a");
+        User coachB = createUser("coach-b");
+        User athlete = createUser("athlete-shared");
+        WorkoutPlan planA = createPlan(coachA);
+        CoachClientRelationship relB = connect(coachB, athlete);
+
+        mockMvc.perform(post("/api/v1/coach-client-relationships/{relationshipId}/assignments", relB.getId())
+                        .with(authenticatedAs(coachA))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"workoutPlanId\":" + planA.getId() + "}"))
+                .andExpect(status().isNotFound());
+    }
+
+    @Test
+    void assignWorkoutWithoutAuthenticationFailsWithUnauthorized() throws Exception {
+        mockMvc.perform(post("/api/v1/coach-client-relationships/{relationshipId}/assignments", 9999L)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"workoutPlanId\":1}"))
+                .andExpect(status().isUnauthorized());
+    }
+
     private WorkoutPlanAssignment createAssignment(User coach, CoachClientRelationship relationship, WorkoutPlan plan) {
         CreateWorkoutPlanAssignmentRequest request = new CreateWorkoutPlanAssignmentRequest();
         request.setWorkoutPlanId(plan.getId());
