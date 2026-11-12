@@ -395,10 +395,29 @@ public class GeminiApiClient {
         progressSchema.put("type", "OBJECT");
         progressSchema.put("properties", progressProperties);
 
+        Map<String, Object> profileProperties = new LinkedHashMap<>();
+        profileProperties.put("display_name", Map.of("type", "STRING", "description", "New user display name or full name"));
+        profileProperties.put("bio", Map.of("type", "STRING", "description", "New user bio or profile description"));
+        profileProperties.put("height_cm", Map.of("type", "NUMBER", "description", "Height in centimeters (e.g. 175.0)"));
+        profileProperties.put("weight_kg", Map.of("type", "NUMBER", "description", "Weight in kilograms (e.g. 76.0)"));
+        profileProperties.put("experience_level", Map.of("type", "STRING", "enum", List.of("BEGINNER", "INTERMEDIATE", "ADVANCED"), "description", "Experience level"));
+        profileProperties.put("training_experience", Map.of("type", "STRING", "description", "Training history or experience summary"));
+        profileProperties.put("primary_goals", Map.of("type", "STRING", "description", "Fitness goals (e.g. Straddle Planche, Muscle-up, Handstand)"));
+        profileProperties.put("training_interests", Map.of("type", "STRING", "description", "Preferred training style, focus areas, or interests"));
+        profileProperties.put("preferred_frequency", Map.of("type", "STRING", "description", "Preferred workout frequency (e.g. 3-4 days/week)"));
+        profileProperties.put("coaching_language", Map.of("type", "STRING", "description", "Preferred coaching language"));
+        profileProperties.put("gender", Map.of("type", "STRING", "enum", List.of("MALE", "FEMALE", "OTHER"), "description", "User gender"));
+        profileProperties.put("is_ambiguous", Map.of("type", "BOOLEAN", "description", "True if request is ambiguous and needs clarification"));
+        profileProperties.put("clarification_question", Map.of("type", "STRING", "description", "Clarification question when request is ambiguous"));
+
+        Map<String, Object> profileSchema = new LinkedHashMap<>();
+        profileSchema.put("type", "OBJECT");
+        profileSchema.put("properties", profileProperties);
+
         Map<String, Object> rootProperties = new LinkedHashMap<>();
         rootProperties.put("intent", Map.of(
                 "type", "STRING",
-                "enum", List.of("WORKOUT_PLAN", "PR_RECORD", "PROGRESS_ANALYSIS", "GENERAL_CHAT"),
+                "enum", List.of("WORKOUT_PLAN", "PR_RECORD", "PROGRESS_ANALYSIS", "PROFILE_UPDATE", "GENERAL_CHAT"),
                 "description", "Detected user intent"
         ));
         rootProperties.put("reply", Map.of(
@@ -408,6 +427,7 @@ public class GeminiApiClient {
         rootProperties.put("pr_action", prSchema);
         rootProperties.put("workout_plan_action", planSchema);
         rootProperties.put("progress_analysis_action", progressSchema);
+        rootProperties.put("profile_update_action", profileSchema);
 
         Map<String, Object> rootSchema = new LinkedHashMap<>();
         rootSchema.put("type", "OBJECT");

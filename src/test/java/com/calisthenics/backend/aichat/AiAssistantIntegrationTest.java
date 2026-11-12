@@ -5,6 +5,9 @@ import com.calisthenics.backend.aichat.dto.SendAiMessageRequest;
 import com.calisthenics.backend.aichat.entity.AiConversation;
 import com.calisthenics.backend.aichat.repository.AiConversationRepository;
 import com.calisthenics.backend.aichat.repository.AiMessageRepository;
+import com.calisthenics.backend.bodymetrics.entity.ClientBodyMeasurement;
+import com.calisthenics.backend.bodymetrics.repository.ClientBodyMeasurementRepository;
+import com.calisthenics.backend.profile.repository.ClientProfileRepository;
 import com.calisthenics.backend.security.JwtTokenProvider;
 import com.calisthenics.backend.security.UserPrincipal;
 import com.calisthenics.backend.user.Role;
@@ -49,6 +52,12 @@ public class AiAssistantIntegrationTest {
 
     @Autowired
     private AiMessageRepository aiMessageRepository;
+
+    @Autowired
+    private ClientProfileRepository clientProfileRepository;
+
+    @Autowired
+    private ClientBodyMeasurementRepository measurementRepository;
 
     @Autowired
     private JwtTokenProvider tokenProvider;
@@ -156,5 +165,25 @@ public class AiAssistantIntegrationTest {
 
         // Verify conversation was created in db
         assertThat(aiConversationRepository.findByUserIdOrderByUpdatedAtDesc(user1.getId())).hasSize(1);
+    }
+
+    @Test
+    @DisplayName("AI message updating profile persists real changes to database and returns PROFILE_UPDATED card")
+    void testProfileUpdateViaAiMessage_PersistsToDatabase() throws Exception {
+        // Send message requesting weight update
+        SendAiMessageRequest msgReq = new SendAiMessageRequest("Cập nhật cân nặng của tôi thành 76kg.", null);
+        mockMvc.perform(post("/api/v1/ai/conversations/messages")
+                        .header("Authorization", "Bearer " + token1)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(msgReq)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.role").value("assistant"))
+                .andExpect(jsonPath("$.intent").value("PROFILE_UPDATE"))
+                .andExpect(jsonPath("$.metadata").exists());
+
+        // Verify measurement is persisted in DB
+        java.util.Optional<ClientBodyMeasurement> measurementOpt = measurementRepository.findFirstByClientIdOrderByMeasuredAtDesc(user1.getId());
+        assertThat(measurementOpt).isPresent();
+        assertThat(measurementOpt.get().getWeightKg()).isEqualByComparingTo(java.math.BigDecimal.valueOf(76.0));
     }
 }

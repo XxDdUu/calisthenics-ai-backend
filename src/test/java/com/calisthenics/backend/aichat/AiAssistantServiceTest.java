@@ -15,8 +15,12 @@ import com.calisthenics.backend.analytics.model.PersonalRecord;
 import com.calisthenics.backend.analytics.model.PersonalRecordType;
 import com.calisthenics.backend.analytics.repository.PersonalRecordRepository;
 import com.calisthenics.backend.analytics.service.PersonalRecordService;
+import com.calisthenics.backend.bodymetrics.entity.ClientBodyMeasurement;
+import com.calisthenics.backend.bodymetrics.repository.ClientBodyMeasurementRepository;
 import com.calisthenics.backend.exercise.ExerciseRepository;
+import com.calisthenics.backend.profile.entity.ClientProfile;
 import com.calisthenics.backend.profile.repository.ClientProfileRepository;
+import com.calisthenics.backend.profile.repository.CoachProfileRepository;
 import com.calisthenics.backend.user.Role;
 import com.calisthenics.backend.user.User;
 import com.calisthenics.backend.user.UserRepository;
@@ -75,6 +79,12 @@ class AiAssistantServiceTest {
 
     @Mock
     private ExerciseRepository exerciseRepository;
+
+    @Mock
+    private ClientBodyMeasurementRepository measurementRepository;
+
+    @Mock
+    private CoachProfileRepository coachProfileRepository;
 
     @Spy
     private ObjectMapper objectMapper = new ObjectMapper();
@@ -313,5 +323,183 @@ class AiAssistantServiceTest {
         assertThat(response.getIntent()).isEqualTo("GENERAL_CHAT");
         assertThat(response.getContent()).contains("### Handstand Balance Cues");
         assertThat(response.getMetadata()).isNull();
+    }
+
+    @Test
+    @DisplayName("sendMessage executes PROFILE_UPDATE for weight with authentic DB persistence")
+    void testSendMessage_ProfileUpdate_ValidWeight_Success() {
+        when(aiConversationRepository.findByIdAndUserId(10L, 1L)).thenReturn(Optional.of(testConversation));
+        when(userRepository.findById(1L)).thenReturn(Optional.of(testUser));
+        ClientProfile profile = ClientProfile.builder().id(5L).user(testUser).experienceLevel("INTERMEDIATE").build();
+        when(clientProfileRepository.findByUserId(1L)).thenReturn(Optional.of(profile));
+        when(clientProfileRepository.save(any(ClientProfile.class))).thenAnswer(inv -> inv.getArgument(0));
+        when(personalRecordRepository.findByUserIdOrderByAchievedAtDesc(1L)).thenReturn(Collections.emptyList());
+        when(workoutSessionRepository.findByUserIdAndStatusOrderByWorkoutDateDesc(eq(1L), any())).thenReturn(Collections.emptyList());
+        when(aiMessageRepository.findTop15ByConversationIdOrderByCreatedAtDesc(10L)).thenReturn(new ArrayList<>());
+        when(coachProfileRepository.findByUserId(1L)).thenReturn(Optional.empty());
+
+        when(aiMessageRepository.save(any(AiMessage.class))).thenAnswer(inv -> {
+            AiMessage m = inv.getArgument(0);
+            m.setId(105L);
+            m.setCreatedAt(ZonedDateTime.now());
+            return m;
+        });
+
+        // Assistant outputs PROFILE_UPDATE
+        GeminiAssistantOutput geminiOut = GeminiAssistantOutput.builder()
+                .intent("PROFILE_UPDATE")
+                .profileUpdateAction(GeminiAssistantOutput.ProfileUpdateAction.builder()
+                        .weightKg(76.0)
+                        .isAmbiguous(false)
+                        .build())
+                .build();
+        when(geminiApiClient.callAssistant(anyString(), anyList())).thenReturn(Optional.of(geminiOut));
+
+        AiMessageResponse response = aiAssistantService.sendMessage(1L, 10L, new SendAiMessageRequest("Cập nhật cân nặng của tôi thành 76kg.", null));
+
+        assertThat(response).isNotNull();
+        assertThat(response.getIntent()).isEqualTo("PROFILE_UPDATE");
+        assertThat(response.getContent()).contains("76");
+        assertThat(response.getMetadata()).isNotNull();
+        assertThat(response.getMetadata()).contains("\"type\":\"PROFILE_UPDATED\"");
+        assertThat(response.getMetadata()).contains("\"success\":true");
+        assertThat(response.getMetadata()).contains("\"weightKg\":76.0");
+
+        // Verify body measurement was persisted
+        ArgumentCaptor<ClientBodyMeasurement> captor = ArgumentCaptor.forClass(ClientBodyMeasurement.class);
+        verify(measurementRepository).save(captor.capture());
+        assertThat(captor.getValue().getWeightKg()).isEqualByComparingTo(BigDecimal.valueOf(76.0));
+        assertThat(captor.getValue().getClient()).isEqualTo(testUser);
+    }
+
+    @Test
+    @DisplayName("sendMessage rejects invalid weight (< 20kg) and returns validation error")
+    void testSendMessage_ProfileUpdate_InvalidWeight_Rejection() {
+        when(aiConversationRepository.findByIdAndUserId(10L, 1L)).thenReturn(Optional.of(testConversation));
+        when(userRepository.findById(1L)).thenReturn(Optional.of(testUser));
+        when(clientProfileRepository.findByUserId(1L)).thenReturn(Optional.empty());
+        when(personalRecordRepository.findByUserIdOrderByAchievedAtDesc(1L)).thenReturn(Collections.emptyList());
+        when(workoutSessionRepository.findByUserIdAndStatusOrderByWorkoutDateDesc(eq(1L), any())).thenReturn(Collections.emptyList());
+        when(aiMessageRepository.findTop15ByConversationIdOrderByCreatedAtDesc(10L)).thenReturn(new ArrayList<>());
+
+        when(aiMessageRepository.save(any(AiMessage.class))).thenAnswer(inv -> {
+            AiMessage m = inv.getArgument(0);
+            m.setId(106L);
+            m.setCreatedAt(ZonedDateTime.now());
+            return m;
+        });
+
+        GeminiAssistantOutput geminiOut = GeminiAssistantOutput.builder()
+                .intent("PROFILE_UPDATE")
+                .profileUpdateAction(GeminiAssistantOutput.ProfileUpdateAction.builder()
+                        .weightKg(10.0) // Invalid!
+                        .isAmbiguous(false)
+                        .build())
+                .build();
+        when(geminiApiClient.callAssistant(anyString(), anyList())).thenReturn(Optional.of(geminiOut));
+
+        AiMessageResponse response = aiAssistantService.sendMessage(1L, 10L, new SendAiMessageRequest("Set weight to 10kg", null));
+
+        assertThat(response).isNotNull();
+        assertThat(response.getIntent()).isEqualTo("PROFILE_UPDATE");
+        assertThat(response.getMetadata()).contains("\"success\":false");
+        assertThat(response.getMetadata()).contains("INVALID_WEIGHT");
+        verify(measurementRepository, never()).save(any());
+    }
+
+    @Test
+    @DisplayName("sendMessage executes PROFILE_UPDATE for height and goals via rule-based fallback")
+    void testSendMessage_ProfileUpdate_FallbackHeuristics_Success() {
+        when(aiConversationRepository.findByIdAndUserId(10L, 1L)).thenReturn(Optional.of(testConversation));
+        when(userRepository.findById(1L)).thenReturn(Optional.of(testUser));
+        ClientProfile profile = ClientProfile.builder().id(5L).user(testUser).experienceLevel("INTERMEDIATE").build();
+        when(clientProfileRepository.findByUserId(1L)).thenReturn(Optional.of(profile));
+        when(clientProfileRepository.save(any(ClientProfile.class))).thenAnswer(inv -> inv.getArgument(0));
+        when(personalRecordRepository.findByUserIdOrderByAchievedAtDesc(1L)).thenReturn(Collections.emptyList());
+        when(workoutSessionRepository.findByUserIdAndStatusOrderByWorkoutDateDesc(eq(1L), any())).thenReturn(Collections.emptyList());
+        when(aiMessageRepository.findTop15ByConversationIdOrderByCreatedAtDesc(10L)).thenReturn(new ArrayList<>());
+        when(coachProfileRepository.findByUserId(1L)).thenReturn(Optional.empty());
+
+        when(aiMessageRepository.save(any(AiMessage.class))).thenAnswer(inv -> {
+            AiMessage m = inv.getArgument(0);
+            m.setId(107L);
+            m.setCreatedAt(ZonedDateTime.now());
+            return m;
+        });
+
+        // Gemini returns null -> triggers fallbackIntentEngine
+        when(geminiApiClient.callAssistant(anyString(), anyList())).thenReturn(Optional.empty());
+
+        AiMessageResponse response = aiAssistantService.sendMessage(1L, 10L, new SendAiMessageRequest("Đổi mục tiêu tập luyện thành Straddle Planche", null));
+
+        assertThat(response).isNotNull();
+        assertThat(response.getIntent()).isEqualTo("PROFILE_UPDATE");
+        assertThat(response.getContent()).contains("Straddle Planche");
+        assertThat(response.getMetadata()).contains("\"primaryGoals\":\"Straddle Planche\"");
+        assertThat(profile.getPrimaryGoals()).isEqualTo("Straddle Planche");
+    }
+
+    @Test
+    @DisplayName("sendMessage asks clarification for ambiguous profile update requests")
+    void testSendMessage_ProfileUpdate_AmbiguousRequest() {
+        when(aiConversationRepository.findByIdAndUserId(10L, 1L)).thenReturn(Optional.of(testConversation));
+        when(userRepository.findById(1L)).thenReturn(Optional.of(testUser));
+        when(clientProfileRepository.findByUserId(1L)).thenReturn(Optional.empty());
+        when(personalRecordRepository.findByUserIdOrderByAchievedAtDesc(1L)).thenReturn(Collections.emptyList());
+        when(workoutSessionRepository.findByUserIdAndStatusOrderByWorkoutDateDesc(eq(1L), any())).thenReturn(Collections.emptyList());
+        when(aiMessageRepository.findTop15ByConversationIdOrderByCreatedAtDesc(10L)).thenReturn(new ArrayList<>());
+
+        when(aiMessageRepository.save(any(AiMessage.class))).thenAnswer(inv -> {
+            AiMessage m = inv.getArgument(0);
+            m.setId(108L);
+            m.setCreatedAt(ZonedDateTime.now());
+            return m;
+        });
+
+        // Fallback for "cập nhật hồ sơ"
+        when(geminiApiClient.callAssistant(anyString(), anyList())).thenReturn(Optional.empty());
+
+        AiMessageResponse response = aiAssistantService.sendMessage(1L, 10L, new SendAiMessageRequest("Cập nhật hồ sơ", null));
+
+        assertThat(response).isNotNull();
+        assertThat(response.getIntent()).isEqualTo("PROFILE_UPDATE");
+        assertThat(response.getMetadata()).contains("\"isAmbiguous\":true");
+        verify(clientProfileRepository, never()).save(any());
+        verify(measurementRepository, never()).save(any());
+    }
+
+    @Test
+    @DisplayName("sendMessage handles DB exception gracefully without false success confirmation")
+    void testSendMessage_ProfileUpdate_DatabaseException_HandlesGracefully() {
+        when(aiConversationRepository.findByIdAndUserId(10L, 1L)).thenReturn(Optional.of(testConversation));
+        when(userRepository.findById(1L)).thenReturn(Optional.of(testUser));
+        when(clientProfileRepository.findByUserId(1L)).thenReturn(Optional.of(new ClientProfile()));
+        when(clientProfileRepository.save(any(ClientProfile.class))).thenThrow(new RuntimeException("DB Connection Failed"));
+        when(personalRecordRepository.findByUserIdOrderByAchievedAtDesc(1L)).thenReturn(Collections.emptyList());
+        when(workoutSessionRepository.findByUserIdAndStatusOrderByWorkoutDateDesc(eq(1L), any())).thenReturn(Collections.emptyList());
+        when(aiMessageRepository.findTop15ByConversationIdOrderByCreatedAtDesc(10L)).thenReturn(new ArrayList<>());
+
+        when(aiMessageRepository.save(any(AiMessage.class))).thenAnswer(inv -> {
+            AiMessage m = inv.getArgument(0);
+            m.setId(109L);
+            m.setCreatedAt(ZonedDateTime.now());
+            return m;
+        });
+
+        GeminiAssistantOutput geminiOut = GeminiAssistantOutput.builder()
+                .intent("PROFILE_UPDATE")
+                .profileUpdateAction(GeminiAssistantOutput.ProfileUpdateAction.builder()
+                        .displayName("Pro Athlete")
+                        .isAmbiguous(false)
+                        .build())
+                .build();
+        when(geminiApiClient.callAssistant(anyString(), anyList())).thenReturn(Optional.of(geminiOut));
+
+        AiMessageResponse response = aiAssistantService.sendMessage(1L, 10L, new SendAiMessageRequest("Change display name to Pro Athlete", null));
+
+        assertThat(response).isNotNull();
+        assertThat(response.getIntent()).isEqualTo("PROFILE_UPDATE");
+        assertThat(response.getContent()).contains("couldn't update your profile");
+        assertThat(response.getMetadata()).contains("\"success\":false");
     }
 }

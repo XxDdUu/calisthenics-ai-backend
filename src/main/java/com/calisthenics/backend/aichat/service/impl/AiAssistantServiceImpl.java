@@ -17,10 +17,14 @@ import com.calisthenics.backend.analytics.model.PersonalRecord;
 import com.calisthenics.backend.analytics.model.PersonalRecordType;
 import com.calisthenics.backend.analytics.repository.PersonalRecordRepository;
 import com.calisthenics.backend.analytics.service.PersonalRecordService;
+import com.calisthenics.backend.bodymetrics.entity.ClientBodyMeasurement;
+import com.calisthenics.backend.bodymetrics.repository.ClientBodyMeasurementRepository;
 import com.calisthenics.backend.exercise.Exercise;
 import com.calisthenics.backend.exercise.ExerciseRepository;
 import com.calisthenics.backend.profile.entity.ClientProfile;
 import com.calisthenics.backend.profile.repository.ClientProfileRepository;
+import com.calisthenics.backend.profile.repository.CoachProfileRepository;
+import com.calisthenics.backend.user.Gender;
 import com.calisthenics.backend.user.User;
 import com.calisthenics.backend.user.UserRepository;
 import com.calisthenics.backend.workout.WorkoutSession;
@@ -58,6 +62,8 @@ public class AiAssistantServiceImpl implements AiAssistantService {
     private final GeminiApiClient geminiApiClient;
     private final ExerciseRepository exerciseRepository;
     private final ObjectMapper objectMapper;
+    private final ClientBodyMeasurementRepository measurementRepository;
+    private final CoachProfileRepository coachProfileRepository;
 
     @Override
     @Transactional(readOnly = true)
@@ -187,6 +193,10 @@ public class AiAssistantServiceImpl implements AiAssistantService {
 
         // 2. Load User Profile Context & Memory
         Optional<ClientProfile> clientProfileOpt = clientProfileRepository.findByUserId(userId);
+        Double latestWeight = measurementRepository.findFirstByClientIdOrderByMeasuredAtDesc(userId)
+                .map(ClientBodyMeasurement::getWeightKg)
+                .map(BigDecimal::doubleValue)
+                .orElse(null);
         List<PersonalRecord> recentPrs = personalRecordRepository.findByUserIdOrderByAchievedAtDesc(userId);
         List<WorkoutSession> recentSessions = workoutSessionRepository.findByUserIdAndStatusOrderByWorkoutDateDesc(
                 userId, WorkoutSessionStatus.COMPLETED);
@@ -204,7 +214,7 @@ public class AiAssistantServiceImpl implements AiAssistantService {
                     .build());
         }
 
-        String systemPrompt = buildSystemPrompt(user, clientProfileOpt.orElse(null), recentPrs, recentSessions);
+        String systemPrompt = buildSystemPrompt(user, clientProfileOpt.orElse(null), latestWeight, recentPrs, recentSessions);
 
         // 4. Call Gemini Structured Intent Classifier & Assistant
         GeminiAssistantOutput assistantOutput = null;
@@ -242,10 +252,16 @@ public class AiAssistantServiceImpl implements AiAssistantService {
                 replyContent = progressResult.replyOverride;
             }
             actionMetadataJson = progressResult.metadataJson;
+        } else if ("PROFILE_UPDATE".equalsIgnoreCase(detectedIntent)) {
+            ActionResult profileResult = executeProfileUpdateAction(userId, userContent, assistantOutput.getProfileUpdateAction());
+            if (profileResult.replyOverride != null) {
+                replyContent = profileResult.replyOverride;
+            }
+            actionMetadataJson = profileResult.metadataJson;
         }
 
         if (replyContent == null || replyContent.isBlank()) {
-            replyContent = "I'm your Calisthenics AI Assistant. Let me know if you want to create a workout plan, record a personal record, or analyze your training progress!";
+            replyContent = "I'm your Calisthenics AI Assistant. Let me know if you want to create a workout plan, record a personal record, update your profile, or analyze your training progress!";
         }
 
         // 7. Save Assistant Message
@@ -274,6 +290,7 @@ public class AiAssistantServiceImpl implements AiAssistantService {
     private String buildSystemPrompt(
             User user,
             ClientProfile profile,
+            Double latestWeight,
             List<PersonalRecord> recentPrs,
             List<WorkoutSession> recentSessions
     ) {
@@ -285,10 +302,17 @@ public class AiAssistantServiceImpl implements AiAssistantService {
             sb.append("- Gender: ").append(user.getGender()).append("\n");
         }
         if (profile != null) {
+            if (profile.getDisplayName() != null) sb.append("- Display Name: ").append(profile.getDisplayName()).append("\n");
+            if (profile.getBio() != null) sb.append("- Bio: ").append(profile.getBio()).append("\n");
+            if (profile.getHeightCm() != null) sb.append("- Height: ").append(profile.getHeightCm()).append(" cm\n");
             if (profile.getExperienceLevel() != null) sb.append("- Experience Level: ").append(profile.getExperienceLevel()).append("\n");
             if (profile.getPrimaryGoals() != null) sb.append("- Primary Goals: ").append(profile.getPrimaryGoals()).append("\n");
             if (profile.getTrainingInterests() != null) sb.append("- Training Interests: ").append(profile.getTrainingInterests()).append("\n");
             if (profile.getPreferredFrequency() != null) sb.append("- Preferred Frequency: ").append(profile.getPreferredFrequency()).append("\n");
+            if (profile.getCoachingLanguage() != null) sb.append("- Coaching Language: ").append(profile.getCoachingLanguage()).append("\n");
+        }
+        if (latestWeight != null) {
+            sb.append("- Current Weight: ").append(latestWeight).append(" kg\n");
         }
 
         sb.append("\nUser Calisthenics History & Memory:\n");
@@ -312,7 +336,11 @@ public class AiAssistantServiceImpl implements AiAssistantService {
         sb.append("   - Populate 'workout_plan_action' with prompt, fitness_level, and duration_weeks.\n");
         sb.append("3. 'PROGRESS_ANALYSIS': The user asks about their progress, plateaus, improvements, or training trends (e.g., 'How is my pull up progress?', 'Am I plateauing on dips?').\n");
         sb.append("   - Populate 'progress_analysis_action'. Provide data-backed insights.\n");
-        sb.append("4. 'GENERAL_CHAT': Form tips, exercise breakdowns, mobility advice, recovery, or motivation.\n");
+        sb.append("4. 'PROFILE_UPDATE': The user requests to update their personal/athlete profile details (e.g. 'Cập nhật cân nặng của tôi thành 76kg', 'Đổi mục tiêu tập luyện thành Straddle Planche', 'My height is 178 cm', 'Update my bio to Calisthenics athlete', 'Change display name to Alex').\n");
+        sb.append("   - Supported editable fields: display_name, full_name, bio, height_cm, weight_kg, experience_level, training_experience, primary_goals, training_interests, preferred_frequency, coaching_language, gender.\n");
+        sb.append("   - If unambiguous and has specific field and value, set 'is_ambiguous=false' and populate 'profile_update_action'.\n");
+        sb.append("   - If ambiguous or missing specific values (e.g. 'update my profile' without specifying what), set 'is_ambiguous=true' and ask what they want to change in 'clarification_question'.\n");
+        sb.append("5. 'GENERAL_CHAT': Form tips, exercise breakdowns, mobility advice, recovery, or motivation.\n");
         sb.append("   - Provide structured, rich Markdown responses (headers, bold, bullet points).\n");
         return sb.toString();
     }
@@ -485,10 +513,330 @@ public class AiAssistantServiceImpl implements AiAssistantService {
         }
     }
 
+    private ActionResult executeProfileUpdateAction(
+            Long userId,
+            String userMessage,
+            GeminiAssistantOutput.ProfileUpdateAction action
+    ) {
+        boolean isVn = isVietnamese(userMessage);
+
+        if (action == null) {
+            String reply = isVn
+                    ? "Tôi chưa nhận diện được thông tin cần cập nhật. Bạn muốn đổi cân nặng, chiều cao, mục tiêu tập luyện hay thông tin nào khác?"
+                    : "I couldn't identify what you'd like to update. Would you like to update your weight, height, training goals, or something else?";
+            return new ActionResult(reply, null);
+        }
+
+        if (Boolean.TRUE.equals(action.getIsAmbiguous())) {
+            String question = action.getClarificationQuestion();
+            if (question == null || question.isBlank()) {
+                question = isVn
+                        ? "Bạn muốn cập nhật thông tin nào trong hồ sơ của mình (ví dụ: cân nặng, chiều cao, mục tiêu tập luyện, trình độ...) và giá trị mới là gì?"
+                        : "Which profile detail would you like to update (e.g., weight, height, training goals, experience level...) and what is the new value?";
+            }
+            Map<String, Object> cardData = new LinkedHashMap<>();
+            cardData.put("type", "PROFILE_UPDATED");
+            cardData.put("actionType", "PROFILE_UPDATE");
+            cardData.put("success", false);
+            cardData.put("isAmbiguous", true);
+            return new ActionResult(question, safeToJson(cardData));
+        }
+
+        // Validate weight range (20kg to 500kg)
+        if (action.getWeightKg() != null) {
+            double w = action.getWeightKg();
+            if (w < 20.0 || w > 500.0) {
+                String reply = isVn
+                        ? String.format("Cân nặng không hợp lệ (%.1f kg). Vui lòng cung cấp cân nặng thực tế trong khoảng từ 20 kg đến 500 kg.", w)
+                        : String.format("Invalid weight (%.1f kg). Please enter a realistic weight between 20 kg and 500 kg.", w);
+                Map<String, Object> cardData = new LinkedHashMap<>();
+                cardData.put("type", "PROFILE_UPDATED");
+                cardData.put("actionType", "PROFILE_UPDATE");
+                cardData.put("success", false);
+                cardData.put("error", "INVALID_WEIGHT");
+                return new ActionResult(reply, safeToJson(cardData));
+            }
+        }
+
+        // Validate height range (50cm to 300cm)
+        if (action.getHeightCm() != null) {
+            double h = action.getHeightCm();
+            if (h < 50.0 || h > 300.0) {
+                String reply = isVn
+                        ? String.format("Chiều cao không hợp lệ (%.1f cm). Vui lòng cung cấp chiều cao thực tế trong khoảng từ 50 cm đến 300 cm.", h)
+                        : String.format("Invalid height (%.1f cm). Please enter a realistic height between 50 cm and 300 cm.", h);
+                Map<String, Object> cardData = new LinkedHashMap<>();
+                cardData.put("type", "PROFILE_UPDATED");
+                cardData.put("actionType", "PROFILE_UPDATE");
+                cardData.put("success", false);
+                cardData.put("error", "INVALID_HEIGHT");
+                return new ActionResult(reply, safeToJson(cardData));
+            }
+        }
+
+        // Check if at least one editable field is present
+        boolean hasAnyField = action.getWeightKg() != null
+                || action.getHeightCm() != null
+                || (action.getDisplayName() != null && !action.getDisplayName().isBlank())
+                || (action.getFullName() != null && !action.getFullName().isBlank())
+                || (action.getBio() != null && !action.getBio().isBlank())
+                || (action.getPrimaryGoals() != null && !action.getPrimaryGoals().isBlank())
+                || (action.getExperienceLevel() != null && !action.getExperienceLevel().isBlank())
+                || (action.getTrainingExperience() != null && !action.getTrainingExperience().isBlank())
+                || (action.getTrainingInterests() != null && !action.getTrainingInterests().isBlank())
+                || (action.getPreferredFrequency() != null && !action.getPreferredFrequency().isBlank())
+                || (action.getCoachingLanguage() != null && !action.getCoachingLanguage().isBlank())
+                || (action.getGender() != null && !action.getGender().isBlank());
+
+        if (!hasAnyField) {
+            String reply = isVn
+                    ? "Bạn muốn cập nhật thông tin nào trong hồ sơ của mình (cân nặng, chiều cao, mục tiêu tập luyện...)? Hãy nói rõ để tôi hỗ trợ nhé!"
+                    : "Which profile detail would you like to update (weight, height, goals...)? Please let me know!";
+            return new ActionResult(reply, null);
+        }
+
+        try {
+            User user = userRepository.findById(userId)
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
+
+            ClientProfile profile = clientProfileRepository.findByUserId(userId)
+                    .orElseGet(() -> ClientProfile.builder()
+                            .user(user)
+                            .experienceLevel(user.getExperienceLevel())
+                            .build());
+
+            Map<String, Object> updatedFields = new LinkedHashMap<>();
+
+            if (action.getDisplayName() != null && !action.getDisplayName().isBlank()) {
+                profile.setDisplayName(action.getDisplayName().trim());
+                updatedFields.put("displayName", profile.getDisplayName());
+            }
+
+            if (action.getFullName() != null && !action.getFullName().isBlank()) {
+                user.setFullName(action.getFullName().trim());
+                if (action.getDisplayName() == null) {
+                    profile.setDisplayName(action.getFullName().trim());
+                }
+                updatedFields.put("fullName", user.getFullName());
+            }
+
+            if (action.getBio() != null) {
+                profile.setBio(action.getBio().trim());
+                updatedFields.put("bio", profile.getBio());
+            }
+
+            if (action.getHeightCm() != null) {
+                profile.setHeightCm(BigDecimal.valueOf(action.getHeightCm()));
+                updatedFields.put("heightCm", action.getHeightCm());
+            }
+
+            if (action.getExperienceLevel() != null && !action.getExperienceLevel().isBlank()) {
+                String exp = action.getExperienceLevel().trim().toUpperCase();
+                profile.setExperienceLevel(exp);
+                user.setExperienceLevel(exp);
+                updatedFields.put("experienceLevel", exp);
+            }
+
+            if (action.getTrainingExperience() != null) {
+                profile.setTrainingExperience(action.getTrainingExperience().trim());
+                updatedFields.put("trainingExperience", profile.getTrainingExperience());
+            }
+
+            if (action.getPrimaryGoals() != null) {
+                profile.setPrimaryGoals(action.getPrimaryGoals().trim());
+                updatedFields.put("primaryGoals", profile.getPrimaryGoals());
+            }
+
+            if (action.getTrainingInterests() != null) {
+                profile.setTrainingInterests(action.getTrainingInterests().trim());
+                updatedFields.put("trainingInterests", profile.getTrainingInterests());
+            }
+
+            if (action.getPreferredFrequency() != null) {
+                profile.setPreferredFrequency(action.getPreferredFrequency().trim());
+                updatedFields.put("preferredFrequency", profile.getPreferredFrequency());
+            }
+
+            if (action.getCoachingLanguage() != null) {
+                profile.setCoachingLanguage(action.getCoachingLanguage().trim());
+                updatedFields.put("coachingLanguage", profile.getCoachingLanguage());
+            }
+
+            if (action.getGender() != null && !action.getGender().isBlank()) {
+                try {
+                    Gender g = Gender.valueOf(action.getGender().trim().toUpperCase());
+                    user.setGender(g);
+                    updatedFields.put("gender", g.name());
+                } catch (IllegalArgumentException ignored) {}
+            }
+
+            userRepository.save(user);
+            clientProfileRepository.save(profile);
+
+            if (action.getWeightKg() != null) {
+                measurementRepository.save(ClientBodyMeasurement.builder()
+                        .client(user)
+                        .weightKg(BigDecimal.valueOf(action.getWeightKg()))
+                        .measuredAt(ZonedDateTime.now())
+                        .build());
+                updatedFields.put("weightKg", action.getWeightKg());
+            }
+
+            // Sync CoachProfile if exists
+            coachProfileRepository.findByUserId(userId).ifPresent(cp -> {
+                if (updatedFields.containsKey("displayName")) {
+                    cp.setDisplayName((String) updatedFields.get("displayName"));
+                }
+                if (updatedFields.containsKey("bio")) {
+                    cp.setBio((String) updatedFields.get("bio"));
+                }
+                coachProfileRepository.save(cp);
+            });
+
+            Double currentWeight = measurementRepository.findFirstByClientIdOrderByMeasuredAtDesc(userId)
+                    .map(ClientBodyMeasurement::getWeightKg)
+                    .map(BigDecimal::doubleValue)
+                    .orElse(null);
+
+            Map<String, Object> currentProfile = new LinkedHashMap<>();
+            currentProfile.put("userId", userId);
+            currentProfile.put("fullName", user.getFullName());
+            currentProfile.put("displayName", profile.getDisplayName() != null ? profile.getDisplayName() : user.getFullName());
+            currentProfile.put("bio", profile.getBio());
+            currentProfile.put("experienceLevel", profile.getExperienceLevel());
+            currentProfile.put("primaryGoals", profile.getPrimaryGoals());
+            currentProfile.put("trainingInterests", profile.getTrainingInterests());
+            currentProfile.put("preferredFrequency", profile.getPreferredFrequency());
+            currentProfile.put("coachingLanguage", profile.getCoachingLanguage());
+            currentProfile.put("gender", user.getGender() != null ? user.getGender().name() : null);
+            currentProfile.put("heightCm", profile.getHeightCm() != null ? profile.getHeightCm().doubleValue() : null);
+            currentProfile.put("weightKg", currentWeight);
+
+            Map<String, Object> cardData = new LinkedHashMap<>();
+            cardData.put("type", "PROFILE_UPDATED");
+            cardData.put("actionType", "PROFILE_UPDATE");
+            cardData.put("success", true);
+            cardData.put("updatedFields", updatedFields);
+            cardData.put("currentProfile", currentProfile);
+
+            String metadataJson = safeToJson(cardData);
+
+            // Construct truthful localized reply
+            StringBuilder replySb = new StringBuilder();
+            if (isVn) {
+                replySb.append("✅ **Cập nhật hồ sơ thành công!**\n\nTôi đã lưu các thông tin mới vào hồ sơ của bạn:\n");
+                if (updatedFields.containsKey("weightKg")) {
+                    replySb.append(String.format("- **Cân nặng**: %.1f kg\n", (Double) updatedFields.get("weightKg")));
+                }
+                if (updatedFields.containsKey("heightCm")) {
+                    replySb.append(String.format("- **Chiều cao**: %.1f cm\n", (Double) updatedFields.get("heightCm")));
+                }
+                if (updatedFields.containsKey("primaryGoals")) {
+                    replySb.append(String.format("- **Mục tiêu tập luyện**: %s\n", updatedFields.get("primaryGoals")));
+                }
+                if (updatedFields.containsKey("experienceLevel")) {
+                    replySb.append(String.format("- **Trình độ**: %s\n", updatedFields.get("experienceLevel")));
+                }
+                if (updatedFields.containsKey("displayName")) {
+                    replySb.append(String.format("- **Tên hiển thị**: %s\n", updatedFields.get("displayName")));
+                }
+                if (updatedFields.containsKey("fullName")) {
+                    replySb.append(String.format("- **Họ và tên**: %s\n", updatedFields.get("fullName")));
+                }
+                if (updatedFields.containsKey("bio")) {
+                    replySb.append(String.format("- **Tiểu sử**: %s\n", updatedFields.get("bio")));
+                }
+                if (updatedFields.containsKey("trainingInterests")) {
+                    replySb.append(String.format("- **Sở thích tập luyện**: %s\n", updatedFields.get("trainingInterests")));
+                }
+                replySb.append("\nThông tin đã được đồng bộ tự động trên toàn bộ ứng dụng!");
+            } else {
+                replySb.append("✅ **Profile Updated Successfully!**\n\nI've saved the following changes to your profile:\n");
+                if (updatedFields.containsKey("weightKg")) {
+                    replySb.append(String.format("- **Weight**: %.1f kg\n", (Double) updatedFields.get("weightKg")));
+                }
+                if (updatedFields.containsKey("heightCm")) {
+                    replySb.append(String.format("- **Height**: %.1f cm\n", (Double) updatedFields.get("heightCm")));
+                }
+                if (updatedFields.containsKey("primaryGoals")) {
+                    replySb.append(String.format("- **Primary Goals**: %s\n", updatedFields.get("primaryGoals")));
+                }
+                if (updatedFields.containsKey("experienceLevel")) {
+                    replySb.append(String.format("- **Experience Level**: %s\n", updatedFields.get("experienceLevel")));
+                }
+                if (updatedFields.containsKey("displayName")) {
+                    replySb.append(String.format("- **Display Name**: %s\n", updatedFields.get("displayName")));
+                }
+                if (updatedFields.containsKey("fullName")) {
+                    replySb.append(String.format("- **Full Name**: %s\n", updatedFields.get("fullName")));
+                }
+                if (updatedFields.containsKey("bio")) {
+                    replySb.append(String.format("- **Bio**: %s\n", updatedFields.get("bio")));
+                }
+                if (updatedFields.containsKey("trainingInterests")) {
+                    replySb.append(String.format("- **Interests**: %s\n", updatedFields.get("trainingInterests")));
+                }
+                replySb.append("\nYour profile details have been synchronized across the application!");
+            }
+
+            return new ActionResult(replySb.toString(), metadataJson);
+        } catch (Exception ex) {
+            log.error("Failed to update profile via AI assistant for userId={}: {}", userId, ex.getMessage(), ex);
+            String failReply = isVn
+                    ? "Tôi chưa thể cập nhật hồ sơ do máy chủ gặp lỗi. Thông tin hiện tại vẫn được giữ nguyên. Vui lòng thử lại sau."
+                    : "I couldn't update your profile due to a server error. Your current profile remains unchanged. Please try again later.";
+            Map<String, Object> cardData = new LinkedHashMap<>();
+            cardData.put("type", "PROFILE_UPDATED");
+            cardData.put("actionType", "PROFILE_UPDATE");
+            cardData.put("success", false);
+            cardData.put("error", ex.getMessage());
+            return new ActionResult(failReply, safeToJson(cardData));
+        }
+    }
+
     private GeminiAssistantOutput fallbackIntentEngine(String userMessage, List<PersonalRecord> recentPrs) {
         String lower = userMessage.toLowerCase();
 
-        // 1. PR Record Pattern Check
+        // 1. Profile Update Pattern Checks (Vietnamese & English)
+        Double extractedWeight = extractWeight(userMessage);
+        Double extractedHeight = extractHeight(userMessage);
+        String extractedGoal = extractGoal(userMessage);
+        String extractedExp = extractExperienceLevel(userMessage);
+        String extractedDisplayName = extractDisplayName(userMessage);
+        String extractedBio = extractBio(userMessage);
+
+        boolean isProfileUpdateKeyword = lower.contains("cập nhật hồ sơ") || lower.contains("update profile")
+                || lower.contains("đổi hồ sơ") || lower.contains("change profile")
+                || lower.contains("cân nặng") || lower.contains("chiều cao")
+                || lower.contains("weight") || lower.contains("height")
+                || lower.contains("mục tiêu tập luyện") || lower.contains("đổi mục tiêu");
+
+        if (extractedWeight != null || extractedHeight != null || extractedGoal != null
+                || extractedExp != null || extractedDisplayName != null || extractedBio != null
+                || isProfileUpdateKeyword) {
+
+            boolean isAmbiguous = (extractedWeight == null && extractedHeight == null
+                    && extractedGoal == null && extractedExp == null
+                    && extractedDisplayName == null && extractedBio == null);
+
+            return GeminiAssistantOutput.builder()
+                    .intent("PROFILE_UPDATE")
+                    .reply(isAmbiguous ? (isVietnamese(userMessage)
+                            ? "Bạn muốn cập nhật thông tin nào trong hồ sơ cá nhân?"
+                            : "Which profile detail would you like to update?") : null)
+                    .profileUpdateAction(GeminiAssistantOutput.ProfileUpdateAction.builder()
+                            .weightKg(extractedWeight)
+                            .heightCm(extractedHeight)
+                            .primaryGoals(extractedGoal)
+                            .experienceLevel(extractedExp)
+                            .displayName(extractedDisplayName)
+                            .bio(extractedBio)
+                            .isAmbiguous(isAmbiguous)
+                            .build())
+                    .build();
+        }
+
+        // 2. PR Record Pattern Check
         Pattern prPattern = Pattern.compile("(?i)(pr|personal record|hit|did|recorded|logged)\\s+([a-zA-Z\\s]+?)\\s+(\\d+(\\.\\d+)?)\\s*(reps|rep|kg|lbs|s|sec|seconds)?");
         Matcher prMatcher = prPattern.matcher(userMessage);
         if (prMatcher.find() || lower.contains("new pr") || lower.contains("record pr")) {
@@ -529,7 +877,7 @@ public class AiAssistantServiceImpl implements AiAssistantService {
                     .build();
         }
 
-        // 2. Workout Plan Pattern Check
+        // 3. Workout Plan Pattern Check
         if (lower.contains("plan") || lower.contains("routine") || lower.contains("split") || lower.contains("schedule")) {
             return GeminiAssistantOutput.builder()
                     .intent("WORKOUT_PLAN")
@@ -542,7 +890,7 @@ public class AiAssistantServiceImpl implements AiAssistantService {
                     .build();
         }
 
-        // 3. Progress Analysis Check
+        // 4. Progress Analysis Check
         if (lower.contains("progress") || lower.contains("plateau") || lower.contains("analyze") || lower.contains("history")) {
             return GeminiAssistantOutput.builder()
                     .intent("PROGRESS_ANALYSIS")
@@ -553,7 +901,7 @@ public class AiAssistantServiceImpl implements AiAssistantService {
                     .build();
         }
 
-        // 4. General Calisthenics Coaching Chat
+        // 5. General Calisthenics Coaching Chat
         return GeminiAssistantOutput.builder()
                 .intent("GENERAL_CHAT")
                 .reply("### 💪 Calisthenics Coaching Insights\n\n"
@@ -563,6 +911,125 @@ public class AiAssistantServiceImpl implements AiAssistantService {
                         + "- **Recovery**: Tendons adapt slower than muscles. Ensure adequate rest between heavy pulling and pushing days.\n\n"
                         + "What specific movement or skill are you focusing on today?")
                 .build();
+    }
+
+    private Double extractWeight(String message) {
+        Pattern p1 = Pattern.compile("(?i)(?:cân\\s*nặng|nặng|weight)(?:\\s+(?:của\\s+tôi|là|thành|to|is|:))?\\s*(\\d+(?:\\.\\d+)?)\\s*(?:kg|kilos|kilograms)?");
+        Matcher m1 = p1.matcher(message);
+        if (m1.find()) {
+            try {
+                return Double.parseDouble(m1.group(1));
+            } catch (Exception ignored) {}
+        }
+
+        Pattern p2 = Pattern.compile("(?i)(?:set|update|change)\\s+weight\\s+(?:to\\s+)?(\\d+(?:\\.\\d+)?)");
+        Matcher m2 = p2.matcher(message);
+        if (m2.find()) {
+            try {
+                return Double.parseDouble(m2.group(1));
+            } catch (Exception ignored) {}
+        }
+
+        if (message.toLowerCase().contains("cân") || message.toLowerCase().contains("weight")) {
+            Pattern p3 = Pattern.compile("(?i)(\\d+(?:\\.\\d+)?)\\s*(?:kg|kilos|kilograms)");
+            Matcher m3 = p3.matcher(message);
+            if (m3.find()) {
+                try {
+                    return Double.parseDouble(m3.group(1));
+                } catch (Exception ignored) {}
+            }
+        }
+        return null;
+    }
+
+    private Double extractHeight(String message) {
+        Pattern p1 = Pattern.compile("(?i)(?:chiều\\s*cao|cao|height)(?:\\s+(?:của\\s+tôi|là|thành|to|is|:))?\\s*(\\d+(?:\\.\\d+)?)\\s*(cm|centimeters|m)?");
+        Matcher m1 = p1.matcher(message);
+        if (m1.find()) {
+            try {
+                double val = Double.parseDouble(m1.group(1));
+                String unit = m1.group(2);
+                if ("m".equalsIgnoreCase(unit) && val < 3.0) {
+                    val = val * 100.0;
+                }
+                return val;
+            } catch (Exception ignored) {}
+        }
+
+        Pattern p2 = Pattern.compile("(?i)(?:set|update|change)\\s+height\\s+(?:to\\s+)?(\\d+(?:\\.\\d+)?)");
+        Matcher m2 = p2.matcher(message);
+        if (m2.find()) {
+            try {
+                return Double.parseDouble(m2.group(1));
+            } catch (Exception ignored) {}
+        }
+
+        if (message.toLowerCase().contains("cao") || message.toLowerCase().contains("height")) {
+            Pattern p3 = Pattern.compile("(?i)(\\d+(?:\\.\\d+)?)\\s*(?:cm|centimeters)");
+            Matcher m3 = p3.matcher(message);
+            if (m3.find()) {
+                try {
+                    return Double.parseDouble(m3.group(1));
+                } catch (Exception ignored) {}
+            }
+        }
+        return null;
+    }
+
+    private String extractGoal(String message) {
+        Pattern p = Pattern.compile("(?i)(?:mục\\s*tiêu\\s*(?:tập\\s*luyện)?|primary\\s*goals?|goals?)\\s*(?:thành|của\\s+tôi\\s+là|là|to|is|:)\\s*([^,.!?\\n]+)");
+        Matcher m = p.matcher(message);
+        if (m.find()) {
+            String g = m.group(1).trim();
+            if (!g.isBlank()) return g;
+        }
+        return null;
+    }
+
+    private String extractExperienceLevel(String message) {
+        Pattern p = Pattern.compile("(?i)(?:trình\\s*độ|cấp\\s*độ|experience\\s*level|fitness\\s*level)\\s*(?:thành|là|to|is|:)?\\s*(BEGINNER|INTERMEDIATE|ADVANCED|ELITE)");
+        Matcher m = p.matcher(message);
+        if (m.find()) {
+            return m.group(1).trim().toUpperCase();
+        }
+        return null;
+    }
+
+    private String extractDisplayName(String message) {
+        Pattern p = Pattern.compile("(?i)(?:tên\\s*hiển\\s*thị|display\\s*name|đổi\\s*tên\\s*thành|change\\s*name\\s*to)\\s*(?:thành|là|to|is|:)?\\s*([^,.!?\\n]+)");
+        Matcher m = p.matcher(message);
+        if (m.find()) {
+            String n = m.group(1).trim();
+            if (!n.isBlank()) return n;
+        }
+        return null;
+    }
+
+    private String extractBio(String message) {
+        Pattern p = Pattern.compile("(?i)(?:tiểu\\s*sử|bio|description)\\s*(?:thành|là|to|is|:)?\\s*([^.!?\\n]+)");
+        Matcher m = p.matcher(message);
+        if (m.find()) {
+            String b = m.group(1).trim();
+            if (!b.isBlank()) return b;
+        }
+        return null;
+    }
+
+    private boolean isVietnamese(String text) {
+        if (text == null) return false;
+        String lower = text.toLowerCase();
+        return lower.contains("cập nhật") || lower.contains("hồ sơ") || lower.contains("cân nặng")
+                || lower.contains("chiều cao") || lower.contains("mục tiêu") || lower.contains("tập luyện")
+                || lower.contains("của tôi") || lower.contains("thành") || lower.contains("đổi")
+                || lower.contains("xin chào") || lower.contains("trình độ") || lower.contains("bạn");
+    }
+
+    private String safeToJson(Object obj) {
+        try {
+            return objectMapper.writeValueAsString(obj);
+        } catch (JsonProcessingException e) {
+            return null;
+        }
     }
 
     private PersonalRecordType inferRecordType(String unit) {
@@ -583,6 +1050,7 @@ public class AiAssistantServiceImpl implements AiAssistantService {
                 case "PR_RECORD" -> "PR Record Log";
                 case "WORKOUT_PLAN" -> "Workout Plan Session";
                 case "PROGRESS_ANALYSIS" -> "Progress Analysis";
+                case "PROFILE_UPDATE" -> "Profile Update";
                 default -> "Calisthenics Coaching";
             };
         }

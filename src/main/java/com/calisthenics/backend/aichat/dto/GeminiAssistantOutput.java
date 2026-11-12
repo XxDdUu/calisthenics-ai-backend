@@ -42,6 +42,60 @@ public class GeminiAssistantOutput {
     @JsonProperty("progress_analysis_action")
     private ProgressAnalysisAction progressAnalysisAction;
 
+    /**
+     * Details when user is requesting to update their profile or body metrics
+     */
+    @JsonProperty("profile_update_action")
+    private ProfileUpdateAction profileUpdateAction;
+
+    @Data
+    @Builder
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class ProfileUpdateAction {
+        @JsonProperty("display_name")
+        private String displayName;
+
+        @JsonProperty("full_name")
+        private String fullName;
+
+        @JsonProperty("bio")
+        private String bio;
+
+        @JsonProperty("height_cm")
+        private Double heightCm;
+
+        @JsonProperty("weight_kg")
+        private Double weightKg;
+
+        @JsonProperty("experience_level")
+        private String experienceLevel;
+
+        @JsonProperty("training_experience")
+        private String trainingExperience;
+
+        @JsonProperty("primary_goals")
+        private String primaryGoals;
+
+        @JsonProperty("training_interests")
+        private String trainingInterests;
+
+        @JsonProperty("preferred_frequency")
+        private String preferredFrequency;
+
+        @JsonProperty("coaching_language")
+        private String coachingLanguage;
+
+        @JsonProperty("gender")
+        private String gender;
+
+        @JsonProperty("is_ambiguous")
+        private Boolean isAmbiguous;
+
+        @JsonProperty("clarification_question")
+        private String clarificationQuestion;
+    }
+
     @Data
     @Builder
     @NoArgsConstructor
