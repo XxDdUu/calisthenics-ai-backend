@@ -1,5 +1,6 @@
 package com.calisthenics.backend.chat.dto.response;
 
+import com.calisthenics.backend.analytics.dto.SharedPersonalRecordResponse;
 import com.calisthenics.backend.chat.type.ChatMessageType;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -23,5 +24,6 @@ public class ChatMessageResponse {
     private String content;
     private ChatMessageType messageType;
     private String clientMessageId;
+    private SharedPersonalRecordResponse sharedPersonalRecord;
     private ZonedDateTime createdAt;
 }

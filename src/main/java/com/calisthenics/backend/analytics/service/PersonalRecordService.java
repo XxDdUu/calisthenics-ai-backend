@@ -9,6 +9,12 @@ import com.calisthenics.backend.analytics.model.PersonalRecordType;
 import com.calisthenics.backend.analytics.model.SharedPersonalRecord;
 import com.calisthenics.backend.analytics.repository.PersonalRecordRepository;
 import com.calisthenics.backend.analytics.repository.SharedPersonalRecordRepository;
+import com.calisthenics.backend.chat.dto.response.ChatMessageResponse;
+import com.calisthenics.backend.chat.entity.ChatConversation;
+import com.calisthenics.backend.chat.entity.ChatMessage;
+import com.calisthenics.backend.chat.repository.ChatConversationRepository;
+import com.calisthenics.backend.chat.repository.ChatMessageRepository;
+import com.calisthenics.backend.chat.type.ChatMessageType;
 import com.calisthenics.backend.coachclient.entity.CoachClientRelationship;
 import com.calisthenics.backend.coachclient.repository.CoachClientRelationshipRepository;
 import com.calisthenics.backend.coachclient.type.CoachClientRelationshipStatus;
@@ -22,9 +28,13 @@ import com.calisthenics.backend.workout.WorkoutSession;
 import com.calisthenics.backend.workout.WorkoutSessionExercise;
 import com.calisthenics.backend.workout.WorkoutSessionSet;
 import com.calisthenics.backend.workout.WorkoutSessionStatus;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
+import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
@@ -45,6 +55,18 @@ public class PersonalRecordService {
     private final ExerciseRepository exerciseRepository;
     private final UserRepository userRepository;
     private final NotificationService notificationService;
+
+    @Autowired(required = false)
+    private ChatConversationRepository chatConversationRepository;
+
+    @Autowired(required = false)
+    private ChatMessageRepository chatMessageRepository;
+
+    @Autowired(required = false)
+    private SimpMessagingTemplate messagingTemplate;
+
+    @Autowired(required = false)
+    private ObjectMapper objectMapper;
 
     @Transactional
     public PersonalRecordResponse createPR(Long userId, CreatePersonalRecordRequest request) {
@@ -473,6 +495,15 @@ public class PersonalRecordService {
 
     @Transactional
     public List<SharedPersonalRecordResponse> sharePRsWithCoach(Long clientId, List<Long> prIds) {
+        return sharePRsWithCoach(clientId, prIds, null, null);
+    }
+
+    @Transactional
+    public List<SharedPersonalRecordResponse> sharePRsWithCoach(
+            Long clientId,
+            List<Long> prIds,
+            Long recipientId,
+            String clientMessageId) {
         if (clientId == null) {
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Authentication required");
         }
@@ -491,57 +522,91 @@ public class PersonalRecordService {
             prsToShare.add(pr);
         }
 
-        CoachClientRelationship activeRelationship = coachClientRelationshipRepository
-                .findFirstByClientIdAndStatusOrderByUpdatedAtDesc(clientId, CoachClientRelationshipStatus.ACTIVE)
-                .orElseThrow(() -> new ResponseStatusException(
-                        HttpStatus.BAD_REQUEST, "You do not have an active coach assigned to share this PR with."));
+        CoachClientRelationship activeRelationship = resolveActiveRelationshipForSharing(clientId, recipientId);
+        User recipient = resolveRecipientFromRelationship(clientId, activeRelationship);
 
-        User coach = activeRelationship.getCoach();
-        List<SharedPersonalRecord> sharesToReturn = new ArrayList<>();
+        List<SharedPersonalRecordResponse> responses = new ArrayList<>();
         int alreadySharedCount = 0;
 
-        for (PersonalRecord pr : prsToShare) {
-            Optional<SharedPersonalRecord> existing = sharedPersonalRecordRepository.findByPersonalRecordIdAndCoachId(pr.getId(), coach.getId());
+        for (int index = 0; index < prsToShare.size(); index++) {
+            PersonalRecord pr = prsToShare.get(index);
+            String perPrClientMessageId = null;
+            if (clientMessageId != null && !clientMessageId.isBlank()) {
+                String trimmed = clientMessageId.trim();
+                perPrClientMessageId = prsToShare.size() == 1 ? trimmed : trimmed + "-" + pr.getId();
+                if (perPrClientMessageId.length() > 64) {
+                    perPrClientMessageId = perPrClientMessageId.substring(0, 64);
+                }
+            }
+
+            Optional<SharedPersonalRecord> existing = sharedPersonalRecordRepository
+                    .findByPersonalRecordIdAndCoachId(pr.getId(), recipient.getId());
             if (existing.isPresent()) {
                 alreadySharedCount++;
-                sharesToReturn.add(existing.get());
+                SharedPersonalRecord existingShare = existing.get();
+                SharedPersonalRecordResponse existingResponse = mapToSharedResponse(existingShare);
+                attachExistingOrIdempotentChatMessage(
+                        activeRelationship, pr.getUser(), recipient, existingShare, existingResponse, perPrClientMessageId);
+                responses.add(existingResponse);
                 continue;
             }
 
             SharedPersonalRecord shared = SharedPersonalRecord.builder()
                     .personalRecord(pr)
                     .client(pr.getUser())
-                    .coach(coach)
+                    .coach(recipient)
                     .status("SHARED")
                     .isRead(false)
                     .build();
 
             SharedPersonalRecord saved = sharedPersonalRecordRepository.save(shared);
-            sharesToReturn.add(saved);
 
-            // Notify Coach
+            // Notify Recipient
             String unit = pr.getUnit() != null ? pr.getUnit() : pr.getRecordType().getDefaultUnit();
             String formattedPr = formatRecord(pr.getRecordType(), pr.getRecordValue(), pr.getSecondaryValue(), unit);
             notificationService.createNotification(
-                    coach,
+                    recipient,
                     pr.getUser(),
                     NotificationType.PR_SHARED,
                     saved.getId(),
                     "New PR Shared",
                     pr.getUser().getFullName() + " shared a new PR: " + pr.getEffectiveExerciseName() + " (" + formattedPr + ")"
             );
-            log.info("Client {} shared PR {} with Coach {}", clientId, pr.getId(), coach.getId());
+            log.info("User {} shared PR {} with Recipient {}", clientId, pr.getId(), recipient.getId());
+
+            SharedPersonalRecordResponse sharedResponse = mapToSharedResponse(saved);
+            sendSharedPrChatMessage(
+                    activeRelationship, pr.getUser(), recipient, saved, sharedResponse, perPrClientMessageId);
+            responses.add(sharedResponse);
         }
 
         if (alreadySharedCount == prsToShare.size() && prsToShare.size() == 1) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "This PR has already been shared with your coach");
+            // If this is an idempotent retry with a matching clientMessageId, return the existing share instead of throwing 409
+            if (clientMessageId != null && !clientMessageId.isBlank()
+                    && !responses.isEmpty()
+                    && responses.getFirst().getChatMessageId() != null) {
+                return responses;
+            }
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "This PR has already been shared with this recipient");
         }
 
-        return sharesToReturn.stream().map(this::mapToSharedResponse).toList();
+        return responses;
     }
 
     @Transactional
     public SharedPersonalRecordResponse sharePRWithCoach(Long clientId, Long prId) {
+        return sharePRWithCoach(clientId, prId, null, null);
+    }
+
+    @Transactional
+    public SharedPersonalRecordResponse sharePRWithCoach(
+            Long clientId,
+            Long prId,
+            Long recipientId,
+            String clientMessageId) {
+        if (clientId == null) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Authentication required");
+        }
         PersonalRecord pr = personalRecordRepository.findById(prId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Personal record not found"));
 
@@ -549,40 +614,197 @@ public class PersonalRecordService {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "You cannot share a record belonging to another user");
         }
 
-        CoachClientRelationship activeRelationship = coachClientRelationshipRepository
-                .findFirstByClientIdAndStatusOrderByUpdatedAtDesc(clientId, CoachClientRelationshipStatus.ACTIVE)
-                .orElseThrow(() -> new ResponseStatusException(
-                        HttpStatus.BAD_REQUEST, "You do not have an active coach assigned to share this PR with."));
+        CoachClientRelationship activeRelationship = resolveActiveRelationshipForSharing(clientId, recipientId);
+        User recipient = resolveRecipientFromRelationship(clientId, activeRelationship);
 
-        User coach = activeRelationship.getCoach();
+        String trimmedClientMessageId = (clientMessageId != null && !clientMessageId.isBlank())
+                ? clientMessageId.trim()
+                : null;
 
-        if (sharedPersonalRecordRepository.existsByPersonalRecordIdAndCoachId(prId, coach.getId())) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "This PR has already been shared with your coach");
+        Optional<SharedPersonalRecord> existingOpt = sharedPersonalRecordRepository
+                .findByPersonalRecordIdAndCoachId(prId, recipient.getId());
+        if (existingOpt.isPresent()) {
+            // If this is an idempotent retry with a clientMessageId that matches an existing chat message, return 200 OK
+            if (trimmedClientMessageId != null) {
+                SharedPersonalRecord existingShare = existingOpt.get();
+                SharedPersonalRecordResponse existingResponse = mapToSharedResponse(existingShare);
+                if (attachExistingOrIdempotentChatMessage(
+                        activeRelationship, pr.getUser(), recipient, existingShare, existingResponse, trimmedClientMessageId)) {
+                    return existingResponse;
+                }
+            }
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "This PR has already been shared with this recipient");
+        }
+        if (sharedPersonalRecordRepository.existsByPersonalRecordIdAndCoachId(prId, recipient.getId())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "This PR has already been shared with this recipient");
         }
 
         SharedPersonalRecord shared = SharedPersonalRecord.builder()
                 .personalRecord(pr)
                 .client(pr.getUser())
-                .coach(coach)
+                .coach(recipient)
                 .status("SHARED")
                 .isRead(false)
                 .build();
 
         SharedPersonalRecord saved = sharedPersonalRecordRepository.save(shared);
 
-        // Notify Coach
+        // Notify Recipient
         String unit = pr.getUnit() != null ? pr.getUnit() : pr.getRecordType().getDefaultUnit();
         String formattedPr = formatRecord(pr.getRecordType(), pr.getRecordValue(), pr.getSecondaryValue(), unit);
         notificationService.createNotification(
-                coach,
+                recipient,
                 pr.getUser(),
                 NotificationType.PR_SHARED,
                 saved.getId(),
                 "New PR Shared",
                 pr.getUser().getFullName() + " shared a new PR: " + pr.getEffectiveExerciseName() + " (" + formattedPr + ")"
         );
-        log.info("Client {} shared PR {} with Coach {}", clientId, prId, coach.getId());
-        return mapToSharedResponse(saved);
+        log.info("User {} shared PR {} with Recipient {}", clientId, prId, recipient.getId());
+
+        SharedPersonalRecordResponse response = mapToSharedResponse(saved);
+        sendSharedPrChatMessage(activeRelationship, pr.getUser(), recipient, saved, response, trimmedClientMessageId);
+        return response;
+    }
+
+    private CoachClientRelationship resolveActiveRelationshipForSharing(Long senderId, Long recipientId) {
+        if (recipientId != null) {
+            if (senderId.equals(recipientId)) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "You cannot share a Personal Record with yourself");
+            }
+            return coachClientRelationshipRepository
+                    .findActiveRelationshipForUsers(senderId, recipientId)
+                    .orElseThrow(() -> new ResponseStatusException(
+                            HttpStatus.FORBIDDEN,
+                            "You do not have an active coach-client relationship with the selected recipient."));
+        }
+
+        return coachClientRelationshipRepository
+                .findFirstByClientIdAndStatusOrderByUpdatedAtDesc(senderId, CoachClientRelationshipStatus.ACTIVE)
+                .orElseGet(() -> coachClientRelationshipRepository
+                        .findByCoachIdOrClientIdOrderByCreatedAtDesc(senderId, senderId).stream()
+                        .filter(rel -> rel.getStatus() == CoachClientRelationshipStatus.ACTIVE)
+                        .findFirst()
+                        .orElseThrow(() -> new ResponseStatusException(
+                                HttpStatus.BAD_REQUEST,
+                                "You do not have an active coach or client connection to share this PR with.")));
+    }
+
+    private User resolveRecipientFromRelationship(Long senderId, CoachClientRelationship relationship) {
+        if (relationship.getClient() != null && senderId.equals(relationship.getClient().getId())) {
+            return relationship.getCoach();
+        }
+        return relationship.getClient();
+    }
+
+    private boolean attachExistingOrIdempotentChatMessage(
+            CoachClientRelationship relationship,
+            User sender,
+            User recipient,
+            SharedPersonalRecord shared,
+            SharedPersonalRecordResponse response,
+            String clientMessageId) {
+        if (chatConversationRepository == null || chatMessageRepository == null || clientMessageId == null) {
+            return false;
+        }
+        Long coachId = relationship.getCoach().getId();
+        Long clientId = relationship.getClient().getId();
+        Optional<ChatConversation> convOpt = chatConversationRepository.findByCoachIdAndClientId(coachId, clientId);
+        if (convOpt.isEmpty()) {
+            return false;
+        }
+        ChatConversation conversation = convOpt.get();
+        Optional<ChatMessage> existingMsg = chatMessageRepository
+                .findByConversationIdAndClientMessageId(conversation.getId(), clientMessageId);
+        if (existingMsg.isPresent()) {
+            response.setConversationId(conversation.getId());
+            response.setChatMessageId(existingMsg.get().getId());
+            return true;
+        }
+        return false;
+    }
+
+    private void sendSharedPrChatMessage(
+            CoachClientRelationship relationship,
+            User sender,
+            User recipient,
+            SharedPersonalRecord savedShare,
+            SharedPersonalRecordResponse shareResponse,
+            String clientMessageId) {
+        if (chatConversationRepository == null || chatMessageRepository == null) {
+            return;
+        }
+        try {
+            Long coachId = relationship.getCoach().getId();
+            Long clientId = relationship.getClient().getId();
+            ZonedDateTime now = ZonedDateTime.now();
+
+            ChatConversation conversation = chatConversationRepository.findByCoachIdAndClientId(coachId, clientId)
+                    .orElseGet(() -> chatConversationRepository.save(ChatConversation.builder()
+                            .coach(relationship.getCoach())
+                            .client(relationship.getClient())
+                            .coachLastReadAt(sender.getId().equals(coachId) ? now : null)
+                            .clientLastReadAt(sender.getId().equals(clientId) ? now : null)
+                            .build()));
+
+            String effectiveClientMsgId = (clientMessageId != null && !clientMessageId.isBlank())
+                    ? clientMessageId.trim()
+                    : "pr-share-" + savedShare.getId();
+
+            Optional<ChatMessage> existingMessage = chatMessageRepository
+                    .findByConversationIdAndClientMessageId(conversation.getId(), effectiveClientMsgId);
+            if (existingMessage.isPresent()) {
+                shareResponse.setConversationId(conversation.getId());
+                shareResponse.setChatMessageId(existingMessage.get().getId());
+                return;
+            }
+
+            shareResponse.setConversationId(conversation.getId());
+
+            ObjectMapper mapper = objectMapper != null
+                    ? objectMapper
+                    : new ObjectMapper().registerModule(new JavaTimeModule());
+            String contentJson = mapper.writeValueAsString(shareResponse);
+
+            ChatMessage savedMessage = chatMessageRepository.save(ChatMessage.builder()
+                    .conversation(conversation)
+                    .sender(sender)
+                    .content(contentJson)
+                    .clientMessageId(effectiveClientMsgId)
+                    .messageType(ChatMessageType.PR_SHARE)
+                    .build());
+
+            ZonedDateTime msgTime = savedMessage.getCreatedAt() != null ? savedMessage.getCreatedAt() : now;
+            conversation.setLastMessageAt(msgTime);
+            if (sender.getId().equals(coachId)) {
+                conversation.setCoachLastReadAt(msgTime);
+            } else if (sender.getId().equals(clientId)) {
+                conversation.setClientLastReadAt(msgTime);
+            }
+            chatConversationRepository.save(conversation);
+
+            shareResponse.setChatMessageId(savedMessage.getId());
+
+            if (messagingTemplate != null) {
+                ChatMessageResponse chatMessageResponse = ChatMessageResponse.builder()
+                        .id(savedMessage.getId())
+                        .conversationId(conversation.getId())
+                        .senderId(sender.getId())
+                        .senderName(sender.getFullName())
+                        .senderAvatarUrl(sender.getAvatarUrl())
+                        .content(savedMessage.getContent())
+                        .clientMessageId(savedMessage.getClientMessageId())
+                        .messageType(savedMessage.getMessageType())
+                        .sharedPersonalRecord(shareResponse)
+                        .createdAt(msgTime)
+                        .build();
+
+                messagingTemplate.convertAndSend("/topic/conversations/" + conversation.getId(), chatMessageResponse);
+                messagingTemplate.convertAndSendToUser(String.valueOf(recipient.getId()), "/queue/messages", chatMessageResponse);
+            }
+        } catch (Exception e) {
+            log.warn("Failed to send chat message for shared PR {}: {}", savedShare.getId(), e.getMessage());
+        }
     }
 
     @Transactional(readOnly = true)

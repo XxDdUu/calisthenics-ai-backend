@@ -1,5 +1,6 @@
 package com.calisthenics.backend.chat.service.impl;
 
+import com.calisthenics.backend.analytics.dto.SharedPersonalRecordResponse;
 import com.calisthenics.backend.chat.dto.response.ChatConversationResponse;
 import com.calisthenics.backend.chat.dto.response.UnreadCountResponse;
 import com.calisthenics.backend.chat.entity.ChatConversation;
@@ -8,12 +9,16 @@ import com.calisthenics.backend.chat.exception.ChatConversationNotFoundException
 import com.calisthenics.backend.chat.repository.ChatConversationRepository;
 import com.calisthenics.backend.chat.repository.ChatMessageRepository;
 import com.calisthenics.backend.chat.service.ChatService;
+import com.calisthenics.backend.chat.type.ChatMessageType;
 import com.calisthenics.backend.coachclient.entity.CoachClientRelationship;
 import com.calisthenics.backend.coachclient.repository.CoachClientRelationshipRepository;
 import com.calisthenics.backend.coachclient.type.CoachClientRelationshipStatus;
 import com.calisthenics.backend.user.User;
 import com.calisthenics.backend.user.UserRepository;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -29,6 +34,9 @@ public class ChatServiceImpl implements ChatService {
     private final ChatMessageRepository messageRepository;
     private final CoachClientRelationshipRepository relationshipRepository;
     private final UserRepository userRepository;
+
+    @Autowired(required = false)
+    private ObjectMapper objectMapper;
 
     @Override
     @Transactional
@@ -100,12 +108,40 @@ public class ChatServiceImpl implements ChatService {
                 .otherUserName(otherUserName)
                 .otherUserAvatarUrl(otherUser.getAvatarUrl())
                 .lastMessagePreview(messageRepository.findTopByConversationOrderByCreatedAtDesc(conversation)
-                        .map(ChatMessage::getContent)
+                        .map(this::formatMessagePreview)
                         .orElse(null))
                 .unreadCount(unreadCount)
                 .lastMessageAt(conversation.getLastMessageAt())
                 .createdAt(conversation.getCreatedAt())
                 .updatedAt(conversation.getUpdatedAt())
                 .build();
+    }
+
+    private String formatMessagePreview(ChatMessage message) {
+        if (message == null) {
+            return null;
+        }
+        if (message.getMessageType() == ChatMessageType.PR_SHARE && message.getContent() != null) {
+            try {
+                ObjectMapper mapper = objectMapper != null
+                        ? objectMapper
+                        : new ObjectMapper().registerModule(new JavaTimeModule());
+                SharedPersonalRecordResponse shared = mapper.readValue(message.getContent(), SharedPersonalRecordResponse.class);
+                if (shared != null && shared.getPersonalRecord() != null) {
+                    String exerciseName = shared.getPersonalRecord().getExerciseName() != null
+                            ? shared.getPersonalRecord().getExerciseName()
+                            : "Personal Record";
+                    String formatted = shared.getPersonalRecord().getFormattedRecord();
+                    if (formatted != null && !formatted.isBlank()) {
+                        return "🏆 Shared PR: " + exerciseName + " (" + formatted + ")";
+                    }
+                    return "🏆 Shared PR: " + exerciseName;
+                }
+            } catch (Exception ignored) {
+                return "🏆 Shared a Personal Record";
+            }
+            return "🏆 Shared a Personal Record";
+        }
+        return message.getContent();
     }
 }

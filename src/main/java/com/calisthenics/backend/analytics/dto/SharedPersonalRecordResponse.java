@@ -27,6 +27,8 @@ public class SharedPersonalRecordResponse {
     private boolean isRead;
     private ZonedDateTime readAt;
     private String status;
+    private Long conversationId;
+    private Long chatMessageId;
 
     @JsonProperty("clientUserId")
     public Long getClientUserId() {

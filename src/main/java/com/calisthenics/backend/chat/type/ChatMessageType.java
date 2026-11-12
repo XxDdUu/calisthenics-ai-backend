@@ -1,5 +1,6 @@
 package com.calisthenics.backend.chat.type;
 
 public enum ChatMessageType {
-    TEXT
+    TEXT,
+    PR_SHARE
 }

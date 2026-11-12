@@ -3,6 +3,7 @@ package com.calisthenics.backend.analytics.controller;
 import com.calisthenics.backend.analytics.dto.BatchSharePrRequest;
 import com.calisthenics.backend.analytics.dto.CreatePersonalRecordRequest;
 import com.calisthenics.backend.analytics.dto.PersonalRecordResponse;
+import com.calisthenics.backend.analytics.dto.SharePrRequest;
 import com.calisthenics.backend.analytics.dto.SharedPersonalRecordResponse;
 import com.calisthenics.backend.analytics.dto.UpdatePersonalRecordRequest;
 import com.calisthenics.backend.analytics.model.PersonalRecordType;
@@ -95,19 +96,31 @@ public class PersonalRecordController {
     }
 
     @PostMapping({"/api/v1/clients/me/pr-shares", "/api/v1/prs/batch-share"})
-    @Operation(summary = "Share multiple Personal Records with assigned Coach")
+    @Operation(summary = "Share multiple Personal Records with assigned Coach or selected recipient")
     public ResponseEntity<List<SharedPersonalRecordResponse>> batchSharePRs(
             @AuthenticationPrincipal UserPrincipal currentUser,
             @Valid @RequestBody BatchSharePrRequest request) {
-        return ResponseEntity.ok(personalRecordService.sharePRsWithCoach(currentUser.getId(), request.getEffectivePrIds()));
+        return ResponseEntity.ok(personalRecordService.sharePRsWithCoach(
+                currentUser.getId(),
+                request.getEffectivePrIds(),
+                request.getRecipientId(),
+                request.getClientMessageId()));
     }
 
     @PostMapping("/api/v1/prs/{prId}/share")
-    @Operation(summary = "Share a Personal Record with assigned Coach")
+    @Operation(summary = "Share a Personal Record with assigned Coach or selected recipient")
     public ResponseEntity<SharedPersonalRecordResponse> sharePR(
             @AuthenticationPrincipal UserPrincipal currentUser,
-            @PathVariable Long prId) {
-        return ResponseEntity.ok(personalRecordService.sharePRWithCoach(currentUser.getId(), prId));
+            @PathVariable Long prId,
+            @RequestParam(required = false) Long recipientId,
+            @RequestParam(required = false) Long coachId,
+            @Valid @RequestBody(required = false) SharePrRequest request) {
+        Long effectiveRecipientId = request != null && request.getRecipientId() != null
+                ? request.getRecipientId()
+                : (recipientId != null ? recipientId : coachId);
+        String clientMessageId = request != null ? request.getClientMessageId() : null;
+        return ResponseEntity.ok(personalRecordService.sharePRWithCoach(
+                currentUser.getId(), prId, effectiveRecipientId, clientMessageId));
     }
 
     @GetMapping({"/api/v1/clients/me/pr-shares", "/api/v1/client/shared-prs"})

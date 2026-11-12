@@ -372,12 +372,51 @@ public class PersonalRecordServiceTest {
                 .personalRecord(PersonalRecord.builder().id(500L).user(athlete).exercise(weightedPullUp).recordType(PersonalRecordType.MAX_WEIGHT).recordValue(BigDecimal.TEN).build())
                 .build();
 
-        when(sharedPersonalRecordRepository.findByClientIdAndCoachFeedbackIsNotNullOrderByFeedbackAtDesc(1L))
+        when(sharedPersonalRecordRepository. findByClientIdAndCoachFeedbackIsNotNullOrderByFeedbackAtDesc(1L))
                 .thenReturn(List.of(share));
 
         List<SharedPersonalRecordResponse> feedbacks = personalRecordService.getClientFeedbacks(1L);
 
         assertThat(feedbacks).hasSize(1);
         assertThat(feedbacks.get(0).getCoachFeedback()).isEqualTo("Great job!");
+    }
+
+    @Test
+    void sharePRWithSpecificRecipient_SelectsMatchingRelationshipAndRejectsUnrelatedRecipient() {
+        User secondCoach = User.builder().id(3L).email("coach2@calisthenics.ai").fullName("Coach Sarah").role(Role.ROLE_USER).build();
+        User unrelatedCoach = User.builder().id(99L).email("stranger@calisthenics.ai").fullName("Stranger").role(Role.ROLE_USER).build();
+
+        PersonalRecord pr = PersonalRecord.builder()
+                .id(510L).user(athlete).exercise(weightedPullUp)
+                .recordType(PersonalRecordType.MAX_WEIGHT).recordValue(BigDecimal.valueOf(35.0))
+                .achievedAt(ZonedDateTime.now())
+                .build();
+
+        when(personalRecordRepository.findById(510L)).thenReturn(Optional.of(pr));
+
+        CoachClientRelationship secondRel = CoachClientRelationship.builder()
+                .coach(secondCoach).client(athlete).status(CoachClientRelationshipStatus.ACTIVE)
+                .build();
+        when(coachClientRelationshipRepository.findActiveRelationshipForUsers(1L, 3L))
+                .thenReturn(Optional.of(secondRel));
+        when(coachClientRelationshipRepository.findActiveRelationshipForUsers(1L, 99L))
+                .thenReturn(Optional.empty());
+
+        when(sharedPersonalRecordRepository.findByPersonalRecordIdAndCoachId(510L, 3L)).thenReturn(Optional.empty());
+        when(sharedPersonalRecordRepository.existsByPersonalRecordIdAndCoachId(510L, 3L)).thenReturn(false);
+        when(sharedPersonalRecordRepository.save(any())).thenAnswer(invocation -> {
+            SharedPersonalRecord s = invocation.getArgument(0);
+            s.setId(810L);
+            s.setSharedAt(ZonedDateTime.now());
+            return s;
+        });
+
+        SharedPersonalRecordResponse response = personalRecordService.sharePRWithCoach(1L, 510L, 3L, "msg-123");
+
+        assertThat(response.getCoachId()).isEqualTo(3L);
+        assertThat(response.getCoachName()).isEqualTo("Coach Sarah");
+
+        assertThrows(ResponseStatusException.class,
+                () -> personalRecordService.sharePRWithCoach(1L, 510L, 99L, "msg-124"));
     }
 }

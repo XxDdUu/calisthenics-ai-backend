@@ -1,6 +1,7 @@
 package com.calisthenics.backend.analytics;
 
 import com.calisthenics.backend.analytics.dto.CreatePersonalRecordRequest;
+import com.calisthenics.backend.analytics.dto.SharePrRequest;
 import com.calisthenics.backend.analytics.dto.UpdatePersonalRecordRequest;
 import com.calisthenics.backend.analytics.model.PersonalRecord;
 import com.calisthenics.backend.analytics.model.PersonalRecordType;
@@ -411,6 +412,149 @@ public class PersonalRecordIntegrationTest {
         // Unassigned coach is forbidden
         mockMvc.perform(get("/api/v1/coach/clients/" + clientUser.getId() + "/personal-records")
                         .header("Authorization", "Bearer " + unassignedCoachToken))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void sharePr_CreatesSharedRecordAndStructuredChatMessage_VisibleInCoachPrFeedbackAndChat() throws Exception {
+        PersonalRecord pr = prRepository.save(PersonalRecord.builder()
+                .user(clientUser)
+                .exercise(pullUp)
+                .recordType(PersonalRecordType.MAX_WEIGHT)
+                .recordValue(BigDecimal.valueOf(42.5))
+                .previousRecordValue(BigDecimal.valueOf(40.0))
+                .improvementPercentage(BigDecimal.valueOf(6.25))
+                .unit("kg")
+                .achievedAt(ZonedDateTime.now())
+                .notes("Strict chest-to-bar")
+                .build());
+
+        SharePrRequest shareReq = SharePrRequest.builder()
+                .recipientId(coachUser.getId())
+                .clientMessageId("pr-share-client-msg-1")
+                .build();
+
+        String shareResponse = mockMvc.perform(post("/api/v1/prs/" + pr.getId() + "/share")
+                        .header("Authorization", "Bearer " + clientToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(shareReq)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.clientId").value(clientUser.getId()))
+                .andExpect(jsonPath("$.coachId").value(coachUser.getId()))
+                .andExpect(jsonPath("$.personalRecord.id").value(pr.getId()))
+                .andExpect(jsonPath("$.personalRecord.exerciseName").value("Weighted Pull-up"))
+                .andExpect(jsonPath("$.conversationId").isNumber())
+                .andExpect(jsonPath("$.chatMessageId").isNumber())
+                .andReturn().getResponse().getContentAsString();
+
+        Long conversationId = objectMapper.readTree(shareResponse).get("conversationId").asLong();
+        Long chatMessageId = objectMapper.readTree(shareResponse).get("chatMessageId").asLong();
+
+        // Idempotent retry with same clientMessageId returns the exact same share & chatMessageId without error or duplicate
+        mockMvc.perform(post("/api/v1/prs/" + pr.getId() + "/share")
+                        .header("Authorization", "Bearer " + clientToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(shareReq)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.conversationId").value(conversationId))
+                .andExpect(jsonPath("$.chatMessageId").value(chatMessageId));
+
+        // Coach fetches PR Feedback (/api/v1/coach/me/pr-shares) and sees the shared PR
+        mockMvc.perform(get("/api/v1/coach/me/pr-shares")
+                        .header("Authorization", "Bearer " + coachToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(1))
+                .andExpect(jsonPath("$[0].clientId").value(clientUser.getId()))
+                .andExpect(jsonPath("$[0].coachId").value(coachUser.getId()))
+                .andExpect(jsonPath("$[0].personalRecord.exerciseName").value("Weighted Pull-up"))
+                .andExpect(jsonPath("$[0].personalRecord.recordValue").value(42.5));
+
+        // Unassigned coach does NOT see the shared PR
+        mockMvc.perform(get("/api/v1/coach/me/pr-shares")
+                        .header("Authorization", "Bearer " + unassignedCoachToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(0));
+
+        // Coach opens conversation messages and sees the structured PR_SHARE message card
+        mockMvc.perform(get("/api/v1/chat/conversations/" + conversationId + "/messages")
+                        .header("Authorization", "Bearer " + coachToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(1))
+                .andExpect(jsonPath("$[0].id").value(chatMessageId))
+                .andExpect(jsonPath("$[0].messageType").value("PR_SHARE"))
+                .andExpect(jsonPath("$[0].sharedPersonalRecord.personalRecord.id").value(pr.getId()))
+                .andExpect(jsonPath("$[0].sharedPersonalRecord.personalRecord.exerciseName").value("Weighted Pull-up"))
+                .andExpect(jsonPath("$[0].sharedPersonalRecord.personalRecord.previousRecordValue").value(40.0))
+                .andExpect(jsonPath("$[0].sharedPersonalRecord.personalRecord.improvementPercentage").value(6.25));
+
+        // Conversation list preview displays formatted PR summary instead of raw JSON
+        mockMvc.perform(get("/api/v1/chat/conversations")
+                        .header("Authorization", "Bearer " + coachToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].id").value(conversationId))
+                .andExpect(jsonPath("$[0].lastMessagePreview").value("🏆 Shared PR: Weighted Pull-up (+42.5 kg)"));
+    }
+
+    @Test
+    void sharePr_MultipleRecipients_IsolatesSharesPerSelectedCoach() throws Exception {
+        User secondCoach = userRepository.save(User.builder()
+                .email("pr_coach2_" + System.currentTimeMillis() + "@calisthenics.ai")
+                .fullName("Second Coach")
+                .role(Role.ROLE_USER)
+                .build());
+        String secondCoachToken = tokenProvider.generateAccessTokenFromUserPrincipal(UserPrincipal.create(secondCoach));
+
+        relationshipRepository.save(CoachClientRelationship.builder()
+                .coach(secondCoach)
+                .client(clientUser)
+                .requestedBy(clientUser)
+                .status(CoachClientRelationshipStatus.ACTIVE)
+                .version(0L)
+                .build());
+
+        PersonalRecord pr = prRepository.save(PersonalRecord.builder()
+                .user(clientUser)
+                .exercise(muscleUp)
+                .recordType(PersonalRecordType.MAX_REPS)
+                .recordValue(BigDecimal.valueOf(12))
+                .unit("reps")
+                .achievedAt(ZonedDateTime.now())
+                .build());
+
+        // Client selects secondCoach specifically
+        SharePrRequest shareReq = SharePrRequest.builder()
+                .recipientId(secondCoach.getId())
+                .clientMessageId("pr-share-second-coach")
+                .build();
+
+        mockMvc.perform(post("/api/v1/prs/" + pr.getId() + "/share")
+                        .header("Authorization", "Bearer " + clientToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(shareReq)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.coachId").value(secondCoach.getId()));
+
+        // Second coach sees the shared PR in PR Feedback
+        mockMvc.perform(get("/api/v1/coach/me/pr-shares")
+                        .header("Authorization", "Bearer " + secondCoachToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(1))
+                .andExpect(jsonPath("$[0].personalRecord.id").value(pr.getId()));
+
+        // First coach (not selected for this share) does NOT see this PR in PR Feedback
+        mockMvc.perform(get("/api/v1/coach/me/pr-shares")
+                        .header("Authorization", "Bearer " + coachToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(0));
+
+        // Sharing with an unassigned coach is forbidden (403)
+        SharePrRequest unauthorizedReq = SharePrRequest.builder()
+                .recipientId(unassignedCoachUser.getId())
+                .build();
+        mockMvc.perform(post("/api/v1/prs/" + pr.getId() + "/share")
+                        .header("Authorization", "Bearer " + clientToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(unauthorizedReq)))
                 .andExpect(status().isForbidden());
     }
 }

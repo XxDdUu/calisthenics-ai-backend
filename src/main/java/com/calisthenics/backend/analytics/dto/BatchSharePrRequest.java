@@ -18,6 +18,11 @@ public class BatchSharePrRequest {
     @JsonAlias({"prId", "pr_ids"})
     private List<Long> prIds;
 
+    @JsonAlias({"coachId", "coach_id", "recipient_id", "targetUserId"})
+    private Long recipientId;
+
+    private String clientMessageId;
+
     public List<Long> getEffectivePrIds() {
         return prIds != null ? prIds : Collections.emptyList();
     }

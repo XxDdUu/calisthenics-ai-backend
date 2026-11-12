@@ -1,5 +1,8 @@
 package com.calisthenics.backend.chat.service.impl;
 
+import com.calisthenics.backend.analytics.dto.SharedPersonalRecordResponse;
+import com.calisthenics.backend.analytics.repository.SharedPersonalRecordRepository;
+import com.calisthenics.backend.analytics.service.PersonalRecordService;
 import com.calisthenics.backend.chat.dto.request.SendChatMessageRequest;
 import com.calisthenics.backend.chat.dto.response.ChatMessageResponse;
 import com.calisthenics.backend.chat.entity.ChatConversation;
@@ -12,7 +15,11 @@ import com.calisthenics.backend.chat.service.ChatMessageService;
 import com.calisthenics.backend.chat.type.ChatMessageType;
 import com.calisthenics.backend.user.User;
 import com.calisthenics.backend.user.UserRepository;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
@@ -21,6 +28,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.ZonedDateTime;
 import java.util.List;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class ChatMessageServiceImpl implements ChatMessageService {
@@ -29,6 +37,15 @@ public class ChatMessageServiceImpl implements ChatMessageService {
     private final ChatMessageRepository messageRepository;
     private final UserRepository userRepository;
     private final SimpMessagingTemplate messagingTemplate;
+
+    @Autowired(required = false)
+    private SharedPersonalRecordRepository sharedPersonalRecordRepository;
+
+    @Autowired(required = false)
+    private PersonalRecordService personalRecordService;
+
+    @Autowired(required = false)
+    private ObjectMapper objectMapper;
 
     @Override
     @Transactional(readOnly = true)
@@ -52,6 +69,7 @@ public class ChatMessageServiceImpl implements ChatMessageService {
     }
 
     private ChatMessageResponse toResponse(Long conversationId, ChatMessage message) {
+        SharedPersonalRecordResponse sharedPr = resolveSharedPrFromMessage(conversationId, message);
         return ChatMessageResponse.builder()
                 .id(message.getId())
                 .conversationId(conversationId)
@@ -61,8 +79,38 @@ public class ChatMessageServiceImpl implements ChatMessageService {
                 .content(message.getContent())
                 .clientMessageId(message.getClientMessageId())
                 .messageType(message.getMessageType())
+                .sharedPersonalRecord(sharedPr)
                 .createdAt(message.getCreatedAt())
                 .build();
+    }
+
+    private SharedPersonalRecordResponse resolveSharedPrFromMessage(Long conversationId, ChatMessage message) {
+        if (message.getMessageType() != ChatMessageType.PR_SHARE || message.getContent() == null) {
+            return null;
+        }
+        try {
+            ObjectMapper mapper = objectMapper != null
+                    ? objectMapper
+                    : new ObjectMapper().registerModule(new JavaTimeModule());
+            SharedPersonalRecordResponse parsed = mapper.readValue(message.getContent(), SharedPersonalRecordResponse.class);
+            if (parsed != null && parsed.getId() != null && sharedPersonalRecordRepository != null && personalRecordService != null) {
+                var latestShare = sharedPersonalRecordRepository.findById(parsed.getId());
+                if (latestShare.isPresent()) {
+                    SharedPersonalRecordResponse liveResponse = personalRecordService.mapToSharedResponse(latestShare.get());
+                    liveResponse.setConversationId(conversationId);
+                    liveResponse.setChatMessageId(message.getId());
+                    return liveResponse;
+                }
+            }
+            if (parsed != null) {
+                parsed.setConversationId(conversationId);
+                parsed.setChatMessageId(message.getId());
+            }
+            return parsed;
+        } catch (Exception e) {
+            log.debug("Could not deserialize PR_SHARE message content for message {}: {}", message.getId(), e.getMessage());
+            return null;
+        }
     }
 
     @Override
@@ -102,12 +150,14 @@ public class ChatMessageServiceImpl implements ChatMessageService {
         User sender = userRepository.findById(currentUserId)
                 .orElseThrow(ChatConversationNotFoundException::new);
 
+        ChatMessageType effectiveType = request.getMessageType() != null ? request.getMessageType() : ChatMessageType.TEXT;
+
         ChatMessage message = messageRepository.save(ChatMessage.builder()
                 .conversation(conversation)
                 .sender(sender)
                 .content(content)
                 .clientMessageId(clientMessageId)
-                .messageType(ChatMessageType.TEXT)
+                .messageType(effectiveType)
                 .build());
 
         ZonedDateTime now = message.getCreatedAt();
