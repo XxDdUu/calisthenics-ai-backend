@@ -1,5 +1,6 @@
 package com.calisthenics.backend.bodymetrics;
 
+import com.calisthenics.backend.analytics.repository.PersonalRecordRepository;
 import com.calisthenics.backend.bodymetrics.dto.RecordBodyMeasurementRequest;
 import com.calisthenics.backend.bodymetrics.dto.UpdateHeightRequest;
 import com.calisthenics.backend.bodymetrics.entity.ClientBodyMeasurement;
@@ -26,6 +27,7 @@ import org.springframework.http.MediaType;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.RequestPostProcessor;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.time.ZonedDateTime;
@@ -43,6 +45,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @SpringBootTest
 @AutoConfigureMockMvc
 @ActiveProfiles("test")
+@Transactional
 class BodyMetricsIntegrationTest {
 
     @Autowired
@@ -72,6 +75,9 @@ class BodyMetricsIntegrationTest {
     @Autowired
     private WorkoutSessionExerciseRepository workoutSessionExerciseRepository;
 
+    @Autowired
+    private PersonalRecordRepository personalRecordRepository;
+
     private User clientUser;
     private User assignedCoach;
     private User unassignedCoach;
@@ -79,6 +85,7 @@ class BodyMetricsIntegrationTest {
     @BeforeEach
     void setUp() {
         measurementRepository.deleteAll();
+        personalRecordRepository.deleteAll();
         workoutSessionExerciseRepository.deleteAll();
         workoutSessionRepository.deleteAll();
         assignmentRepository.deleteAll();
