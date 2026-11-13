@@ -1,5 +1,13 @@
 package com.calisthenics.backend.adminai.dto;
 
+import com.calisthenics.backend.adminai.dto.data.AdminCoachClientStatisticsResponse;
+import com.calisthenics.backend.adminai.dto.data.AdminGlobalUserStatisticsResponse;
+import com.calisthenics.backend.adminai.dto.data.AdminGlobalUserSummaryDto;
+import com.calisthenics.backend.adminai.dto.data.AdminPlatformEngagementResponse;
+import com.calisthenics.backend.adminai.dto.data.AdminTimeRangeMetadata;
+import com.calisthenics.backend.adminai.dto.data.AdminToolExecutionRecord;
+import com.calisthenics.backend.adminai.dto.data.AdminUserDetailDossierResponse;
+import com.calisthenics.backend.adminai.dto.data.AdminUserSegmentsResponse;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -20,5 +28,14 @@ public class AdminChatResponse {
     private List<AdminRecommendationResponse> recommendations;
     private AdminPlatformOverviewResponse platformOverview;
     private AdminTrainingAnalyticsResponse trainingAnalytics;
+    private List<AdminToolExecutionRecord> executedTools;
+    private AdminTimeRangeMetadata timeRangeUsed;
+    private AdminGlobalUserStatisticsResponse userStatistics;
+    private List<AdminGlobalUserSummaryDto> matchedUsers;
+    private AdminUserDetailDossierResponse inspectedUserDetail;
+    private AdminUserSegmentsResponse segmentAnalysis;
+    private AdminPlatformEngagementResponse platformEngagement;
+    private AdminCoachClientStatisticsResponse coachClientStatistics;
+    private List<String> missingDataNotes;
     private List<String> suggestedFollowUps;
 }

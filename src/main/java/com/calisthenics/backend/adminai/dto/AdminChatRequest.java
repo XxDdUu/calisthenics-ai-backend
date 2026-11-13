@@ -20,4 +20,6 @@ public class AdminChatRequest {
     private AdminAnalyticsRange range;
     private LocalDate startDate;
     private LocalDate endDate;
+    private Long targetUserId;
+    private Boolean includeEmail;
 }

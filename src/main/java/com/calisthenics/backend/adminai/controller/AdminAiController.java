@@ -1,8 +1,11 @@
 package com.calisthenics.backend.adminai.controller;
 
 import com.calisthenics.backend.adminai.dto.*;
+import com.calisthenics.backend.adminai.dto.data.*;
 import com.calisthenics.backend.adminai.service.AdminAIService;
 import com.calisthenics.backend.adminai.service.AdminConversationService;
+import com.calisthenics.backend.adminai.service.AdminDataAccessService;
+import com.calisthenics.backend.adminai.service.AdminToolRouter;
 import com.calisthenics.backend.adminai.service.PlatformAnalyticsService;
 import com.calisthenics.backend.adminai.service.TrainingAnalyticsService;
 import com.calisthenics.backend.adminai.type.AdminAnalyticsRange;
@@ -42,6 +45,8 @@ public class AdminAiController {
     private final AdminConversationService adminConversationService;
     private final PlatformAnalyticsService platformAnalyticsService;
     private final TrainingAnalyticsService trainingAnalyticsService;
+    private final AdminDataAccessService adminDataAccessService;
+    private final AdminToolRouter adminToolRouter;
     private final UserRepository userRepository;
 
     @PostMapping("/chat")
@@ -177,6 +182,167 @@ public class AdminAiController {
     ) {
         Long adminId = resolveAdminUserId(currentAdmin);
         return ResponseEntity.ok(adminAIService.confirmImplementation(adminId, id));
+    }
+
+    @GetMapping("/analytics/users")
+    @Operation(summary = "Get aggregated global statistics across all registered users")
+    public ResponseEntity<AdminGlobalUserStatisticsResponse> getGlobalUserStatistics(
+            @RequestParam(required = false) AdminAnalyticsRange range,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate startDate,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate endDate
+    ) {
+        return ResponseEntity.ok(adminDataAccessService.getUserStatistics(range, startDate, endDate));
+    }
+
+    @GetMapping("/users")
+    @Operation(summary = "List and filter all platform users with server-side pagination and privacy masking")
+    public ResponseEntity<AdminPagedResult<AdminGlobalUserSummaryDto>> listGlobalUsers(
+            @RequestParam(required = false) String searchQuery,
+            @RequestParam(required = false) String experienceLevel,
+            @RequestParam(required = false) String fitnessGoal,
+            @RequestParam(required = false) String preferredFrequency,
+            @RequestParam(required = false) String activityStatus,
+            @RequestParam(required = false) Integer inactiveDaysThreshold,
+            @RequestParam(required = false) Double minCompletionRate,
+            @RequestParam(required = false) Double maxCompletionRate,
+            @RequestParam(required = false) String prProgressionStatus,
+            @RequestParam(required = false) Integer stalePrDaysThreshold,
+            @RequestParam(required = false) String coachRelationshipStatus,
+            @RequestParam(required = false) String roleFilter,
+            @RequestParam(required = false) String skillKeyword,
+            @RequestParam(required = false) String sortBy,
+            @RequestParam(required = false) AdminAnalyticsRange range,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate startDate,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate endDate,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size,
+            @RequestParam(defaultValue = "false") boolean includeEmail
+    ) {
+        AdminUserSegmentFilter filter = AdminUserSegmentFilter.builder()
+                .searchQuery(searchQuery)
+                .experienceLevel(experienceLevel)
+                .fitnessGoal(fitnessGoal)
+                .preferredFrequency(preferredFrequency)
+                .activityStatus(activityStatus)
+                .inactiveDaysThreshold(inactiveDaysThreshold)
+                .minCompletionRate(minCompletionRate)
+                .maxCompletionRate(maxCompletionRate)
+                .prProgressionStatus(prProgressionStatus)
+                .stalePrDaysThreshold(stalePrDaysThreshold)
+                .coachRelationshipStatus(coachRelationshipStatus)
+                .roleFilter(roleFilter)
+                .skillKeyword(skillKeyword)
+                .sortBy(sortBy)
+                .range(range)
+                .startDate(startDate)
+                .endDate(endDate)
+                .page(page)
+                .size(size)
+                .includeEmail(includeEmail)
+                .build();
+        return ResponseEntity.ok(adminDataAccessService.getAllUsers(filter));
+    }
+
+    @GetMapping("/users/{userId}")
+    @Operation(summary = "Inspect comprehensive read-only dossier for a single user")
+    public ResponseEntity<AdminUserDetailDossierResponse> getUserDetailDossier(
+            @PathVariable Long userId,
+            @RequestParam(defaultValue = "false") boolean includeEmail,
+            @RequestParam(required = false) AdminAnalyticsRange range,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate startDate,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate endDate
+    ) {
+        return ResponseEntity.ok(adminDataAccessService.getUserDetails(userId, includeEmail, range, startDate, endDate));
+    }
+
+    @GetMapping("/users/{userId}/workouts")
+    @Operation(summary = "Get read-only workout history and plans for a single user")
+    public ResponseEntity<AdminUserWorkoutHistoryResponse> getUserWorkoutHistory(
+            @PathVariable Long userId,
+            @RequestParam(required = false) AdminAnalyticsRange range,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate startDate,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate endDate
+    ) {
+        return ResponseEntity.ok(adminDataAccessService.getUserWorkoutHistory(userId, range, startDate, endDate));
+    }
+
+    @GetMapping("/users/{userId}/personal-records")
+    @Operation(summary = "Get read-only Personal Records, sharing, and coach feedback history for a single user")
+    public ResponseEntity<AdminUserPersonalRecordsResponse> getUserPersonalRecords(
+            @PathVariable Long userId,
+            @RequestParam(required = false) AdminAnalyticsRange range,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate startDate,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate endDate
+    ) {
+        return ResponseEntity.ok(adminDataAccessService.getUserPersonalRecords(userId, range, startDate, endDate));
+    }
+
+    @GetMapping("/users/{userId}/progress")
+    @Operation(summary = "Get read-only strength and workout consistency progression for a single user")
+    public ResponseEntity<AdminUserProgressResponse> getUserProgress(
+            @PathVariable Long userId,
+            @RequestParam(required = false) AdminAnalyticsRange range,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate startDate,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate endDate
+    ) {
+        return ResponseEntity.ok(adminDataAccessService.getUserProgress(userId, range, startDate, endDate));
+    }
+
+    @GetMapping("/users/{userId}/activity")
+    @Operation(summary = "Get privacy-safe chat, AI assistant, planner, and analysis usage metadata for a single user")
+    public ResponseEntity<AdminUserActivityResponse> getUserActivity(
+            @PathVariable Long userId,
+            @RequestParam(required = false) AdminAnalyticsRange range,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate startDate,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate endDate
+    ) {
+        return ResponseEntity.ok(adminDataAccessService.getUserActivity(userId, range, startDate, endDate));
+    }
+
+    @GetMapping("/analytics/coaching")
+    @Operation(summary = "Get aggregated coach-client relationships, invitations, assignments, and PR feedback metrics")
+    public ResponseEntity<AdminCoachClientStatisticsResponse> getCoachClientStatistics(
+            @RequestParam(required = false) AdminAnalyticsRange range,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate startDate,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate endDate
+    ) {
+        return ResponseEntity.ok(adminDataAccessService.getCoachClientStatistics(range, startDate, endDate));
+    }
+
+    @GetMapping("/analytics/engagement")
+    @Operation(summary = "Get platform engagement (DAU/WAU/MAU), experience-level comparisons, top skill improvers, and declining users")
+    public ResponseEntity<AdminPlatformEngagementResponse> getPlatformEngagement(
+            @RequestParam(required = false) String skillKeyword,
+            @RequestParam(required = false) AdminAnalyticsRange range,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate startDate,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate endDate
+    ) {
+        return ResponseEntity.ok(adminDataAccessService.getPlatformEngagement(skillKeyword, range, startDate, endDate));
+    }
+
+    @PostMapping("/analytics/segments")
+    @Operation(summary = "Filter and analyze custom user segments with paginated drill-down results")
+    public ResponseEntity<AdminUserSegmentsResponse> analyzeUserSegments(
+            @RequestBody(required = false) AdminUserSegmentFilter filter
+    ) {
+        return ResponseEntity.ok(adminDataAccessService.analyzeUserSegments(filter));
+    }
+
+    @PostMapping("/tools/execute")
+    @Operation(summary = "Invoke any named read-only Admin Agent tool directly")
+    public ResponseEntity<AdminToolExecuteResponse> executeAdminTool(
+            @RequestBody AdminToolExecuteRequest request
+    ) {
+        return ResponseEntity.ok(adminToolRouter.executeSingleTool(request));
+    }
+
+    @GetMapping("/audit-logs")
+    @Operation(summary = "Get recent administrative AI and global data access audit logs")
+    public ResponseEntity<List<AdminAiAuditLogResponse>> getAuditLogs(
+            @AuthenticationPrincipal UserPrincipal currentAdmin
+    ) {
+        Long adminId = resolveAdminUserId(currentAdmin);
+        return ResponseEntity.ok(adminAIService.getAuditLogs(adminId));
     }
 
     private Long resolveAdminUserId(UserPrincipal principal) {

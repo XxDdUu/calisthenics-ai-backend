@@ -119,6 +119,9 @@ class AdminAiIntegrationAndSecurityTest {
     @Autowired
     private ClientBodyMeasurementRepository clientBodyMeasurementRepository;
 
+    @Autowired
+    private jakarta.persistence.EntityManager entityManager;
+
     private User adminUser;
     private User coachUser;
     private User clientUser;
@@ -142,11 +145,13 @@ class AdminAiIntegrationAndSecurityTest {
         coachProfileRepository.deleteAll();
         exerciseRepository.deleteAll();
         userRepository.deleteAll();
+        entityManager.flush();
+        entityManager.clear();
     }
 
     @AfterEach
     void tearDown() {
-        cleanDb();
+        org.springframework.security.core.context.SecurityContextHolder.clearContext();
     }
 
     @BeforeEach

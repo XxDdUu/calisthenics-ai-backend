@@ -1,6 +1,7 @@
 package com.calisthenics.backend.aiworkout.gemini;
 
 import com.calisthenics.backend.adminai.dto.GeminiAdminAgentOutput;
+import com.calisthenics.backend.adminai.dto.data.GeminiAdminToolPlan;
 import com.calisthenics.backend.aichat.dto.GeminiAssistantOutput;
 import com.calisthenics.backend.aiworkout.gemini.dto.GeminiRequestDto;
 import com.calisthenics.backend.aiworkout.gemini.dto.GeminiResponseDto;
@@ -126,6 +127,18 @@ public class GeminiApiClient {
                 conversationContents,
                 buildAdminAgentResponseSchema(),
                 GeminiAdminAgentOutput.class
+        ).result().map(GeminiStructuredRawResult::payload);
+    }
+
+    public Optional<GeminiAdminToolPlan> planAdminTools(
+            String systemPrompt,
+            List<GeminiRequestDto.Content> conversationContents
+    ) {
+        return callGeminiConversation(
+                systemPrompt,
+                conversationContents,
+                buildAdminToolPlanSchema(),
+                GeminiAdminToolPlan.class
         ).result().map(GeminiStructuredRawResult::payload);
     }
 
@@ -437,6 +450,72 @@ public class GeminiApiClient {
         return rootSchema;
     }
 
+    public static Map<String, Object> buildAdminToolPlanSchema() {
+        Map<String, Object> props = new LinkedHashMap<>();
+        props.put("intent", Map.of(
+                "type", "STRING",
+                "enum", List.of(
+                        "PLATFORM_OVERVIEW",
+                        "USER_TRAINING_ANALYTICS",
+                        "EXERCISE_RECOMMENDATION",
+                        "WORKOUT_PROGRAM_RECOMMENDATION",
+                        "OPERATIONAL_INSIGHTS",
+                        "GENERAL_ADMIN_ADVISORY",
+                        "USER_STATISTICS_AND_SEARCH",
+                        "USER_DRILL_DOWN",
+                        "USER_SEGMENTATION_ANALYSIS",
+                        "COACH_CLIENT_ANALYTICS",
+                        "PLATFORM_ENGAGEMENT_COMPARISON"
+                ),
+                "description", "Primary administrative intent"
+        ));
+        props.put("tools", Map.of(
+                "type", "ARRAY",
+                "items", Map.of(
+                        "type", "STRING",
+                        "enum", List.of(
+                                "get_user_statistics",
+                                "get_all_users",
+                                "get_user_details",
+                                "get_user_workout_history",
+                                "get_user_personal_records",
+                                "get_user_progress",
+                                "get_user_activity",
+                                "get_coach_client_statistics",
+                                "get_platform_engagement",
+                                "analyze_user_segments",
+                                "generate_admin_recommendations"
+                        )
+                ),
+                "description", "Ordered list of read-only admin tools to invoke before answering"
+        ));
+        props.put("target_user_id", Map.of("type", "INTEGER", "description", "Target numeric user ID if inspecting a specific user"));
+        props.put("target_user_query", Map.of("type", "STRING", "description", "Target user full name or search query if inspecting a specific user"));
+        props.put("skill_keyword", Map.of("type", "STRING", "description", "Skill keyword such as Planche, Front Lever, Handstand, Muscle-up"));
+        props.put("experience_level", Map.of("type", "STRING", "description", "Experience level filter such as BEGINNER, INTERMEDIATE, ADVANCED, ELITE"));
+        props.put("fitness_goal", Map.of("type", "STRING", "description", "Fitness goal filter keyword"));
+        props.put("activity_status", Map.of("type", "STRING", "enum", List.of("ACTIVE", "AT_RISK", "INACTIVE"), "description", "User workout activity status filter"));
+        props.put("inactive_days_threshold", Map.of("type", "INTEGER", "description", "Days threshold for inactivity (e.g. 14)"));
+        props.put("pr_progression_status", Map.of("type", "STRING", "enum", List.of("IMPROVING", "STALE", "NONE"), "description", "PR progression filter"));
+        props.put("coach_relationship_status", Map.of(
+                "type", "STRING",
+                "enum", List.of("HAS_ACTIVE_COACH", "PENDING_INVITATION", "NO_COACH", "TERMINATED", "COACH_ROLE"),
+                "description", "Coach-client relationship status filter"
+        ));
+        props.put("min_completion_rate", Map.of("type", "NUMBER", "description", "Minimum workout completion rate percentage (0-100)"));
+        props.put("max_completion_rate", Map.of("type", "NUMBER", "description", "Maximum workout completion rate percentage (0-100)"));
+        props.put("range", Map.of("type", "STRING", "enum", List.of("TODAY", "LAST_7_DAYS", "LAST_30_DAYS", "CUSTOM"), "description", "Analytics time range"));
+        props.put("start_date", Map.of("type", "STRING", "description", "Optional custom start date YYYY-MM-DD"));
+        props.put("end_date", Map.of("type", "STRING", "description", "Optional custom end date YYYY-MM-DD"));
+        props.put("include_email", Map.of("type", "BOOLEAN", "description", "Set true only when admin explicitly asks for an authorized user email lookup"));
+
+        Map<String, Object> root = new LinkedHashMap<>();
+        root.put("type", "OBJECT");
+        root.put("properties", props);
+        root.put("required", List.of("intent", "tools"));
+        return root;
+    }
+
     public static Map<String, Object> buildAdminAgentResponseSchema() {
         Map<String, Object> rootProperties = new LinkedHashMap<>();
         rootProperties.put("intent", Map.of(
@@ -447,7 +526,12 @@ public class GeminiApiClient {
                         "EXERCISE_RECOMMENDATION",
                         "WORKOUT_PROGRAM_RECOMMENDATION",
                         "OPERATIONAL_INSIGHTS",
-                        "GENERAL_ADMIN_ADVISORY"
+                        "GENERAL_ADMIN_ADVISORY",
+                        "USER_STATISTICS_AND_SEARCH",
+                        "USER_DRILL_DOWN",
+                        "USER_SEGMENTATION_ANALYSIS",
+                        "COACH_CLIENT_ANALYTICS",
+                        "PLATFORM_ENGAGEMENT_COMPARISON"
                 ),
                 "description", "Detected administrative intent"
         ));
@@ -475,6 +559,10 @@ public class GeminiApiClient {
         rootProperties.put("generate_operational_insights", Map.of(
                 "type", "BOOLEAN",
                 "description", "True if the admin is asking for operational improvements or platform bottlenecks"
+        ));
+        rootProperties.put("generate_recommendations", Map.of(
+                "type", "BOOLEAN",
+                "description", "True if proactive administrative recommendations should be generated from global data"
         ));
         rootProperties.put("suggested_follow_ups", Map.of(
                 "type", "ARRAY",

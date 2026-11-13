@@ -3,6 +3,7 @@ package com.calisthenics.backend.adminai.service;
 import com.calisthenics.backend.admin.AdminExerciseService;
 import com.calisthenics.backend.admin.dto.AdminExerciseResponse;
 import com.calisthenics.backend.adminai.dto.*;
+import com.calisthenics.backend.adminai.dto.data.*;
 import com.calisthenics.backend.adminai.entity.AdminAiAuditLog;
 import com.calisthenics.backend.adminai.entity.AdminAiConversation;
 import com.calisthenics.backend.adminai.entity.AdminAiMessage;
@@ -42,12 +43,15 @@ public class AdminAIService {
     private final AdminExerciseService adminExerciseService;
     private final AdminAiRecommendationRepository recommendationRepository;
     private final AdminAiAuditLogRepository auditLogRepository;
+    private final AdminToolRouter adminToolRouter;
+    private final AdminAuthorizationService adminAuthorizationService;
     private final GeminiApiClient geminiApiClient;
     private final ObjectMapper objectMapper;
 
     @Transactional
     public AdminChatResponse chat(Long adminUserId, AdminChatRequest request) {
         User admin = conversationService.requireAdminUser(adminUserId);
+        adminAuthorizationService.requireAuthenticatedAdmin();
         if (request == null || request.getMessage() == null || request.getMessage().isBlank()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Message cannot be blank");
         }
@@ -67,7 +71,7 @@ public class AdminAIService {
                 detectedSkill
         );
 
-        // Prepare multi-turn conversation history for Gemini
+        // Prepare multi-turn Admin conversation history for Gemini (never includes regular users' chats/emails)
         List<AdminAiMessage> history = new ArrayList<>(conversationService.getRecentHistoryForPrompt(conversation.getId()));
         Collections.reverse(history);
         List<GeminiRequestDto.Content> geminiContents = new ArrayList<>();
@@ -79,20 +83,47 @@ public class AdminAIService {
                     .build());
         }
 
-        String systemPrompt = contextService.buildAdminSystemPrompt(context);
+        // Step 1: Tool planning (Gemini planner if configured + deterministic rule router)
+        GeminiAdminToolPlan toolPlan = null;
+        try {
+            toolPlan = geminiApiClient.planAdminTools(buildToolPlannerSystemPrompt(), geminiContents).orElse(null);
+        } catch (Exception ex) {
+            log.warn("Admin AI tool planner call skipped/failed, using deterministic router: {}", ex.getMessage());
+        }
+
+        AdminAiIntent plannedIntent = resolveIntent(userPrompt, null, toolPlan, request);
+        AdminToolRouter.RoutedChatToolsResult routedTools = adminToolRouter.routeAndExecuteForChat(
+                userPrompt,
+                request,
+                plannedIntent,
+                effectiveRange,
+                request.getStartDate(),
+                request.getEndDate(),
+                detectedSkill,
+                toolPlan
+        );
+
+        String baseSystemPrompt = contextService.buildAdminSystemPrompt(context);
+        String fullSystemPrompt = baseSystemPrompt + "\n" + routedTools.sanitizedToolContextForPrompt();
+
         GeminiAdminAgentOutput geminiOutput = null;
         try {
-            geminiOutput = geminiApiClient.callAdminAgent(systemPrompt, geminiContents).orElse(null);
+            geminiOutput = geminiApiClient.callAdminAgent(fullSystemPrompt, geminiContents).orElse(null);
         } catch (Exception ex) {
             log.warn("Admin AI Gemini call failed, falling back to deterministic analytical engine: {}", ex.getMessage());
         }
 
-        AdminAiIntent intent = resolveIntent(userPrompt, geminiOutput);
+        AdminAiIntent intent = resolveIntent(userPrompt, geminiOutput, toolPlan, request);
         if (geminiOutput != null && geminiOutput.getTargetSkill() != null && !geminiOutput.getTargetSkill().isBlank()) {
             detectedSkill = geminiOutput.getTargetSkill().trim();
         }
 
         List<AdminRecommendationResponse> generatedRecommendations = new ArrayList<>();
+        boolean wantsGlobalRecs = (geminiOutput != null && Boolean.TRUE.equals(geminiOutput.getGenerateRecommendations()))
+                || (userPrompt.toLowerCase().contains("recommend")
+                && !userPrompt.toLowerCase().contains("what exercises")
+                && !userPrompt.toLowerCase().contains("workout program"));
+
         if (intent == AdminAiIntent.EXERCISE_RECOMMENDATION
                 || (geminiOutput != null && Boolean.TRUE.equals(geminiOutput.getGenerateExerciseRecommendations()))) {
             generatedRecommendations.addAll(createExerciseRecommendations(admin, conversation, detectedSkill, detectedLevel));
@@ -102,19 +133,23 @@ public class AdminAIService {
             String focus = detectedSkill != null ? detectedSkill : userPrompt;
             generatedRecommendations.addAll(createWorkoutProgramRecommendations(admin, conversation, focus, levelStr));
         } else if (intent == AdminAiIntent.OPERATIONAL_INSIGHTS
-                || (geminiOutput != null && Boolean.TRUE.equals(geminiOutput.getGenerateOperationalInsights()))) {
-            generatedRecommendations.addAll(createOperationalRecommendations(admin, conversation, context.operationalInsights()));
+                || (geminiOutput != null && Boolean.TRUE.equals(geminiOutput.getGenerateOperationalInsights()))
+                || wantsGlobalRecs) {
+            List<AdminContextService.OperationalInsightCandidate> combinedInsights = !routedTools.dataRecommendations().isEmpty()
+                    ? routedTools.dataRecommendations()
+                    : context.operationalInsights();
+            generatedRecommendations.addAll(createOperationalRecommendations(admin, conversation, combinedInsights));
         }
 
         String replyContent = (geminiOutput != null && geminiOutput.getReply() != null && !geminiOutput.getReply().isBlank())
                 ? geminiOutput.getReply()
-                : buildDataGroundedReply(intent, userPrompt, detectedSkill, context, generatedRecommendations);
+                : buildDataGroundedReply(intent, userPrompt, detectedSkill, context, generatedRecommendations, routedTools);
 
         List<String> followUps = (geminiOutput != null && geminiOutput.getSuggestedFollowUps() != null && !geminiOutput.getSuggestedFollowUps().isEmpty())
                 ? geminiOutput.getSuggestedFollowUps()
                 : buildSuggestedFollowUps(intent, detectedSkill);
 
-        String metadataJson = buildMessageMetadata(intent, generatedRecommendations, context.overview());
+        String metadataJson = buildMessageMetadata(intent, generatedRecommendations, context.overview(), routedTools.executedTools());
         AdminAiMessage savedAssistantMsg = conversationService.saveMessage(
                 conversation,
                 "assistant",
@@ -134,8 +169,34 @@ public class AdminAIService {
                 .recommendations(generatedRecommendations)
                 .platformOverview(context.overview())
                 .trainingAnalytics(context.trainingAnalytics())
+                .executedTools(routedTools.executedTools())
+                .timeRangeUsed(routedTools.timeRange())
+                .userStatistics(routedTools.userStatistics())
+                .matchedUsers(routedTools.matchedUsers())
+                .inspectedUserDetail(routedTools.inspectedUserDetail())
+                .segmentAnalysis(routedTools.segmentAnalysis())
+                .platformEngagement(routedTools.platformEngagement())
+                .coachClientStatistics(routedTools.coachClientStatistics())
+                .missingDataNotes(routedTools.missingDataNotes())
                 .suggestedFollowUps(followUps)
                 .build();
+    }
+
+    @Transactional(readOnly = true)
+    public List<AdminAiAuditLogResponse> getAuditLogs(Long adminUserId) {
+        conversationService.requireAdminUser(adminUserId);
+        adminAuthorizationService.requireAuthenticatedAdmin();
+        return auditLogRepository.findTop50ByOrderByCreatedAtDesc().stream()
+                .map(logEntry -> AdminAiAuditLogResponse.builder()
+                        .id(logEntry.getId())
+                        .adminUserId(logEntry.getAdminUser() != null ? logEntry.getAdminUser().getId() : null)
+                        .action(logEntry.getAction())
+                        .targetType(logEntry.getTargetType())
+                        .targetId(logEntry.getTargetId())
+                        .details(logEntry.getDetails())
+                        .createdAt(logEntry.getCreatedAt())
+                        .build())
+                .toList();
     }
 
     @Transactional(readOnly = true)
@@ -570,14 +631,43 @@ public class AdminAIService {
                 admin.getId(), action, targetType, targetId, details);
     }
 
-    private AdminAiIntent resolveIntent(String userPrompt, GeminiAdminAgentOutput geminiOutput) {
+    private String buildToolPlannerSystemPrompt() {
+        return """
+                You are the Admin AI Tool Planner for Calisthenics AI.
+                Decide which read-only administrative tools should execute to gather exact database facts.
+                Available tools:
+                - get_user_statistics
+                - get_all_users
+                - get_user_details
+                - get_user_workout_history
+                - get_user_personal_records
+                - get_user_progress
+                - get_user_activity
+                - get_coach_client_statistics
+                - get_platform_engagement
+                - analyze_user_segments
+                - generate_admin_recommendations
+                Never fabricate data. Never request raw user passwords or private message text.
+                """;
+    }
+
+    private AdminAiIntent resolveIntent(
+            String userPrompt,
+            GeminiAdminAgentOutput geminiOutput,
+            GeminiAdminToolPlan toolPlan,
+            AdminChatRequest request
+    ) {
         if (geminiOutput != null && geminiOutput.getIntent() != null) {
             try {
                 return AdminAiIntent.valueOf(geminiOutput.getIntent().trim().toUpperCase());
             } catch (IllegalArgumentException ignored) {
             }
         }
-        String lower = userPrompt.toLowerCase();
+        if (request != null && request.getTargetUserId() != null) {
+            return AdminAiIntent.USER_DRILL_DOWN;
+        }
+        String lower = userPrompt != null ? userPrompt.toLowerCase() : "";
+
         if (lower.contains("what exercises")
                 || lower.contains("add exercise")
                 || lower.contains("missing exercise")
@@ -594,13 +684,66 @@ public class AdminAIService {
                 || (lower.contains("program") && (lower.contains("suggest") || lower.contains("create") || lower.contains("recommend") || lower.contains("draft")))) {
             return AdminAiIntent.WORKOUT_PROGRAM_RECOMMENDATION;
         }
+        if (lower.contains("inspect user")
+                || lower.contains("user details")
+                || lower.contains("details for user")
+                || lower.contains("workout history for")
+                || lower.contains("personal records for")
+                || lower.contains("prs for ")
+                || lower.contains("progress for ")
+                || lower.contains("activity for ")
+                || lower.contains("activity of ")
+                || lower.matches(".*\\buser(?:\\s+id|\\s*#)?\\s*[:#]?\\s*\\d+.*")) {
+            return AdminAiIntent.USER_DRILL_DOWN;
+        }
+        if (lower.contains("active coach")
+                || lower.contains("coach-client")
+                || lower.contains("coach relationship")
+                || lower.contains("top coaches")
+                || lower.contains("pending invitation")
+                || (lower.contains("coach") && (lower.contains("how many") || lower.contains("stats") || lower.contains("statistics")))) {
+            return AdminAiIntent.COACH_CLIENT_ANALYTICS;
+        }
+        if (lower.contains("not completed any workouts")
+                || lower.contains("users who have not")
+                || lower.contains("not updated their personal records")
+                || lower.contains("stale pr")
+                || lower.contains("segment")
+                || lower.contains("filter users")
+                || lower.contains("users without")
+                || lower.contains("no coach")
+                || lower.contains("completion rate below")
+                || lower.contains("completion rate above")) {
+            return AdminAiIntent.USER_SEGMENTATION_ANALYSIS;
+        }
+        if (lower.contains("improved their")
+                || lower.contains("most improved")
+                || lower.contains("consistency has declined")
+                || lower.contains("declining consistency")
+                || lower.contains("experience level")
+                || lower.contains("compare user engagement")
+                || lower.contains("stickiness")
+                || (lower.contains("compare") && lower.contains("engagement"))) {
+            return AdminAiIntent.PLATFORM_ENGAGEMENT_COMPARISON;
+        }
+        if (lower.contains("how many users")
+                || lower.contains("currently registered")
+                || lower.contains("total registered users")
+                || lower.contains("search user")
+                || lower.contains("find user")
+                || lower.contains("list users")) {
+            return AdminAiIntent.USER_STATISTICS_AND_SEARCH;
+        }
         if (lower.contains("need improvement")
                 || lower.contains("operational")
                 || lower.contains("bottleneck")
                 || lower.contains("opportunity")
                 || lower.contains("opportunities")
                 || lower.contains("issues")
-                || lower.contains("attention")) {
+                || lower.contains("attention")
+                || lower.contains("at risk of becoming inactive")
+                || lower.contains("benefit from coach")
+                || lower.contains("weaknesses in current")) {
             return AdminAiIntent.OPERATIONAL_INSIGHTS;
         }
         if (lower.contains("trend")
@@ -613,10 +756,16 @@ public class AdminAIService {
                 || lower.contains("training goal")) {
             return AdminAiIntent.USER_TRAINING_ANALYTICS;
         }
+        if (toolPlan != null && toolPlan.getIntent() != null) {
+            try {
+                return AdminAiIntent.valueOf(toolPlan.getIntent().trim().toUpperCase());
+            } catch (IllegalArgumentException ignored) {
+            }
+        }
         if (lower.contains("summarize")
                 || lower.contains("overview")
                 || lower.contains("platform activity")
-                || lower.contains("how many users")
+                || lower.contains("training activity")
                 || lower.contains("active users")
                 || lower.contains("statistics")
                 || lower.contains("this month")
@@ -672,17 +821,19 @@ public class AdminAIService {
             String userPrompt,
             String detectedSkill,
             AdminContextService.AdminFullContext context,
-            List<AdminRecommendationResponse> recommendations
+            List<AdminRecommendationResponse> recommendations,
+            AdminToolRouter.RoutedChatToolsResult routedTools
     ) {
         AdminPlatformOverviewResponse ov = context.overview();
         AdminTrainingAnalyticsResponse tr = context.trainingAnalytics();
+        AdminTimeRangeMetadata rangeMeta = routedTools.timeRange();
         StringBuilder sb = new StringBuilder();
 
         switch (intent) {
             case PLATFORM_OVERVIEW -> {
                 sb.append("### 📊 Platform Activity Summary (").append(ov.getRange()).append(": ")
                         .append(ov.getStartDate()).append(" to ").append(ov.getEndDate()).append(")\n\n");
-                sb.append("#### 1. User & Coaching Ecosystem\n");
+                sb.append("#### 1. Measured Platform & Coaching Metrics\n");
                 sb.append("- **Total Registered Users**: ").append(ov.getTotalRegisteredUsers()).append("\n");
                 sb.append("- **Active Users in Period**: ").append(ov.getActiveUsersInPeriod())
                         .append(" (**").append(ov.getEngagementMetrics().getActiveUserRatePercent()).append("%** engagement rate)\n");
@@ -707,6 +858,130 @@ public class AdminAIService {
                         .append(" in period (**").append(ov.getTotalRecordedPrsAllTime()).append("** all-time)\n");
                 sb.append("- **Exercise Catalog**: ").append(ov.getActiveExercises())
                         .append(" active / ").append(ov.getTotalExercises()).append(" total exercises\n");
+            }
+            case USER_STATISTICS_AND_SEARCH -> {
+                AdminGlobalUserStatisticsResponse s = routedTools.userStatistics();
+                sb.append("### 👥 Global User Statistics (").append(rangeMeta.getRange()).append(": ")
+                        .append(rangeMeta.getStartDate()).append(" to ").append(rangeMeta.getEndDate()).append(")\n\n");
+                if (s != null) {
+                    sb.append("- **Total Registered Users**: **").append(s.getTotalRegisteredUsers()).append("** (")
+                            .append(s.getTotalClients()).append(" Clients, ")
+                            .append(s.getTotalCoaches()).append(" Coaches [").append(s.getVerifiedCoaches()).append(" verified], ")
+                            .append(s.getTotalAdmins()).append(" Admins)\n");
+                    sb.append("- **Active Users**: ").append(s.getActiveUsersToday()).append(" Today | ")
+                            .append(s.getActiveUsers7Days()).append(" (7d) | ")
+                            .append(s.getActiveUsers30Days()).append(" (30d)\n");
+                    sb.append("- **Inactive (14+ days without completed workout)**: **").append(s.getInactiveUsers14PlusDays())
+                            .append("** (At-risk 7-14d: ").append(s.getAtRiskUsers7To14Days()).append(")\n");
+                    sb.append("- **Workout Completion Rate (in range)**: **").append(s.getOverallWorkoutCompletionRate())
+                            .append("%** (").append(s.getCompletedWorkoutsInRange()).append(" / ").append(s.getTotalWorkoutsInRange()).append(")\n");
+                    sb.append("- **Personal Records**: ").append(s.getTotalPersonalRecordsAllTime()).append(" all-time (")
+                            .append(s.getNewPersonalRecordsInRange()).append(" in range, ").append(s.getUsersWithStalePrs30PlusDays()).append(" users with stale PRs 30d+)\n");
+                }
+            }
+            case USER_SEGMENTATION_ANALYSIS -> {
+                AdminUserSegmentsResponse seg = routedTools.segmentAnalysis();
+                sb.append("### 🎯 User Segmentation Analysis (").append(rangeMeta.getRange()).append(": ")
+                        .append(rangeMeta.getStartDate()).append(" to ").append(rangeMeta.getEndDate()).append(")\n\n");
+                if (seg != null) {
+                    sb.append("- **Measured Segment Summary**: ").append(seg.getSegmentSummary()).append("\n");
+                    sb.append("- **Matched Users**: **").append(seg.getMatchedCount()).append("** (showing ").append(seg.getReturnedCount()).append(" on page ").append(seg.getPage() + 1).append(")\n\n");
+                    if (seg.getUsers().isEmpty()) {
+                        sb.append("- No users matched all specified segment criteria.\n");
+                    } else {
+                        for (AdminGlobalUserSummaryDto u : seg.getUsers().stream().limit(15).toList()) {
+                            sb.append("- **#").append(u.getUserId()).append(" ").append(u.getFullName()).append("** (`")
+                                    .append(u.getExperienceLevel()).append("` · `").append(u.getActivityStatus()).append("`) — ")
+                                    .append("Workouts: ").append(u.getCompletedWorkouts()).append("/").append(u.getTotalWorkouts())
+                                    .append(" (**").append(u.getWorkoutCompletionRate()).append("%**), ")
+                                    .append("PRs: ").append(u.getTotalPersonalRecords())
+                                    .append(", Coach: `").append(u.getCoachRelationshipStatus()).append("`\n");
+                        }
+                    }
+                }
+            }
+            case USER_DRILL_DOWN -> {
+                AdminUserDetailDossierResponse d = routedTools.inspectedUserDetail();
+                sb.append("### 🔎 User Drill-Down Inspection (").append(rangeMeta.getRange()).append(": ")
+                        .append(rangeMeta.getStartDate()).append(" to ").append(rangeMeta.getEndDate()).append(")\n\n");
+                if (d == null) {
+                    sb.append("- Could not identify a unique target user from the request. Specify a user ID or select a user from the Users & Segments directory.\n");
+                } else {
+                    sb.append("- **User**: **#").append(d.getUserId()).append(" ").append(d.getFullName()).append("** (`")
+                            .append(d.getAccountCategory()).append("` · `").append(d.getExperienceLevel()).append("`) — Email: `")
+                            .append(d.getMaskedEmail()).append("`\n");
+                    sb.append("- **Profile**: Goals=`").append(d.getPrimaryGoals()).append("`, Preferred Frequency=`")
+                            .append(d.getPreferredFrequency()).append("`, Height=").append(d.getHeightCm()).append("cm, Latest Weight=")
+                            .append(d.getLatestWeightKg()).append("kg\n");
+                    sb.append("- **Workouts**: ").append(d.getWorkoutSummary().getCompletedSessions()).append(" / ")
+                            .append(d.getWorkoutSummary().getTotalSessions()).append(" completed (**")
+                            .append(d.getWorkoutSummary().getCompletionRate()).append("%**), Consistency=`")
+                            .append(d.getWorkoutSummary().getConsistencyTrend()).append("`\n");
+                    sb.append("- **Personal Records**: ").append(d.getPersonalRecordsSummary().getTotalRecords())
+                            .append(" total (Max improvement: ").append(d.getPersonalRecordsSummary().getMaxImprovementPercent())
+                            .append("%, Coach feedback received: ").append(d.getPersonalRecordsSummary().getCoachFeedbackCount()).append(")\n");
+                    sb.append("- **Platform & AI Activity**: ").append(d.getActivitySummary().getAiMessagesInRange())
+                            .append(" AI assistant messages, ").append(d.getActivitySummary().getChatMessagesSentInRange())
+                            .append(" chat messages, ").append(d.getActivitySummary().getWorkoutPlannerRunsInRange())
+                            .append(" planner runs (private message text redacted)\n");
+                    sb.append("- **Coach Relationships**: ").append(d.getCoachRelationships().size()).append(" record(s)\n");
+                }
+            }
+            case COACH_CLIENT_ANALYTICS -> {
+                AdminCoachClientStatisticsResponse c = routedTools.coachClientStatistics();
+                sb.append("### 🤝 Coach-Client Ecosystem Analytics (").append(rangeMeta.getRange()).append(": ")
+                        .append(rangeMeta.getStartDate()).append(" to ").append(rangeMeta.getEndDate()).append(")\n\n");
+                if (c != null) {
+                    sb.append("- **Coaches**: **").append(c.getTotalCoaches()).append("** total (")
+                            .append(c.getVerifiedCoaches()).append(" verified, ").append(c.getAcceptingClientsCoaches()).append(" accepting clients)\n");
+                    sb.append("- **Active Coach-Client Relationships**: **").append(c.getActiveRelationships())
+                            .append("** across **").append(c.getClientsWithActiveCoach()).append("** clients (")
+                            .append(c.getPendingInvitations()).append(" pending invitations, ").append(c.getTerminatedRelationships()).append(" terminated)\n");
+                    sb.append("- **Assigned Workout Plans**: ").append(c.getActiveAssignedPlans()).append(" active / ")
+                            .append(c.getTotalAssignedPlans()).append(" total (").append(c.getCompletedAssignedPlans()).append(" completed)\n");
+                    sb.append("- **Coach PR Feedback Rate**: **").append(c.getFeedbackResponseRate()).append("%** (")
+                            .append(c.getSharedPrsWithFeedback()).append(" / ").append(c.getTotalSharedPrs()).append(" shared PRs)\n");
+                }
+            }
+            case PLATFORM_ENGAGEMENT_COMPARISON -> {
+                AdminPlatformEngagementResponse e = routedTools.platformEngagement();
+                sb.append("### 📈 Platform Engagement & Progression Comparison (").append(rangeMeta.getRange()).append(": ")
+                        .append(rangeMeta.getStartDate()).append(" to ").append(rangeMeta.getEndDate()).append(")\n\n");
+                if (e != null) {
+                    sb.append("- **Engagement**: DAU=").append(e.getDauCount()).append(", WAU=").append(e.getWauCount())
+                            .append(", MAU=").append(e.getMauCount()).append(" (Stickiness: **")
+                            .append(e.getStickinessDauToMauPercent()).append("%**)\n\n");
+                    sb.append("#### Experience-Level Comparison\n");
+                    for (AdminPlatformEngagementResponse.ExperienceComparisonItem item : e.getExperienceComparisons()) {
+                        sb.append("- **").append(item.getExperienceLevel()).append("**: ")
+                                .append(item.getUserCount()).append(" users, ").append(item.getActiveUserCount())
+                                .append(" active (**").append(item.getActiveRatePercent()).append("%**), completion **")
+                                .append(item.getAvgCompletionRate()).append("%**, PRs=").append(item.getPrCount())
+                                .append(", avg AI msgs/user=").append(item.getAvgAiInteractionsPerUser()).append("\n");
+                    }
+                    if (!e.getTopSkillImprovers().isEmpty()) {
+                        sb.append("\n#### Top Skill Improvers\n");
+                        for (AdminPlatformEngagementResponse.SkillImproverItem imp : e.getTopSkillImprovers()) {
+                            sb.append("- **#").append(imp.getUserId()).append(" ").append(imp.getFullName()).append("** — ")
+                                    .append(imp.getExerciseName()).append(": **+").append(imp.getImprovementPercent())
+                                    .append("%** (latest ").append(imp.getLatestRecordValue()).append(" ").append(imp.getUnit()).append(")\n");
+                        }
+                    }
+                    if (!e.getDecliningConsistencyUsers().isEmpty()) {
+                        sb.append("\n#### Users with Declining Training Consistency\n");
+                        for (AdminGlobalUserSummaryDto u : e.getDecliningConsistencyUsers()) {
+                            sb.append("- **#").append(u.getUserId()).append(" ").append(u.getFullName())
+                                    .append("** (").append(u.getWorkoutCompletionRate()).append("% completion)\n");
+                        }
+                    }
+                    if (!e.getStalePrUsers().isEmpty()) {
+                        sb.append("\n#### Users Without Recent PR Updates (30+ days)\n");
+                        for (AdminGlobalUserSummaryDto u : e.getStalePrUsers()) {
+                            sb.append("- **#").append(u.getUserId()).append(" ").append(u.getFullName())
+                                    .append("** (Total PRs: ").append(u.getTotalPersonalRecords()).append(")\n");
+                        }
+                    }
+                }
             }
             case USER_TRAINING_ANALYTICS -> {
                 sb.append("### 🏋️ User & Training Analytics Report\n\n");
@@ -821,15 +1096,36 @@ public class AdminAIService {
             }
         }
 
+        if (routedTools.missingDataNotes() != null && !routedTools.missingDataNotes().isEmpty()) {
+            sb.append("\n#### Data Completeness Notes\n");
+            for (String note : routedTools.missingDataNotes()) {
+                sb.append("- ").append(note).append("\n");
+            }
+        }
         return sb.toString();
     }
 
     private List<String> buildSuggestedFollowUps(AdminAiIntent intent, String detectedSkill) {
         return switch (intent) {
-            case PLATFORM_OVERVIEW -> List.of(
-                    "Analyze user training trends",
-                    "Which areas of the platform need improvement?",
+            case PLATFORM_OVERVIEW, USER_STATISTICS_AND_SEARCH -> List.of(
+                    "Show users who have not completed any workouts in the last 14 days.",
+                    "Compare user engagement across different experience levels.",
                     "What exercises should we add to improve our Planche training library?"
+            );
+            case USER_SEGMENTATION_ANALYSIS -> List.of(
+                    "Identify users whose training consistency has declined.",
+                    "How many users have active coaches?",
+                    "Which areas of the platform need improvement?"
+            );
+            case USER_DRILL_DOWN -> List.of(
+                    "Show users who have not updated their Personal Records recently.",
+                    "How many users have active coaches?",
+                    "Suggest new workout programs"
+            );
+            case COACH_CLIENT_ANALYTICS, PLATFORM_ENGAGEMENT_COMPARISON -> List.of(
+                    "Which exercises are most frequently performed?",
+                    "Which areas of the platform need improvement?",
+                    "Suggest new workout programs"
             );
             case USER_TRAINING_ANALYTICS -> List.of(
                     "Identify missing exercise progressions",
@@ -857,7 +1153,8 @@ public class AdminAIService {
     private String buildMessageMetadata(
             AdminAiIntent intent,
             List<AdminRecommendationResponse> recommendations,
-            AdminPlatformOverviewResponse overview
+            AdminPlatformOverviewResponse overview,
+            List<AdminToolExecutionRecord> executedTools
     ) {
         try {
             Map<String, Object> meta = new LinkedHashMap<>();
@@ -865,6 +1162,7 @@ public class AdminAIService {
             meta.put("range", overview.getRange().name());
             meta.put("recommendationIds", recommendations.stream().map(AdminRecommendationResponse::getId).toList());
             meta.put("recommendationCount", recommendations.size());
+            meta.put("executedTools", executedTools.stream().map(AdminToolExecutionRecord::getToolName).toList());
             return objectMapper.writeValueAsString(meta);
         } catch (Exception ex) {
             return null;
@@ -880,6 +1178,11 @@ public class AdminAIService {
                 case EXERCISE_RECOMMENDATION -> "Exercise Library Recommendations";
                 case WORKOUT_PROGRAM_RECOMMENDATION -> "Draft Workout Programs";
                 case OPERATIONAL_INSIGHTS -> "Operational Improvements";
+                case USER_STATISTICS_AND_SEARCH -> "Global User Statistics";
+                case USER_DRILL_DOWN -> "User Inspection Dossier";
+                case USER_SEGMENTATION_ANALYSIS -> "User Segment Analysis";
+                case COACH_CLIENT_ANALYTICS -> "Coach-Client Ecosystem";
+                case PLATFORM_ENGAGEMENT_COMPARISON -> "Engagement Comparison";
                 default -> "Admin AI Advisory";
             };
         }

@@ -37,6 +37,9 @@ public class GeminiAdminAgentOutput {
     @JsonProperty("generate_operational_insights")
     private Boolean generateOperationalInsights;
 
+    @JsonProperty("generate_recommendations")
+    private Boolean generateRecommendations;
+
     @JsonProperty("suggested_follow_ups")
     private List<String> suggestedFollowUps;
 }
