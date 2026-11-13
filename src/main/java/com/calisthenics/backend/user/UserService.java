@@ -59,6 +59,18 @@ public class UserService {
         return mapToProfileResponse(updated);
     }
 
+    @Transactional
+    public UserProfileResponse updateUserOnboardingStatus(Long userId, OnboardingStatus status) {
+        if (status == null) {
+            throw new IllegalArgumentException("Onboarding status must not be null");
+        }
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
+        user.setOnboardingStatus(status);
+        User updated = userRepository.save(user);
+        return mapToProfileResponse(updated);
+    }
+
     @Transactional(readOnly = true)
     public List<UserProfileResponse> getAllUsers() {
         return userRepository.findAll().stream()
@@ -101,6 +113,7 @@ public class UserService {
                 .role(user.getRole().name())
                 .experienceLevel(user.getExperienceLevel())
                 .gender(user.getGender())
+                .onboardingStatus(user.getOnboardingStatus() != null ? user.getOnboardingStatus() : OnboardingStatus.NOT_SHOWN)
                 .createdAt(user.getCreatedAt())
                 .build();
     }

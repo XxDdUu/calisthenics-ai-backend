@@ -1,6 +1,7 @@
 package com.calisthenics.backend.security.dto;
 
 import com.calisthenics.backend.user.Gender;
+import com.calisthenics.backend.user.OnboardingStatus;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -21,4 +22,5 @@ public class AuthResponse {
     private String fullName;
     private String role;
     private Gender gender;
+    private OnboardingStatus onboardingStatus;
 }

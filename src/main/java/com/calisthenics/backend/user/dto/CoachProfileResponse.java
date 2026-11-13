@@ -38,6 +38,10 @@ public class CoachProfileResponse {
     private Long completedClientsCount;
     private Long assignedPlansCount;
 
+    // Aggregated visible student reviews (null average when there are none)
+    private Double averageRating;
+    private Long reviewCount;
+
     // Connection context relative to the requesting user
     private String connectionStatus; // PENDING, ACTIVE, REJECTED, CANCELLED, or null
     private Long relationshipId;

@@ -80,6 +80,7 @@ public class FirebaseAuthService {
                 .fullName(user.getFullName())
                 .role(user.getRole().name())
                 .gender(user.getGender())
+                .onboardingStatus(user.getOnboardingStatus() != null ? user.getOnboardingStatus() : com.calisthenics.backend.user.OnboardingStatus.NOT_SHOWN)
                 .build();
     }
 }

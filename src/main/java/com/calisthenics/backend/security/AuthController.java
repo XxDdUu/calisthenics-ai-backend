@@ -4,6 +4,7 @@ import com.calisthenics.backend.security.dto.*;
 import com.calisthenics.backend.security.passwordreset.PasswordResetService;
 import com.calisthenics.backend.security.registration.RegistrationOtpService;
 import com.calisthenics.backend.user.Gender;
+import com.calisthenics.backend.user.OnboardingStatus;
 import com.calisthenics.backend.user.Role;
 import com.calisthenics.backend.user.User;
 import com.calisthenics.backend.user.UserRepository;
@@ -110,9 +111,11 @@ public class AuthController {
 
             String accessToken = tokenProvider.generateAccessToken(authentication);
             String refreshToken = tokenProvider.generateRefreshToken(userPrincipal);
-            Gender gender = userRepository.findById(userPrincipal.getId())
-                    .map(User::getGender)
-                    .orElse(null);
+            User user = userRepository.findById(userPrincipal.getId()).orElse(null);
+            Gender gender = user != null ? user.getGender() : null;
+            OnboardingStatus onboardingStatus = user != null && user.getOnboardingStatus() != null
+                    ? user.getOnboardingStatus()
+                    : OnboardingStatus.NOT_SHOWN;
 
             AuthResponse authResponse = AuthResponse.builder()
                     .accessToken(accessToken)
@@ -122,6 +125,7 @@ public class AuthController {
                     .fullName(userPrincipal.getFullName())
                     .role(userPrincipal.getAuthorities().iterator().next().getAuthority())
                     .gender(gender)
+                    .onboardingStatus(onboardingStatus)
                     .build();
 
             return ResponseEntity.ok(authResponse);
@@ -186,6 +190,7 @@ public class AuthController {
                     .fullName(user.getFullName())
                     .role(user.getRole().name())
                     .gender(user.getGender())
+                    .onboardingStatus(user.getOnboardingStatus() != null ? user.getOnboardingStatus() : OnboardingStatus.NOT_SHOWN)
                     .build();
 
             return ResponseEntity.ok(authResponse);

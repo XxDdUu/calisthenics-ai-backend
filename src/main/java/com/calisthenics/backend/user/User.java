@@ -51,6 +51,11 @@ public class User {
     @Column(name = "gender", length = 20)
     private Gender gender;
 
+    @Enumerated(EnumType.STRING)
+    @Column(name = "onboarding_status", length = 30)
+    @Builder.Default
+    private OnboardingStatus onboardingStatus = OnboardingStatus.NOT_SHOWN;
+
     @CreationTimestamp
     @Column(name = "created_at", updatable = false)
     private ZonedDateTime createdAt;

@@ -2,6 +2,7 @@ package com.calisthenics.backend.user;
 
 import com.calisthenics.backend.security.UserPrincipal;
 import com.calisthenics.backend.user.dto.UpdateGenderRequest;
+import com.calisthenics.backend.user.dto.UpdateOnboardingStatusRequest;
 import com.calisthenics.backend.user.dto.UpdateProfileRequest;
 import com.calisthenics.backend.user.dto.UserProfileResponse;
 import io.swagger.v3.oas.annotations.Operation;
@@ -49,6 +50,18 @@ public class UserController {
         UserProfileResponse updatedProfile = userService.updateUserGender(
                 currentUser.getId(),
                 updateGenderRequest.getGender()
+        );
+        return ResponseEntity.ok(updatedProfile);
+    }
+
+    @PatchMapping("/me/onboarding-status")
+    @Operation(summary = "Update authenticated user's onboarding status")
+    public ResponseEntity<UserProfileResponse> updateCurrentUserOnboardingStatus(
+            @AuthenticationPrincipal UserPrincipal currentUser,
+            @Valid @RequestBody UpdateOnboardingStatusRequest updateRequest) {
+        UserProfileResponse updatedProfile = userService.updateUserOnboardingStatus(
+                currentUser.getId(),
+                updateRequest.getStatus()
         );
         return ResponseEntity.ok(updatedProfile);
     }

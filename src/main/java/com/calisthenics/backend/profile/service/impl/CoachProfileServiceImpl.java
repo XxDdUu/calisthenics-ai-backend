@@ -1,6 +1,8 @@
 package com.calisthenics.backend.profile.service.impl;
 
 import com.calisthenics.backend.chat.repository.ChatConversationRepository;
+import com.calisthenics.backend.review.entity.CoachReviewStatus;
+import com.calisthenics.backend.review.repository.CoachReviewRepository;
 import com.calisthenics.backend.coachclient.entity.CoachClientRelationship;
 import com.calisthenics.backend.coachclient.repository.CoachClientRelationshipRepository;
 import com.calisthenics.backend.coachclient.repository.WorkoutPlanAssignmentRepository;
@@ -32,6 +34,7 @@ public class CoachProfileServiceImpl implements CoachProfileService {
     private final CoachClientRelationshipRepository relationshipRepository;
     private final WorkoutPlanAssignmentRepository assignmentRepository;
     private final ChatConversationRepository chatConversationRepository;
+    private final CoachReviewRepository coachReviewRepository;
 
     @Override
     @Transactional(readOnly = true)
@@ -151,6 +154,13 @@ public class CoachProfileServiceImpl implements CoachProfileService {
                         CoachClientRelationshipStatus.TERMINATED));
         long assignedPlans = assignmentRepository.countByCoachIdAndStatus(coachId, WorkoutPlanAssignmentStatus.ACTIVE);
 
+        long reviewCount = coachReviewRepository.countByCoachIdAndStatus(coachId, CoachReviewStatus.VISIBLE);
+        Double averageRating = null;
+        if (reviewCount > 0) {
+            Object avg = coachReviewRepository.averages(coachId).get(0)[0];
+            averageRating = avg == null ? null : Math.round(((Number) avg).doubleValue() * 10.0) / 10.0;
+        }
+
         String connectionStatus = null;
         Long relationshipId = null;
         Long conversationId = null;
@@ -217,6 +227,8 @@ public class CoachProfileServiceImpl implements CoachProfileService {
                 .activeClientsCount(activeClients)
                 .completedClientsCount(completedClients)
                 .assignedPlansCount(assignedPlans)
+                .averageRating(averageRating)
+                .reviewCount(reviewCount)
                 .connectionStatus(connectionStatus)
                 .relationshipId(relationshipId)
                 .conversationId(conversationId)

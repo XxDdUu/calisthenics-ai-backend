@@ -224,6 +224,7 @@ public class RegistrationOtpService {
                 .fullName(savedUser.getFullName())
                 .role(savedUser.getRole().name())
                 .gender(savedUser.getGender())
+                .onboardingStatus(savedUser.getOnboardingStatus() != null ? savedUser.getOnboardingStatus() : com.calisthenics.backend.user.OnboardingStatus.NOT_SHOWN)
                 .build();
     }
 
