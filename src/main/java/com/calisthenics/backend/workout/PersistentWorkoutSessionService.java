@@ -273,6 +273,59 @@ public class PersistentWorkoutSessionService {
     }
 
     @Transactional
+    public PersistentWorkoutSessionResponse addSet(Long userId, Long sessionId, Long exerciseId) {
+        WorkoutSession session = activeOwnedSession(userId, sessionId);
+        WorkoutSessionExercise exercise = sessionExercise(session, exerciseId);
+        if (exercise.getStatus() == WorkoutSessionExerciseStatus.SKIPPED) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Unskip the exercise before adding sets");
+        }
+        int nextSetNumber = exercise.getSets().stream()
+                .mapToInt(WorkoutSessionSet::getSetNumber)
+                .max().orElse(0) + 1;
+        WorkoutSessionSet newSet = WorkoutSessionSet.builder()
+                .workoutSessionExercise(exercise)
+                .setNumber(nextSetNumber)
+                .completed(false)
+                .reps(exercise.getTargetReps())
+                .holdDurationSeconds(exercise.getTargetHoldDurationSeconds())
+                .build();
+        exercise.getSets().add(newSet);
+        exercise.setTargetSets(exercise.getSets().size());
+        exercise.setStatus(WorkoutSessionExerciseStatus.IN_PROGRESS);
+        session.setLastSavedAt(ZonedDateTime.now());
+        sessionRepository.flush();
+        return map(session);
+    }
+
+    @Transactional
+    public PersistentWorkoutSessionResponse deleteSet(Long userId, Long sessionId, Long exerciseId, Long setId) {
+        WorkoutSession session = activeOwnedSession(userId, sessionId);
+        WorkoutSessionExercise exercise = sessionExercise(session, exerciseId);
+        if (exercise.getStatus() == WorkoutSessionExerciseStatus.SKIPPED) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Unskip the exercise before removing sets");
+        }
+        if (exercise.getSets().size() <= 1) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "An exercise must contain at least one set");
+        }
+        WorkoutSessionSet set = exercise.getSets().stream()
+                .filter(item -> item.getId().equals(setId))
+                .findFirst()
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Workout set not found"));
+        exercise.getSets().remove(set);
+        int currentNum = 1;
+        for (WorkoutSessionSet s : exercise.getSets()) {
+            s.setSetNumber(currentNum++);
+        }
+        exercise.setTargetSets(exercise.getSets().size());
+        exercise.setStatus(exercise.getSets().stream().allMatch(WorkoutSessionSet::isCompleted) && !exercise.getSets().isEmpty()
+                ? WorkoutSessionExerciseStatus.COMPLETED
+                : WorkoutSessionExerciseStatus.IN_PROGRESS);
+        session.setLastSavedAt(ZonedDateTime.now());
+        sessionRepository.flush();
+        return map(session);
+    }
+
+    @Transactional
     public PersistentWorkoutSessionResponse updateExercise(
             Long userId, Long sessionId, Long exerciseId, UpdateWorkoutSessionExerciseRequest request) {
         WorkoutSession session = activeOwnedSession(userId, sessionId);

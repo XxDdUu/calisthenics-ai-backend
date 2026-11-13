@@ -388,4 +388,47 @@ class PersistentWorkoutSessionServiceTest {
                         new UpdateWorkoutSessionSetRequest(10, null, BigDecimal.ZERO, null, true, null, 0L)));
         assertEquals(HttpStatus.CONFLICT, error.getStatusCode());
     }
+
+    @Test
+    void addAndRemoveSetsDynamically() {
+        Long userId = 4L;
+        Long sessionId = 100L;
+        Long exerciseId = 50L;
+        User user = User.builder().id(userId).email("user@test.io").build();
+        WorkoutSessionSet set1 = WorkoutSessionSet.builder().id(1L).setNumber(1).completed(false).build();
+        WorkoutSessionSet set2 = WorkoutSessionSet.builder().id(2L).setNumber(2).completed(false).build();
+        WorkoutSessionExercise exercise = WorkoutSessionExercise.builder()
+                .id(exerciseId)
+                .exerciseNameSnapshot("Pull-up")
+                .targetSets(2)
+                .targetReps(8)
+                .restSeconds(90)
+                .status(WorkoutSessionExerciseStatus.IN_PROGRESS)
+                .build();
+        set1.setWorkoutSessionExercise(exercise);
+        set2.setWorkoutSessionExercise(exercise);
+        exercise.getSets().add(set1);
+        exercise.getSets().add(set2);
+        WorkoutSession session = WorkoutSession.builder()
+                .id(sessionId)
+                .user(user)
+                .status(WorkoutSessionStatus.IN_PROGRESS)
+                .exercises(List.of(exercise))
+                .build();
+        exercise.setWorkoutSession(session);
+
+        when(sessionRepository.findByIdAndUserId(sessionId, userId)).thenReturn(Optional.of(session));
+
+        // 1. Add set
+        var responseAfterAdd = service.addSet(userId, sessionId, exerciseId);
+        assertEquals(3, responseAfterAdd.exercises().getFirst().sets().size());
+        assertEquals(3, responseAfterAdd.exercises().getFirst().targetSets());
+
+        // 2. Delete set 2
+        var responseAfterDelete = service.deleteSet(userId, sessionId, exerciseId, 2L);
+        assertEquals(2, responseAfterDelete.exercises().getFirst().sets().size());
+        assertEquals(2, responseAfterDelete.exercises().getFirst().targetSets());
+        assertEquals(1, responseAfterDelete.exercises().getFirst().sets().get(0).setNumber());
+        assertEquals(2, responseAfterDelete.exercises().getFirst().sets().get(1).setNumber());
+    }
 }

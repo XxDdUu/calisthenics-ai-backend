@@ -77,6 +77,23 @@ public class PersistentWorkoutSessionController {
                 currentUser.getId(), sessionId, exerciseId, setId, request));
     }
 
+    @PostMapping("/{sessionId}/exercises/{exerciseId}/sets")
+    public ResponseEntity<PersistentWorkoutSessionResponse> addSet(
+            @AuthenticationPrincipal UserPrincipal currentUser,
+            @PathVariable Long sessionId,
+            @PathVariable Long exerciseId) {
+        return ResponseEntity.ok(sessionService.addSet(currentUser.getId(), sessionId, exerciseId));
+    }
+
+    @DeleteMapping("/{sessionId}/exercises/{exerciseId}/sets/{setId}")
+    public ResponseEntity<PersistentWorkoutSessionResponse> deleteSet(
+            @AuthenticationPrincipal UserPrincipal currentUser,
+            @PathVariable Long sessionId,
+            @PathVariable Long exerciseId,
+            @PathVariable Long setId) {
+        return ResponseEntity.ok(sessionService.deleteSet(currentUser.getId(), sessionId, exerciseId, setId));
+    }
+
     @PutMapping("/{sessionId}/exercises/{exerciseId}")
     public ResponseEntity<PersistentWorkoutSessionResponse> updateExercise(
             @AuthenticationPrincipal UserPrincipal currentUser,
