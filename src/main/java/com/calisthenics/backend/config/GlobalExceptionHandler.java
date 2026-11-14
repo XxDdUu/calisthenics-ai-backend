@@ -9,6 +9,7 @@ import com.calisthenics.backend.coachclient.exception.CoachClientForbiddenExcept
 import com.calisthenics.backend.coachclient.exception.CoachClientRelationshipNotFoundException;
 import com.calisthenics.backend.coachclient.exception.WorkoutPlanAssignmentConflictException;
 import com.calisthenics.backend.coachclient.exception.WorkoutPlanAssignmentNotFoundException;
+import com.calisthenics.backend.security.FirebaseAuthenticationException;
 import com.calisthenics.backend.security.passwordreset.PasswordResetException;
 import com.calisthenics.backend.security.registration.AddressField;
 import com.calisthenics.backend.security.registration.EmailAddressException;
@@ -218,6 +219,16 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(RegistrationException.class)
     public ResponseEntity<Map<String, Object>> handleRegistrationException(RegistrationException ex) {
+        Map<String, Object> body = new HashMap<>();
+        body.put("status", ex.getStatus().value());
+        body.put("error", ex.getStatus().getReasonPhrase());
+        body.put("code", ex.getCode());
+        body.put("message", ex.getMessage());
+        return ResponseEntity.status(ex.getStatus()).body(body);
+    }
+
+    @ExceptionHandler(FirebaseAuthenticationException.class)
+    public ResponseEntity<Map<String, Object>> handleFirebaseAuthenticationException(FirebaseAuthenticationException ex) {
         Map<String, Object> body = new HashMap<>();
         body.put("status", ex.getStatus().value());
         body.put("error", ex.getStatus().getReasonPhrase());

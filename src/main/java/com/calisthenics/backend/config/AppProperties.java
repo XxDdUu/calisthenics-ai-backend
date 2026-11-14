@@ -83,5 +83,9 @@ public class AppProperties {
     public static class Firebase {
         private boolean enabled = true;
         private String credentialsPath;
+        private String credentialsJson;
+        private String projectId = "sky-bf5aa";
+        private boolean checkRevoked = true;
+        private boolean requireCredentials = false;
     }
 }

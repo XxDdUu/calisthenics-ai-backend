@@ -1,9 +1,5 @@
 package com.calisthenics.backend.security;
 
-import com.calisthenics.backend.user.Role;
-import com.calisthenics.backend.user.User;
-import com.calisthenics.backend.user.UserRepository;
-import com.google.firebase.auth.FirebaseToken;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -19,7 +15,6 @@ import org.springframework.util.StringUtils;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
-import java.util.Optional;
 
 @Slf4j
 @Component
@@ -30,8 +25,6 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
     private final JwtTokenProvider tokenProvider;
     private final CustomUserDetailsService customUserDetailsService;
-    private final FirebaseTokenVerifier firebaseTokenVerifier;
-    private final UserRepository userRepository;
 
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
@@ -49,7 +42,6 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
             String token = getJwtFromRequest(request);
 
             if (StringUtils.hasText(token)) {
-                // 1. Try local JWT token validation first
                 JwtValidationResult validationResult = tokenProvider.validateAccessToken(token);
 
                 if (validationResult == JwtValidationResult.VALID) {
@@ -58,17 +50,6 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                     setAuthentication(request, userDetails);
                 } else {
                     request.setAttribute(JWT_VALIDATION_RESULT_ATTRIBUTE, validationResult);
-
-                    // If it is not an expired local JWT, attempt Firebase ID token validation
-                    if (validationResult != JwtValidationResult.EXPIRED) {
-                        FirebaseToken firebaseToken = firebaseTokenVerifier.verifyToken(token);
-                        if (firebaseToken != null) {
-                            User user = findOrCreateFirebaseUser(firebaseToken);
-                            UserDetails userDetails = UserPrincipal.create(user);
-                            setAuthentication(request, userDetails);
-                            request.removeAttribute(JWT_VALIDATION_RESULT_ATTRIBUTE);
-                        }
-                    }
                 }
             }
         } catch (Exception ex) {
@@ -84,38 +65,6 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
         );
         authentication.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
         SecurityContextHolder.getContext().setAuthentication(authentication);
-    }
-
-    private User findOrCreateFirebaseUser(FirebaseToken firebaseToken) {
-        String uid = firebaseToken.getUid();
-        String email = firebaseToken.getEmail();
-        String name = firebaseToken.getName() != null ? firebaseToken.getName() : "Calisthenics User";
-        String picture = firebaseToken.getPicture();
-
-        Optional<User> userOpt = userRepository.findByFirebaseUid(uid);
-        if (userOpt.isPresent()) {
-            return userOpt.get();
-        }
-
-        if (email != null && !email.isBlank()) {
-            Optional<User> emailOpt = userRepository.findByEmail(email);
-            if (emailOpt.isPresent()) {
-                User user = emailOpt.get();
-                user.setFirebaseUid(uid);
-                return userRepository.save(user);
-            }
-        }
-
-        User newUser = User.builder()
-                .email(email != null ? email : uid + "@firebase.user")
-                .firebaseUid(uid)
-                .fullName(name)
-                .avatarUrl(picture)
-                .role(Role.ROLE_USER)
-                .experienceLevel("INTERMEDIATE")
-                .build();
-
-        return userRepository.save(newUser);
     }
 
     private String getJwtFromRequest(HttpServletRequest request) {

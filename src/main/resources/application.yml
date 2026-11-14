@@ -76,7 +76,11 @@ app:
 
   firebase:
     enabled: ${FIREBASE_ENABLED:true}
+    project-id: ${FIREBASE_PROJECT_ID:sky-bf5aa}
     credentials-path: ${FIREBASE_CREDENTIALS_PATH:classpath:firebase-service-account.json}
+    credentials-json: ${FIREBASE_SERVICE_ACCOUNT_JSON:}
+    check-revoked: ${FIREBASE_CHECK_REVOKED:true}
+    require-credentials: ${FIREBASE_REQUIRE_CREDENTIALS:false}
 
   google:
     client-id: ${GOOGLE_CLIENT_ID:610669602436-6vga6qoca1iefspli4o28ets4fgkv68j.apps.googleusercontent.com}
