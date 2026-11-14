@@ -9,6 +9,12 @@ import com.calisthenics.backend.adminai.type.AdminAiIntent;
 import com.calisthenics.backend.adminai.type.AdminAnalyticsRange;
 import com.calisthenics.backend.adminai.type.AdminRecommendationPriority;
 import com.calisthenics.backend.adminai.type.AdminToolName;
+import com.calisthenics.backend.gettingstarted.dto.GettingStartedCampaignAnalyticsResponse;
+import com.calisthenics.backend.gettingstarted.dto.GettingStartedCampaignSummaryResponse;
+import com.calisthenics.backend.gettingstarted.dto.GettingStartedDayResponse;
+import com.calisthenics.backend.gettingstarted.dto.GettingStartedProgramPreviewResponse;
+import com.calisthenics.backend.gettingstarted.dto.GettingStartedProgramResponse;
+import com.calisthenics.backend.user.User;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
@@ -40,6 +46,7 @@ public class AdminToolRouter {
     private final AdminAuthorizationService adminAuthorizationService;
     private final AdminDataAccessService dataAccessService;
     private final AdminContextService adminContextService;
+    private final AdminGettingStartedToolService adminGettingStartedToolService;
 
     public record RoutedChatToolsResult(
             AdminAiIntent resolvedIntent,
@@ -53,7 +60,12 @@ public class AdminToolRouter {
             AdminCoachClientStatisticsResponse coachClientStatistics,
             List<AdminContextService.OperationalInsightCandidate> dataRecommendations,
             List<String> missingDataNotes,
-            String sanitizedToolContextForPrompt
+            String sanitizedToolContextForPrompt,
+            GettingStartedProgramResponse gettingStartedProgram,
+            GettingStartedProgramPreviewResponse gettingStartedPreview,
+            List<GettingStartedCampaignSummaryResponse> activeCampaigns,
+            GettingStartedCampaignAnalyticsResponse campaignAnalytics,
+            AdminPendingConfirmationResponse pendingConfirmation
     ) {}
 
     public AdminToolExecuteResponse executeSingleTool(AdminToolExecuteRequest request) {
@@ -63,9 +75,35 @@ public class AdminToolRouter {
         AdminToolName toolName = AdminToolName.fromWireName(request.getToolName())
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST, "Unknown admin tool: " + request.getToolName()));
 
-        adminAuthorizationService.requireReadOnlyToolAccess(toolName);
+        User admin = adminAuthorizationService.requireAdminToolAccess(toolName);
 
         long startMs = System.currentTimeMillis();
+        if (adminGettingStartedToolService.isGettingStartedTool(toolName)) {
+            GettingStartedToolResultResponse gsResult;
+            try {
+                gsResult = adminGettingStartedToolService.executeTool(admin, toolName, request);
+            } catch (IllegalArgumentException | IllegalStateException ex) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, ex.getMessage(), ex);
+            }
+            long durationMs = Math.max(0L, System.currentTimeMillis() - startMs);
+            long recordCount = gsResult.getActiveCampaigns() != null
+                    ? gsResult.getActiveCampaigns().size()
+                    : (gsResult.getEligibleAthleteCount() != null ? gsResult.getEligibleAthleteCount() : 1L);
+            AdminToolExecutionRecord record = AdminToolExecutionRecord.builder()
+                    .toolName(toolName.getToolName())
+                    .status(gsResult.isConfirmationRequired() ? "CONFIRMATION_REQUIRED" : "EXECUTED")
+                    .parametersSummary("programId=" + request.getProgramId() + ",audience=" + request.getTargetAudience()
+                            + ",confirmed=" + Boolean.TRUE.equals(request.getConfirmed()))
+                    .summary(gsResult.getMessage())
+                    .recordCount(recordCount)
+                    .durationMs(durationMs)
+                    .executedAt(ZonedDateTime.now())
+                    .build();
+            return AdminToolExecuteResponse.builder()
+                    .execution(record)
+                    .data(gsResult)
+                    .build();
+        }
         AdminAnalyticsRange range = request.getRange() != null ? request.getRange() : AdminAnalyticsRange.LAST_30_DAYS;
         boolean includeEmail = Boolean.TRUE.equals(request.getIncludeEmail());
         int page = request.getPage() != null && request.getPage() >= 0 ? request.getPage() : 0;
@@ -228,6 +266,55 @@ public class AdminToolRouter {
         AdminPlatformEngagementResponse engagementResponse = null;
         AdminCoachClientStatisticsResponse coachingResponse = null;
         List<AdminContextService.OperationalInsightCandidate> dataRecommendations = new ArrayList<>();
+        GettingStartedProgramResponse gettingStartedProgram = null;
+        GettingStartedProgramPreviewResponse gettingStartedPreview = null;
+        List<GettingStartedCampaignSummaryResponse> activeCampaigns = null;
+        GettingStartedCampaignAnalyticsResponse campaignAnalytics = null;
+        AdminPendingConfirmationResponse pendingConfirmation = null;
+
+        boolean hasGettingStartedTools = toolsToRun.stream().anyMatch(adminGettingStartedToolService::isGettingStartedTool);
+        if (hasGettingStartedTools) {
+            User admin = adminAuthorizationService.requireAuthenticatedAdmin();
+            for (AdminToolName gsTool : toolsToRun) {
+                if (!adminGettingStartedToolService.isGettingStartedTool(gsTool)) {
+                    continue;
+                }
+                long t0 = System.currentTimeMillis();
+                AdminToolExecuteRequest gsReq = buildGettingStartedChatRequest(userPrompt, request, geminiPlan, gsTool);
+                try {
+                    GettingStartedToolResultResponse gsRes = adminGettingStartedToolService.executeTool(admin, gsTool, gsReq);
+                    if (gsRes.getProgram() != null) gettingStartedProgram = gsRes.getProgram();
+                    if (gsRes.getPreview() != null) gettingStartedPreview = gsRes.getPreview();
+                    if (gsRes.getActiveCampaigns() != null) activeCampaigns = gsRes.getActiveCampaigns();
+                    if (gsRes.getAnalytics() != null) campaignAnalytics = gsRes.getAnalytics();
+                    if (gsRes.getPendingConfirmation() != null) pendingConfirmation = gsRes.getPendingConfirmation();
+
+                    long count = gsRes.getActiveCampaigns() != null ? gsRes.getActiveCampaigns().size()
+                            : (gsRes.getEligibleAthleteCount() != null ? gsRes.getEligibleAthleteCount() : 1L);
+                    String status = gsRes.isConfirmationRequired() ? "CONFIRMATION_REQUIRED" : "EXECUTED";
+                    executionRecords.add(AdminToolExecutionRecord.builder()
+                            .toolName(gsTool.getToolName())
+                            .status(status)
+                            .parametersSummary("programId=" + gsReq.getProgramId() + ",audience=" + gsReq.getTargetAudience() + ",confirmed=false")
+                            .summary(gsRes.getMessage())
+                            .recordCount(count)
+                            .durationMs(Math.max(0L, System.currentTimeMillis() - t0))
+                            .executedAt(ZonedDateTime.now())
+                            .build());
+                } catch (IllegalArgumentException | IllegalStateException ex) {
+                    missingDataNotes.add(ex.getMessage());
+                    executionRecords.add(AdminToolExecutionRecord.builder()
+                            .toolName(gsTool.getToolName())
+                            .status("FAILED")
+                            .parametersSummary("programId=" + gsReq.getProgramId() + ",audience=" + gsReq.getTargetAudience())
+                            .summary(ex.getMessage())
+                            .recordCount(0L)
+                            .durationMs(Math.max(0L, System.currentTimeMillis() - t0))
+                            .executedAt(ZonedDateTime.now())
+                            .build());
+                }
+            }
+        }
 
         if (toolsToRun.contains(AdminToolName.GET_USER_STATISTICS)) {
             long t0 = System.currentTimeMillis();
@@ -319,7 +406,9 @@ public class AdminToolRouter {
         }
 
         String sanitizedPromptContext = formatSanitizedPromptContext(
-                timeRange, executionRecords, userStats, segmentResponse, engagementResponse, coachingResponse, inspectedUser, dataRecommendations, missingDataNotes);
+                timeRange, executionRecords, userStats, segmentResponse, engagementResponse, coachingResponse, inspectedUser,
+                dataRecommendations, missingDataNotes, gettingStartedProgram, gettingStartedPreview, activeCampaigns,
+                campaignAnalytics, pendingConfirmation);
 
         return new RoutedChatToolsResult(
                 intent,
@@ -333,7 +422,12 @@ public class AdminToolRouter {
                 coachingResponse,
                 dataRecommendations,
                 new ArrayList<>(missingDataNotes),
-                sanitizedPromptContext
+                sanitizedPromptContext,
+                gettingStartedProgram,
+                gettingStartedPreview,
+                activeCampaigns,
+                campaignAnalytics,
+                pendingConfirmation
         );
     }
 
@@ -450,6 +544,41 @@ public class AdminToolRouter {
             }
         }
         String lower = userPrompt != null ? userPrompt.toLowerCase() : "";
+
+        // Prioritize Getting Started – 3 Days program & campaign tools when detected
+        boolean mentionsGsOrCampaign = isGettingStartedOrCampaignPrompt(lower);
+
+        if (mentionsGsOrCampaign || tools.stream().anyMatch(adminGettingStartedToolService::isGettingStartedTool)) {
+            if (lower.contains("unpublish") || lower.contains("take down")) {
+                tools.add(AdminToolName.UNPUBLISH_PROGRAM);
+            } else if (lower.contains("publish") && !lower.contains("unpublish")) {
+                tools.add(AdminToolName.PUBLISH_PROGRAM);
+            } else if (lower.contains("analytics") || lower.contains("impression") || lower.contains("dismissal")
+                    || lower.contains("detail view") || lower.contains("completion rate") || lower.contains("enrollments")) {
+                tools.add(AdminToolName.GET_CAMPAIGN_ANALYTICS);
+            } else if (lower.contains("active") && lower.contains("campaign")) {
+                tools.add(AdminToolName.GET_ACTIVE_CAMPAIGNS);
+            } else if (lower.contains("target audience") || lower.contains("audience targeting")
+                    || lower.contains("all athletes")
+                    || (lower.contains("audience") && !lower.contains("size") && !lower.contains("estimated"))
+                    || (lower.contains("new members") && (lower.contains("14") || lower.contains("30")))) {
+                tools.add(AdminToolName.CONFIGURE_AUDIENCE);
+            } else if (lower.contains("preview") || lower.contains("eligibility") || lower.contains("audience size") || lower.contains("estimated audience")) {
+                tools.add(AdminToolName.PREVIEW_PROGRAM);
+            } else if (lower.contains("day 1") || lower.contains("day 2") || lower.contains("day 3")
+                    || lower.contains("focus") || lower.contains("add ") || lower.contains("remove ")
+                    || lower.contains("reorder") || lower.contains("swap") || lower.contains("edit ")
+                    || lower.contains("update ") || lower.contains("change ") || lower.contains("make ") || lower.contains("set ")) {
+                if (!tools.contains(AdminToolName.CREATE_PROGRAM)) {
+                    tools.add(AdminToolName.UPDATE_PROGRAM);
+                }
+            } else if (lower.contains("create") || lower.contains("generate") || lower.contains("beginner") || lower.contains("full-body") || lower.contains("full body")) {
+                tools.add(AdminToolName.CREATE_PROGRAM);
+            }
+            if (!tools.isEmpty()) {
+                return tools;
+            }
+        }
 
         if (request.getTargetUserId() != null || intent == AdminAiIntent.USER_DRILL_DOWN) {
             tools.add(AdminToolName.GET_USER_DETAILS);
@@ -651,7 +780,12 @@ public class AdminToolRouter {
             AdminCoachClientStatisticsResponse coaching,
             AdminUserDetailDossierResponse inspectedUser,
             List<AdminContextService.OperationalInsightCandidate> recs,
-            Set<String> missingNotes
+            Set<String> missingNotes,
+            GettingStartedProgramResponse program,
+            GettingStartedProgramPreviewResponse preview,
+            List<GettingStartedCampaignSummaryResponse> activeCampaigns,
+            GettingStartedCampaignAnalyticsResponse analytics,
+            AdminPendingConfirmationResponse pendingConfirmation
     ) {
         StringBuilder sb = new StringBuilder();
         sb.append("\n=== EXECUTED ADMIN DATA TOOLS (TIME RANGE: ")
@@ -747,8 +881,109 @@ public class AdminToolRouter {
         if (!missingNotes.isEmpty()) {
             sb.append("MISSING OR INCOMPLETE DATA NOTES: ").append(missingNotes).append("\n");
         }
+        appendGettingStartedPromptContext(sb, program, preview, activeCampaigns, analytics, pendingConfirmation);
         sb.append("STRICT RULES: Cite exact counts, percentages, and time range. Distinguish measured facts from AI recommendations. Never invent numbers.\n");
         return sb.toString();
+    }
+
+    private AdminToolExecuteRequest buildGettingStartedChatRequest(
+            String userPrompt,
+            AdminChatRequest request,
+            GeminiAdminToolPlan plan,
+            AdminToolName tool
+    ) {
+        String audience = (plan != null && !isBlank(plan.getTargetAudience()))
+                ? plan.getTargetAudience()
+                : extractAudienceFromPrompt(userPrompt);
+        String instruction = (plan != null && !isBlank(plan.getProgramInstruction()))
+                ? plan.getProgramInstruction()
+                : userPrompt;
+        Long programId = plan != null ? plan.getProgramId() : null;
+        String title = (plan != null && !isBlank(plan.getProgramTitle())) ? plan.getProgramTitle() : null;
+
+        // Publish and Unpublish ALWAYS start unconfirmed inside NL chat until explicit confirmation!
+        return AdminToolExecuteRequest.builder()
+                .toolName(tool.getToolName())
+                .conversationId(request.getConversationId())
+                .programId(programId)
+                .title(title)
+                .instruction(instruction)
+                .targetAudience(audience)
+                .confirmed(false)
+                .confirmationToken(null)
+                .build();
+    }
+
+    private String extractAudienceFromPrompt(String prompt) {
+        if (prompt == null) {
+            return null;
+        }
+        String lower = prompt.toLowerCase(Locale.US);
+        if (lower.contains("14 day") || lower.contains("last 14") || lower.contains("LAST_14_DAYS".toLowerCase(Locale.US))) {
+            return "LAST_14_DAYS";
+        }
+        if (lower.contains("30 day") || lower.contains("last 30") || lower.contains("LAST_30_DAYS".toLowerCase(Locale.US))) {
+            return "LAST_30_DAYS";
+        }
+        if (lower.contains("all athlete") || lower.contains("everyone") || lower.contains("ALL_ATHLETES".toLowerCase(Locale.US))) {
+            return "ALL_ATHLETES";
+        }
+        return null;
+    }
+
+    private void appendGettingStartedPromptContext(
+            StringBuilder sb,
+            GettingStartedProgramResponse program,
+            GettingStartedProgramPreviewResponse preview,
+            List<GettingStartedCampaignSummaryResponse> activeCampaigns,
+            GettingStartedCampaignAnalyticsResponse analytics,
+            AdminPendingConfirmationResponse pending
+    ) {
+        if (program != null) {
+            sb.append(String.format(
+                    "GETTING STARTED PROGRAM #%d ('%s', version=%d, published=%s, audience=%s): %d days\n",
+                    program.getId(), program.getTitle(), program.getVersion(),
+                    program.isPublished(), program.getTargetAudience(),
+                    program.getDays() != null ? program.getDays().size() : 0
+            ));
+            if (program.getDays() != null) {
+                for (GettingStartedDayResponse day : program.getDays()) {
+                    sb.append("  - Day ").append(day.getDayNumber()).append(" (").append(day.getTitle()).append("): ")
+                            .append(day.getExercises() != null
+                                    ? day.getExercises().stream().map(e -> e.getExerciseName() + " " + e.getSets() + "x"
+                                    + (e.getReps() != null ? e.getReps() + "r" : e.getDurationSeconds() + "s")).toList()
+                                    : List.of())
+                            .append("\n");
+                }
+            }
+        }
+        if (preview != null) {
+            sb.append(String.format(
+                    "PROGRAM PREVIEW: valid=%s, audience=%s (%s), eligibleAthletes=%d/%d\n",
+                    preview.isValid(), preview.getTargetAudience(), preview.getAudienceLabel(),
+                    preview.getEligibleAthleteCount(), preview.getTotalAthleteCount()
+            ));
+        }
+        if (activeCampaigns != null) {
+            sb.append("ACTIVE CAMPAIGNS (" + activeCampaigns.size() + "): ")
+                    .append(activeCampaigns.stream()
+                            .map(c -> "#" + c.getProgramId() + " " + c.getTitle() + " [" + c.getTargetAudience() + ", eligible=" + c.getEligibleAthleteCount() + ", enrollments=" + c.getEnrollments() + "]")
+                            .toList())
+                    .append("\n");
+        }
+        if (analytics != null) {
+            sb.append(String.format(
+                    "CAMPAIGN ANALYTICS (#%d '%s'): eligible=%d, impressions=%d, dismissals=%d, detailViews=%d, enrollments=%d, day1=%.2f%%, day2=%.2f%%, day3=%.2f%%, overall=%.2f%%\n",
+                    analytics.getProgramId(), analytics.getProgramTitle(), analytics.getEligibleAthleteCount(),
+                    analytics.getModalImpressions(), analytics.getModalDismissals(), analytics.getProgramDetailViews(),
+                    analytics.getEnrollments(), analytics.getDay1CompletionRate(), analytics.getDay2CompletionRate(),
+                    analytics.getDay3CompletionRate(), analytics.getOverallCompletionRate()
+            ));
+        }
+        if (pending != null) {
+            sb.append("PENDING ADMIN CONFIRMATION REQUIRED: ").append(pending.getSummary())
+                    .append(" [action=").append(pending.getActionType()).append(", status=NOT_YET_EXECUTED]\n");
+        }
     }
 
     private AdminToolExecutionRecord record(
@@ -771,5 +1006,34 @@ public class AdminToolRouter {
 
     private boolean isBlank(String s) {
         return s == null || s.isBlank();
+    }
+
+    public static boolean isGettingStartedOrCampaignPrompt(String lower) {
+        if (lower == null || lower.isBlank()) {
+            return false;
+        }
+        return lower.contains("getting started")
+                || lower.contains("onboarding")
+                || lower.contains("3-day")
+                || lower.contains("3 day")
+                || lower.contains("campaign")
+                || lower.contains("unpublish")
+                || lower.contains("publish")
+                || lower.contains("target audience")
+                || lower.contains("audience targeting")
+                || lower.contains("all athletes")
+                || lower.contains("modal impression")
+                || lower.contains("modal dismissal")
+                || lower.contains("detail view")
+                || (lower.contains("new members") && (lower.contains("14") || lower.contains("30")))
+                || (lower.contains("preview") && (lower.contains("program") || lower.contains("draft") || lower.contains("campaign")))
+                || ((lower.contains("day 1") || lower.contains("day 2") || lower.contains("day 3"))
+                && (lower.contains("focus") || lower.contains("push") || lower.contains("pull")
+                || lower.contains("leg") || lower.contains("core") || lower.contains("add")
+                || lower.contains("remove") || lower.contains("reorder") || lower.contains("swap")
+                || lower.contains("edit") || lower.contains("update") || lower.contains("change")
+                || lower.contains("make") || lower.contains("set") || lower.contains("sets")
+                || lower.contains("reps") || lower.contains("rest") || lower.contains("duration")
+                || lower.contains("instruction")));
     }
 }

@@ -3,11 +3,16 @@ package com.calisthenics.backend.adminai.dto;
 import com.calisthenics.backend.adminai.dto.data.AdminCoachClientStatisticsResponse;
 import com.calisthenics.backend.adminai.dto.data.AdminGlobalUserStatisticsResponse;
 import com.calisthenics.backend.adminai.dto.data.AdminGlobalUserSummaryDto;
+import com.calisthenics.backend.adminai.dto.data.AdminPendingConfirmationResponse;
 import com.calisthenics.backend.adminai.dto.data.AdminPlatformEngagementResponse;
 import com.calisthenics.backend.adminai.dto.data.AdminTimeRangeMetadata;
 import com.calisthenics.backend.adminai.dto.data.AdminToolExecutionRecord;
 import com.calisthenics.backend.adminai.dto.data.AdminUserDetailDossierResponse;
 import com.calisthenics.backend.adminai.dto.data.AdminUserSegmentsResponse;
+import com.calisthenics.backend.gettingstarted.dto.GettingStartedCampaignAnalyticsResponse;
+import com.calisthenics.backend.gettingstarted.dto.GettingStartedCampaignSummaryResponse;
+import com.calisthenics.backend.gettingstarted.dto.GettingStartedProgramPreviewResponse;
+import com.calisthenics.backend.gettingstarted.dto.GettingStartedProgramResponse;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -36,6 +41,11 @@ public class AdminChatResponse {
     private AdminUserSegmentsResponse segmentAnalysis;
     private AdminPlatformEngagementResponse platformEngagement;
     private AdminCoachClientStatisticsResponse coachClientStatistics;
+    private GettingStartedProgramResponse gettingStartedProgram;
+    private GettingStartedProgramPreviewResponse gettingStartedPreview;
+    private List<GettingStartedCampaignSummaryResponse> activeCampaigns;
+    private GettingStartedCampaignAnalyticsResponse campaignAnalytics;
+    private AdminPendingConfirmationResponse pendingConfirmation;
     private List<String> missingDataNotes;
     private List<String> suggestedFollowUps;
 }

@@ -7,6 +7,7 @@ import com.calisthenics.backend.adminai.dto.data.*;
 import com.calisthenics.backend.adminai.entity.AdminAiAuditLog;
 import com.calisthenics.backend.adminai.entity.AdminAiConversation;
 import com.calisthenics.backend.adminai.entity.AdminAiMessage;
+import com.calisthenics.backend.adminai.entity.AdminAiPendingAction;
 import com.calisthenics.backend.adminai.entity.AdminAiRecommendation;
 import com.calisthenics.backend.adminai.repository.AdminAiAuditLogRepository;
 import com.calisthenics.backend.adminai.repository.AdminAiRecommendationRepository;
@@ -14,6 +15,12 @@ import com.calisthenics.backend.adminai.type.*;
 import com.calisthenics.backend.aiworkout.gemini.GeminiApiClient;
 import com.calisthenics.backend.aiworkout.gemini.dto.GeminiRequestDto;
 import com.calisthenics.backend.exercise.DifficultyLevel;
+import com.calisthenics.backend.gettingstarted.dto.GettingStartedCampaignAnalyticsResponse;
+import com.calisthenics.backend.gettingstarted.dto.GettingStartedCampaignSummaryResponse;
+import com.calisthenics.backend.gettingstarted.dto.GettingStartedDayResponse;
+import com.calisthenics.backend.gettingstarted.dto.GettingStartedExerciseResponse;
+import com.calisthenics.backend.gettingstarted.dto.GettingStartedProgramPreviewResponse;
+import com.calisthenics.backend.gettingstarted.dto.GettingStartedProgramResponse;
 import com.calisthenics.backend.user.User;
 import com.calisthenics.backend.workoutplan.entity.WorkoutPlan;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -44,6 +51,7 @@ public class AdminAIService {
     private final AdminAiRecommendationRepository recommendationRepository;
     private final AdminAiAuditLogRepository auditLogRepository;
     private final AdminToolRouter adminToolRouter;
+    private final AdminGettingStartedToolService adminGettingStartedToolService;
     private final AdminAuthorizationService adminAuthorizationService;
     private final GeminiApiClient geminiApiClient;
     private final ObjectMapper objectMapper;
@@ -59,6 +67,51 @@ public class AdminAIService {
         String userPrompt = request.getMessage().trim();
         AdminAiConversation conversation = conversationService.resolveOrCreateConversation(adminUserId, request.getConversationId());
         AdminAiMessage savedUserMsg = conversationService.saveMessage(conversation, "user", userPrompt, null, null);
+
+        Optional<AdminAiPendingAction> activePending = adminGettingStartedToolService
+                .findActivePendingConfirmation(admin.getId(), conversation.getId());
+        if (activePending.isPresent()) {
+            boolean confirmed = adminGettingStartedToolService.isExplicitConfirmationMessage(userPrompt);
+            boolean cancelled = !confirmed && adminGettingStartedToolService.isExplicitCancellationMessage(userPrompt);
+            if (confirmed || cancelled) {
+                AdminConfirmationDecisionResponse decision = adminGettingStartedToolService.resolveConfirmationDecision(
+                        admin,
+                        activePending.get().getConfirmationToken(),
+                        confirmed,
+                        conversation.getId()
+                );
+                AdminAiIntent resolvedIntent = AdminAiIntent.CAMPAIGN_MANAGEMENT;
+                List<AdminToolExecutionRecord> tools = decision.getExecution() != null
+                        ? List.of(decision.getExecution())
+                        : Collections.emptyList();
+                AdminAiMessage savedAssistantMsg = conversationService.saveMessage(
+                        conversation, "assistant", decision.getReply(), resolvedIntent.name(), null);
+                conversationService.updateTitleIfDefault(conversation, generateConversationTitle(userPrompt, resolvedIntent));
+                return AdminChatResponse.builder()
+                        .conversationId(conversation.getId())
+                        .conversationTitle(conversation.getTitle())
+                        .userMessage(conversationService.mapToMessageResponse(savedUserMsg))
+                        .assistantMessage(conversationService.mapToMessageResponse(savedAssistantMsg))
+                        .intent(resolvedIntent.name())
+                        .recommendations(Collections.emptyList())
+                        .executedTools(tools)
+                        .gettingStartedProgram(decision.getGettingStartedProgram())
+                        .activeCampaigns(decision.getActiveCampaigns())
+                        .pendingConfirmation(null)
+                        .suggestedFollowUps(buildSuggestedFollowUps(resolvedIntent, null))
+                        .build();
+            }
+        }
+
+        AdminChatRequest routedRequest = AdminChatRequest.builder()
+                .conversationId(conversation.getId())
+                .message(request.getMessage())
+                .range(request.getRange())
+                .startDate(request.getStartDate())
+                .endDate(request.getEndDate())
+                .targetUserId(request.getTargetUserId())
+                .includeEmail(request.getIncludeEmail())
+                .build();
 
         AdminAnalyticsRange effectiveRange = resolveRangeFromPrompt(userPrompt, request.getRange());
         String detectedSkill = detectSkillFromPrompt(userPrompt);
@@ -91,10 +144,10 @@ public class AdminAIService {
             log.warn("Admin AI tool planner call skipped/failed, using deterministic router: {}", ex.getMessage());
         }
 
-        AdminAiIntent plannedIntent = resolveIntent(userPrompt, null, toolPlan, request);
+        AdminAiIntent plannedIntent = resolveIntent(userPrompt, null, toolPlan, routedRequest);
         AdminToolRouter.RoutedChatToolsResult routedTools = adminToolRouter.routeAndExecuteForChat(
                 userPrompt,
-                request,
+                routedRequest,
                 plannedIntent,
                 effectiveRange,
                 request.getStartDate(),
@@ -113,35 +166,40 @@ public class AdminAIService {
             log.warn("Admin AI Gemini call failed, falling back to deterministic analytical engine: {}", ex.getMessage());
         }
 
-        AdminAiIntent intent = resolveIntent(userPrompt, geminiOutput, toolPlan, request);
+        AdminAiIntent intent = resolveIntentAfterTools(userPrompt, geminiOutput, toolPlan, routedRequest, routedTools);
         if (geminiOutput != null && geminiOutput.getTargetSkill() != null && !geminiOutput.getTargetSkill().isBlank()) {
             detectedSkill = geminiOutput.getTargetSkill().trim();
         }
 
         List<AdminRecommendationResponse> generatedRecommendations = new ArrayList<>();
-        boolean wantsGlobalRecs = (geminiOutput != null && Boolean.TRUE.equals(geminiOutput.getGenerateRecommendations()))
+        boolean isGettingStartedIntent = isGettingStartedOrCampaignIntent(intent);
+        boolean wantsGlobalRecs = !isGettingStartedIntent && ((geminiOutput != null && Boolean.TRUE.equals(geminiOutput.getGenerateRecommendations()))
                 || (userPrompt.toLowerCase().contains("recommend")
                 && !userPrompt.toLowerCase().contains("what exercises")
-                && !userPrompt.toLowerCase().contains("workout program"));
+                && !userPrompt.toLowerCase().contains("workout program")));
 
-        if (intent == AdminAiIntent.EXERCISE_RECOMMENDATION
-                || (geminiOutput != null && Boolean.TRUE.equals(geminiOutput.getGenerateExerciseRecommendations()))) {
+        if (!isGettingStartedIntent && (intent == AdminAiIntent.EXERCISE_RECOMMENDATION
+                || (geminiOutput != null && Boolean.TRUE.equals(geminiOutput.getGenerateExerciseRecommendations())))) {
             generatedRecommendations.addAll(createExerciseRecommendations(admin, conversation, detectedSkill, detectedLevel));
-        } else if (intent == AdminAiIntent.WORKOUT_PROGRAM_RECOMMENDATION
-                || (geminiOutput != null && Boolean.TRUE.equals(geminiOutput.getGenerateWorkoutProgram()))) {
+        } else if (!isGettingStartedIntent && (intent == AdminAiIntent.WORKOUT_PROGRAM_RECOMMENDATION
+                || (geminiOutput != null && Boolean.TRUE.equals(geminiOutput.getGenerateWorkoutProgram())))) {
             String levelStr = detectedLevel != null ? detectedLevel.name() : (geminiOutput != null ? geminiOutput.getTargetLevel() : null);
             String focus = detectedSkill != null ? detectedSkill : userPrompt;
             generatedRecommendations.addAll(createWorkoutProgramRecommendations(admin, conversation, focus, levelStr));
-        } else if (intent == AdminAiIntent.OPERATIONAL_INSIGHTS
+        } else if (!isGettingStartedIntent && (intent == AdminAiIntent.OPERATIONAL_INSIGHTS
                 || (geminiOutput != null && Boolean.TRUE.equals(geminiOutput.getGenerateOperationalInsights()))
-                || wantsGlobalRecs) {
+                || wantsGlobalRecs)) {
             List<AdminContextService.OperationalInsightCandidate> combinedInsights = !routedTools.dataRecommendations().isEmpty()
                     ? routedTools.dataRecommendations()
                     : context.operationalInsights();
             generatedRecommendations.addAll(createOperationalRecommendations(admin, conversation, combinedInsights));
         }
 
-        String replyContent = (geminiOutput != null && geminiOutput.getReply() != null && !geminiOutput.getReply().isBlank())
+        boolean requireDeterministicConfirmationReply = routedTools.pendingConfirmation() != null;
+        String replyContent = (!requireDeterministicConfirmationReply
+                && geminiOutput != null
+                && geminiOutput.getReply() != null
+                && !geminiOutput.getReply().isBlank())
                 ? geminiOutput.getReply()
                 : buildDataGroundedReply(intent, userPrompt, detectedSkill, context, generatedRecommendations, routedTools);
 
@@ -177,9 +235,34 @@ public class AdminAIService {
                 .segmentAnalysis(routedTools.segmentAnalysis())
                 .platformEngagement(routedTools.platformEngagement())
                 .coachClientStatistics(routedTools.coachClientStatistics())
+                .gettingStartedProgram(routedTools.gettingStartedProgram())
+                .gettingStartedPreview(routedTools.gettingStartedPreview())
+                .activeCampaigns(routedTools.activeCampaigns())
+                .campaignAnalytics(routedTools.campaignAnalytics())
+                .pendingConfirmation(routedTools.pendingConfirmation())
                 .missingDataNotes(routedTools.missingDataNotes())
                 .suggestedFollowUps(followUps)
                 .build();
+    }
+
+    @Transactional
+    public AdminConfirmationDecisionResponse resolveConfirmation(
+            Long adminUserId,
+            String confirmationToken,
+            AdminConfirmationDecisionRequest request
+    ) {
+        User admin = conversationService.requireAdminUser(adminUserId);
+        adminAuthorizationService.requireAuthenticatedAdmin();
+        boolean approved = request == null || request.getApproved() == null || Boolean.TRUE.equals(request.getApproved());
+        Long convHint = request != null ? request.getConversationId() : null;
+        AdminConfirmationDecisionResponse decision = adminGettingStartedToolService.resolveConfirmationDecision(
+                admin, confirmationToken, approved, convHint);
+        if (decision.getConversationId() != null) {
+            conversationService.findOwnedConversation(adminUserId, decision.getConversationId())
+                    .ifPresent(conv -> conversationService.saveMessage(
+                            conv, "assistant", decision.getReply(), AdminAiIntent.CAMPAIGN_MANAGEMENT.name(), null));
+        }
+        return decision;
     }
 
     @Transactional(readOnly = true)
@@ -634,7 +717,7 @@ public class AdminAIService {
     private String buildToolPlannerSystemPrompt() {
         return """
                 You are the Admin AI Tool Planner for Calisthenics AI.
-                Decide which read-only administrative tools should execute to gather exact database facts.
+                Decide which authorized administrative tools should execute to gather exact database facts or perform Getting Started – 3 Days program/campaign actions.
                 Available tools:
                 - get_user_statistics
                 - get_all_users
@@ -647,6 +730,14 @@ public class AdminAIService {
                 - get_platform_engagement
                 - analyze_user_segments
                 - generate_admin_recommendations
+                - createProgram (generate/create a 3-day beginner Getting Started program draft)
+                - updateProgram (edit existing Getting Started program days, exercises, sets/reps/duration/rest/instructions, or focus)
+                - previewProgram (preview Getting Started program and check eligible audience size)
+                - publishProgram (request publication approval; extract target_audience ALL_ATHLETES / LAST_30_DAYS / LAST_14_DAYS if stated)
+                - unpublishProgram (request confirmation before unpublishing the active Getting Started campaign)
+                - configureAudience (set target_audience to ALL_ATHLETES, LAST_30_DAYS, or LAST_14_DAYS)
+                - getActiveCampaigns (list currently published Getting Started campaigns)
+                - getCampaignAnalytics (retrieve eligible athlete count, modal impressions, dismissals, detail views, enrollments, Day 1/2/3 & overall completion rates)
                 Never fabricate data. Never request raw user passwords or private message text.
                 """;
     }
@@ -667,6 +758,19 @@ public class AdminAIService {
             return AdminAiIntent.USER_DRILL_DOWN;
         }
         String lower = userPrompt != null ? userPrompt.toLowerCase() : "";
+
+        if (AdminToolRouter.isGettingStartedOrCampaignPrompt(lower)) {
+            if (lower.contains("analytics") || lower.contains("impression") || lower.contains("dismissal")
+                    || lower.contains("detail view") || lower.contains("completion rate")) {
+                return AdminAiIntent.CAMPAIGN_ANALYTICS;
+            }
+            if (lower.contains("publish") || lower.contains("unpublish")
+                    || lower.contains("target audience") || lower.contains("active") && lower.contains("campaign")
+                    || lower.contains("all athletes")) {
+                return AdminAiIntent.CAMPAIGN_MANAGEMENT;
+            }
+            return AdminAiIntent.GETTING_STARTED_PROGRAM_MANAGEMENT;
+        }
 
         if (lower.contains("what exercises")
                 || lower.contains("add exercise")
@@ -1084,6 +1188,24 @@ public class AdminAIService {
                     }
                 }
             }
+            case CONFIRMATION_REQUIRED -> {
+                AdminPendingConfirmationResponse pending = routedTools.pendingConfirmation();
+                sb.append("### Confirmation Required Before Campaign Change\n\n");
+                if (pending != null) {
+                    sb.append(pending.getSummary()).append("\n\n");
+                    sb.append("- **Action**: ").append(pending.getActionType()).append("\n");
+                    sb.append("- **Program**: ").append(pending.getProgramTitle())
+                            .append(" (ID ").append(pending.getProgramId()).append(")\n");
+                    sb.append("- **Target Audience**: ").append(pending.getAudienceLabel())
+                            .append(" (`").append(pending.getTargetAudience()).append("`)\n");
+                    sb.append("- **Estimated Eligible Athletes**: **").append(pending.getEligibleAthleteCount()).append("**\n");
+                    sb.append("- **Confirmation Token**: `").append(pending.getConfirmationToken()).append("`\n");
+                    sb.append("- **Status**: Pending Admin confirmation — campaign has NOT been changed yet.\n");
+                }
+            }
+            case GETTING_STARTED_PROGRAM_MANAGEMENT -> appendGettingStartedProgramSummary(sb, routedTools);
+            case CAMPAIGN_MANAGEMENT -> appendCampaignManagementSummary(sb, routedTools);
+            case CAMPAIGN_ANALYTICS -> appendCampaignAnalyticsSummary(sb, routedTools);
             default -> {
                 sb.append("### 🛡️ Admin AI Operations Advisor\n\n");
                 sb.append("Current platform snapshot (**").append(ov.getStartDate()).append(" to ").append(ov.getEndDate()).append("**):\n");
@@ -1142,6 +1264,21 @@ public class AdminAIService {
                     "Analyze user training trends",
                     "Which areas of the platform need improvement?"
             );
+            case GETTING_STARTED_PROGRAM_MANAGEMENT -> List.of(
+                    "Make Day 1 focused on pushing movements.",
+                    "Preview the Getting Started program and check eligible audience size.",
+                    "Publish this program for users who joined within the last 14 days."
+            );
+            case CAMPAIGN_MANAGEMENT, CONFIRMATION_REQUIRED -> List.of(
+                    "Show me the currently active Getting Started campaign.",
+                    "Show Getting Started campaign analytics.",
+                    "Change the target audience to all athletes."
+            );
+            case CAMPAIGN_ANALYTICS -> List.of(
+                    "Show me the currently active Getting Started campaign.",
+                    "Unpublish the current campaign.",
+                    "Change the target audience to all athletes."
+            );
             default -> List.of(
                     "Summarize platform activity this month",
                     "What exercises should we add?",
@@ -1169,6 +1306,129 @@ public class AdminAIService {
         }
     }
 
+    private AdminAiIntent resolveIntentAfterTools(
+            String userPrompt,
+            GeminiAdminAgentOutput geminiOutput,
+            GeminiAdminToolPlan toolPlan,
+            AdminChatRequest request,
+            AdminToolRouter.RoutedChatToolsResult routedTools
+    ) {
+        if (routedTools != null) {
+            if (routedTools.pendingConfirmation() != null) {
+                return AdminAiIntent.CONFIRMATION_REQUIRED;
+            }
+            if (routedTools.campaignAnalytics() != null) {
+                return AdminAiIntent.CAMPAIGN_ANALYTICS;
+            }
+            if (routedTools.activeCampaigns() != null) {
+                return AdminAiIntent.CAMPAIGN_MANAGEMENT;
+            }
+            if (routedTools.executedTools() != null) {
+                for (AdminToolExecutionRecord rec : routedTools.executedTools()) {
+                    if (AdminToolName.CONFIGURE_AUDIENCE.getToolName().equalsIgnoreCase(rec.getToolName())
+                            || AdminToolName.PUBLISH_PROGRAM.getToolName().equalsIgnoreCase(rec.getToolName())
+                            || AdminToolName.UNPUBLISH_PROGRAM.getToolName().equalsIgnoreCase(rec.getToolName())) {
+                        return AdminAiIntent.CAMPAIGN_MANAGEMENT;
+                    }
+                    if (AdminToolName.CREATE_PROGRAM.getToolName().equalsIgnoreCase(rec.getToolName())
+                            || AdminToolName.UPDATE_PROGRAM.getToolName().equalsIgnoreCase(rec.getToolName())
+                            || AdminToolName.PREVIEW_PROGRAM.getToolName().equalsIgnoreCase(rec.getToolName())) {
+                        return AdminAiIntent.GETTING_STARTED_PROGRAM_MANAGEMENT;
+                    }
+                }
+            }
+        }
+        return resolveIntent(userPrompt, geminiOutput, toolPlan, request);
+    }
+
+    private boolean isGettingStartedOrCampaignIntent(AdminAiIntent intent) {
+        return intent == AdminAiIntent.GETTING_STARTED_PROGRAM_MANAGEMENT
+                || intent == AdminAiIntent.CAMPAIGN_MANAGEMENT
+                || intent == AdminAiIntent.CAMPAIGN_ANALYTICS
+                || intent == AdminAiIntent.CONFIRMATION_REQUIRED;
+    }
+
+    private void appendGettingStartedProgramSummary(StringBuilder sb, AdminToolRouter.RoutedChatToolsResult routedTools) {
+        GettingStartedProgramPreviewResponse preview = routedTools.gettingStartedPreview();
+        GettingStartedProgramResponse program = preview != null ? preview.getProgram() : routedTools.gettingStartedProgram();
+        if (program == null) {
+            sb.append("No Getting Started program data was returned.\n");
+            return;
+        }
+        sb.append("### Getting Started – 3 Days Program: ").append(program.getTitle()).append("\n\n");
+        sb.append("- **Program ID**: ").append(program.getId())
+                .append(" | **Version**: v").append(program.getVersion())
+                .append(" | **Status**: ").append(program.isPublished() ? "PUBLISHED" : "UNPUBLISHED DRAFT").append("\n");
+        sb.append("- **Target Audience**: ").append(program.getTargetAudience()).append("\n");
+        if (preview != null) {
+            sb.append("- **Audience Label**: ").append(preview.getAudienceLabel())
+                    .append(" | **Estimated Eligible Athletes**: **").append(preview.getEligibleAthleteCount())
+                    .append("** (of ").append(preview.getTotalAthleteCount()).append(" total athletes)\n");
+            sb.append("- **Validation**: ").append(preview.isValid() ? "PASSED" : "FAILED (" + preview.getValidationErrors() + ")").append("\n");
+        }
+        if (program.getDays() != null) {
+            sb.append("\n");
+            for (GettingStartedDayResponse day : program.getDays()) {
+                sb.append("#### Day ").append(day.getDayNumber()).append(" — ").append(day.getTitle()).append("\n");
+                if (day.getExercises() != null) {
+                    for (GettingStartedExerciseResponse ex : day.getExercises()) {
+                        String prescription = ex.getReps() != null
+                                ? ex.getReps() + " reps"
+                                : (ex.getDurationSeconds() != null ? ex.getDurationSeconds() + "s hold" : "");
+                        sb.append("- **").append(ex.getExerciseName()).append("**: ")
+                                .append(ex.getSets()).append(" sets x ").append(prescription)
+                                .append(", ").append(ex.getRestSeconds()).append("s rest");
+                        if (ex.getInstructions() != null && !ex.getInstructions().isBlank()) {
+                            sb.append(" — _").append(ex.getInstructions()).append("_");
+                        }
+                        sb.append("\n");
+                    }
+                }
+                sb.append("\n");
+            }
+        }
+    }
+
+    private void appendCampaignManagementSummary(StringBuilder sb, AdminToolRouter.RoutedChatToolsResult routedTools) {
+        if (routedTools.activeCampaigns() != null) {
+            List<GettingStartedCampaignSummaryResponse> campaigns = routedTools.activeCampaigns();
+            sb.append("### Active Getting Started Campaigns (").append(campaigns.size()).append(")\n\n");
+            if (campaigns.isEmpty()) {
+                sb.append("There are currently no published Getting Started campaigns.\n");
+            } else {
+                for (GettingStartedCampaignSummaryResponse c : campaigns) {
+                    sb.append("- **").append(c.getTitle()).append("** (ID ").append(c.getProgramId())
+                            .append(", v").append(c.getVersion()).append(") — Target: **").append(c.getAudienceLabel())
+                            .append("** (`").append(c.getTargetAudience()).append("`), Eligible Athletes: **")
+                            .append(c.getEligibleAthleteCount()).append("**, Enrollments: **")
+                            .append(c.getEnrollments()).append("**\n");
+                }
+            }
+            return;
+        }
+        appendGettingStartedProgramSummary(sb, routedTools);
+    }
+
+    private void appendCampaignAnalyticsSummary(StringBuilder sb, AdminToolRouter.RoutedChatToolsResult routedTools) {
+        GettingStartedCampaignAnalyticsResponse a = routedTools.campaignAnalytics();
+        if (a == null) {
+            sb.append("No Getting Started campaign analytics are available yet.\n");
+            return;
+        }
+        sb.append("### Getting Started Campaign Analytics: ").append(a.getProgramTitle()).append("\n\n");
+        sb.append("- **Program ID**: ").append(a.getProgramId()).append(" (").append(a.isPublished() ? "PUBLISHED" : "DRAFT").append(", v").append(a.getVersion()).append(")\n");
+        sb.append("- **Target Audience**: ").append(a.getAudienceLabel()).append(" (`").append(a.getTargetAudience()).append("`)\n");
+        sb.append("- **Eligible Athletes**: ").append(a.getEligibleAthleteCount()).append("\n");
+        sb.append("- **Modal Impressions**: ").append(a.getModalImpressions()).append("\n");
+        sb.append("- **Modal Dismissals**: ").append(a.getModalDismissals()).append("\n");
+        sb.append("- **Program Detail Views**: ").append(a.getProgramDetailViews()).append("\n");
+        sb.append("- **Enrollments**: ").append(a.getEnrollments()).append("\n");
+        sb.append("- **Day 1 Completion Rate**: ").append(a.getDay1CompletionRate()).append("% (").append(a.getDay1Completions()).append(")\n");
+        sb.append("- **Day 2 Completion Rate**: ").append(a.getDay2CompletionRate()).append("% (").append(a.getDay2Completions()).append(")\n");
+        sb.append("- **Day 3 Completion Rate**: ").append(a.getDay3CompletionRate()).append("% (").append(a.getDay3Completions()).append(")\n");
+        sb.append("- **Overall Completion Rate**: ").append(a.getOverallCompletionRate()).append("% (").append(a.getCompletedEnrollments()).append(" completed)\n");
+    }
+
     private String generateConversationTitle(String userPrompt, AdminAiIntent intent) {
         String clean = userPrompt.replaceAll("[^a-zA-Z0-9\\s-]", "").trim();
         if (clean.isBlank()) {
@@ -1183,6 +1443,9 @@ public class AdminAIService {
                 case USER_SEGMENTATION_ANALYSIS -> "User Segment Analysis";
                 case COACH_CLIENT_ANALYTICS -> "Coach-Client Ecosystem";
                 case PLATFORM_ENGAGEMENT_COMPARISON -> "Engagement Comparison";
+                case GETTING_STARTED_PROGRAM_MANAGEMENT -> "Getting Started – 3 Days";
+                case CAMPAIGN_MANAGEMENT, CONFIRMATION_REQUIRED -> "Getting Started Campaign";
+                case CAMPAIGN_ANALYTICS -> "Getting Started Analytics";
                 default -> "Admin AI Advisory";
             };
         }

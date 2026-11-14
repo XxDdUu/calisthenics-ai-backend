@@ -10,4 +10,6 @@ import java.util.Optional;
 public interface GettingStartedDayCompletionRepository extends JpaRepository<GettingStartedDayCompletion, Long> {
 
     Optional<GettingStartedDayCompletion> findByEnrollmentIdAndDayNumber(Long enrollmentId, Integer dayNumber);
+
+    long countByEnrollmentProgramIdAndDayNumber(Long programId, Integer dayNumber);
 }

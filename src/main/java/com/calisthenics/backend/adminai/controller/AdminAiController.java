@@ -329,11 +329,22 @@ public class AdminAiController {
     }
 
     @PostMapping("/tools/execute")
-    @Operation(summary = "Invoke any named read-only Admin Agent tool directly")
+    @Operation(summary = "Invoke any authorized Admin Agent tool directly")
     public ResponseEntity<AdminToolExecuteResponse> executeAdminTool(
             @RequestBody AdminToolExecuteRequest request
     ) {
         return ResponseEntity.ok(adminToolRouter.executeSingleTool(request));
+    }
+
+    @PostMapping("/confirmations/{confirmationToken}")
+    @Operation(summary = "Confirm or cancel a pending Getting Started campaign publish or unpublish action")
+    public ResponseEntity<AdminConfirmationDecisionResponse> resolvePendingConfirmation(
+            @AuthenticationPrincipal UserPrincipal currentAdmin,
+            @PathVariable String confirmationToken,
+            @RequestBody(required = false) AdminConfirmationDecisionRequest request
+    ) {
+        Long adminId = resolveAdminUserId(currentAdmin);
+        return ResponseEntity.ok(adminAIService.resolveConfirmation(adminId, confirmationToken, request));
     }
 
     @GetMapping("/audit-logs")

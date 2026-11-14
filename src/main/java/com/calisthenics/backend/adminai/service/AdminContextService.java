@@ -196,8 +196,9 @@ public class AdminContextService {
         sb.append("CRITICAL RULES:\n");
         sb.append("1. NEVER fabricate metrics. Every number you cite MUST come strictly from the Live Platform Context below.\n");
         sb.append("2. NEVER automatically publish exercises or assign workout programs to users. All exercise and workout program recommendations require explicit administrator approval.\n");
-        sb.append("3. Avoid suggesting exercises that already exist in the catalog unless proposing a clearly distinct progression.\n");
-        sb.append("4. Format your 'reply' in clear, executive-ready Markdown with sections, bullet points, and actionable takeaways.\n\n");
+        sb.append("3. For Getting Started – 3 Days onboarding campaigns: drafts/unpublished edits execute via tools; publishing or unpublishing ALWAYS requires explicit Admin confirmation; NEVER auto-enroll athletes and NEVER modify existing coach-assigned workout plans.\n");
+        sb.append("4. Avoid suggesting exercises that already exist in the catalog unless proposing a clearly distinct progression.\n");
+        sb.append("5. Format your 'reply' in clear, executive-ready Markdown with sections, bullet points, and actionable takeaways.\n\n");
 
         sb.append("=== LIVE PLATFORM ANALYTICS (").append(ov.getRange()).append(": ")
                 .append(ov.getStartDate()).append(" to ").append(ov.getEndDate()).append(") ===\n");

@@ -8,6 +8,7 @@ import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
 import jakarta.persistence.LockModeType;
+import java.time.ZonedDateTime;
 import java.util.List;
 import java.util.Optional;
 
@@ -31,6 +32,8 @@ public interface UserRepository extends JpaRepository<User, Long>, JpaSpecificat
     boolean existsByGoogleId(String googleId);
 
     long countByRole(Role role);
+
+    long countByRoleAndCreatedAtGreaterThanEqual(Role role, ZonedDateTime cutoff);
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select u from User u where u.role = :role order by u.id")

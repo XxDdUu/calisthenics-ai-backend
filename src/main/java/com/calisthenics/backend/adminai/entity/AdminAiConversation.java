@@ -35,6 +35,9 @@ public class AdminAiConversation {
     @Column(nullable = false, length = 255)
     private String title;
 
+    @Column(name = "active_getting_started_program_id")
+    private Long activeGettingStartedProgramId;
+
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)
     private ZonedDateTime createdAt;

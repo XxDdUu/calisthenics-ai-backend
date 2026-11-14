@@ -64,4 +64,16 @@ public class GeminiAdminToolPlan {
 
     @JsonProperty("include_email")
     private Boolean includeEmail;
+
+    @JsonProperty("program_id")
+    private Long programId;
+
+    @JsonProperty("program_title")
+    private String programTitle;
+
+    @JsonProperty("program_instruction")
+    private String programInstruction;
+
+    @JsonProperty("target_audience")
+    private String targetAudience;
 }

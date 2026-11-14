@@ -104,6 +104,14 @@ public class AdminConversationService {
                         .build()));
     }
 
+    @Transactional(readOnly = true)
+    public Optional<AdminAiConversation> findOwnedConversation(Long adminUserId, Long conversationId) {
+        if (adminUserId == null || conversationId == null) {
+            return Optional.empty();
+        }
+        return conversationRepository.findByIdAndAdminUserId(conversationId, adminUserId);
+    }
+
     @Transactional
     public AdminAiMessage saveMessage(
             AdminAiConversation conversation,

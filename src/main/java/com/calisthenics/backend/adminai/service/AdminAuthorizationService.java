@@ -59,6 +59,14 @@ public class AdminAuthorizationService {
      * All global data access tools are strictly read-only.
      */
     public User requireReadOnlyToolAccess(AdminToolName toolName) {
+        return requireAdminToolAccess(toolName);
+    }
+
+    /**
+     * Ensures only an authenticated ROLE_ADMIN user may invoke any Admin Agent tool
+     * (read-only analytics or authorized Getting Started campaign operations).
+     */
+    public User requireAdminToolAccess(AdminToolName toolName) {
         User admin = requireAuthenticatedAdmin();
         if (toolName == null) {
             throw new AccessDeniedException("Valid admin tool name is required");

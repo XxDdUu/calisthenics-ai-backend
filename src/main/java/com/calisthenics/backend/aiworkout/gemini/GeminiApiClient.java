@@ -465,7 +465,11 @@ public class GeminiApiClient {
                         "USER_DRILL_DOWN",
                         "USER_SEGMENTATION_ANALYSIS",
                         "COACH_CLIENT_ANALYTICS",
-                        "PLATFORM_ENGAGEMENT_COMPARISON"
+                        "PLATFORM_ENGAGEMENT_COMPARISON",
+                        "GETTING_STARTED_PROGRAM_MANAGEMENT",
+                        "CAMPAIGN_MANAGEMENT",
+                        "CAMPAIGN_ANALYTICS",
+                        "CONFIRMATION_REQUIRED"
                 ),
                 "description", "Primary administrative intent"
         ));
@@ -484,10 +488,18 @@ public class GeminiApiClient {
                                 "get_coach_client_statistics",
                                 "get_platform_engagement",
                                 "analyze_user_segments",
-                                "generate_admin_recommendations"
+                                "generate_admin_recommendations",
+                                "createProgram",
+                                "updateProgram",
+                                "previewProgram",
+                                "publishProgram",
+                                "unpublishProgram",
+                                "configureAudience",
+                                "getActiveCampaigns",
+                                "getCampaignAnalytics"
                         )
                 ),
-                "description", "Ordered list of read-only admin tools to invoke before answering"
+                "description", "Ordered list of authorized admin tools to invoke before answering"
         ));
         props.put("target_user_id", Map.of("type", "INTEGER", "description", "Target numeric user ID if inspecting a specific user"));
         props.put("target_user_query", Map.of("type", "STRING", "description", "Target user full name or search query if inspecting a specific user"));
@@ -508,6 +520,14 @@ public class GeminiApiClient {
         props.put("start_date", Map.of("type", "STRING", "description", "Optional custom start date YYYY-MM-DD"));
         props.put("end_date", Map.of("type", "STRING", "description", "Optional custom end date YYYY-MM-DD"));
         props.put("include_email", Map.of("type", "BOOLEAN", "description", "Set true only when admin explicitly asks for an authorized user email lookup"));
+        props.put("program_id", Map.of("type", "INTEGER", "description", "Target Getting Started program ID when specified"));
+        props.put("program_title", Map.of("type", "STRING", "description", "Title for a Getting Started program when creating or renaming"));
+        props.put("program_instruction", Map.of("type", "STRING", "description", "Detailed Getting Started workout generation or editing instruction"));
+        props.put("target_audience", Map.of(
+                "type", "STRING",
+                "enum", List.of("ALL_ATHLETES", "LAST_30_DAYS", "LAST_14_DAYS"),
+                "description", "Getting Started campaign target audience segment"
+        ));
 
         Map<String, Object> root = new LinkedHashMap<>();
         root.put("type", "OBJECT");
@@ -531,7 +551,11 @@ public class GeminiApiClient {
                         "USER_DRILL_DOWN",
                         "USER_SEGMENTATION_ANALYSIS",
                         "COACH_CLIENT_ANALYTICS",
-                        "PLATFORM_ENGAGEMENT_COMPARISON"
+                        "PLATFORM_ENGAGEMENT_COMPARISON",
+                        "GETTING_STARTED_PROGRAM_MANAGEMENT",
+                        "CAMPAIGN_MANAGEMENT",
+                        "CAMPAIGN_ANALYTICS",
+                        "CONFIRMATION_REQUIRED"
                 ),
                 "description", "Detected administrative intent"
         ));

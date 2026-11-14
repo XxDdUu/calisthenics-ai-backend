@@ -4,8 +4,7 @@ import com.calisthenics.backend.exercise.Exercise;
 import com.calisthenics.backend.exercise.ExerciseRepository;
 import com.calisthenics.backend.gettingstarted.dto.*;
 import com.calisthenics.backend.gettingstarted.entity.*;
-import com.calisthenics.backend.gettingstarted.enums.GettingStartedEnrollmentStatus;
-import com.calisthenics.backend.gettingstarted.enums.TargetAudience;
+import com.calisthenics.backend.gettingstarted.enums.*;
 import com.calisthenics.backend.gettingstarted.repository.*;
 import com.calisthenics.backend.gettingstarted.service.GettingStartedService;
 import com.calisthenics.backend.user.OnboardingStatus;
@@ -29,6 +28,8 @@ public class GettingStartedServiceImpl implements GettingStartedService {
     private final GettingStartedEnrollmentRepository enrollmentRepository;
     private final GettingStartedDayCompletionRepository dayCompletionRepository;
     private final GettingStartedProgramUserStateRepository programUserStateRepository;
+    private final GettingStartedCampaignEventRepository campaignEventRepository;
+    private final GettingStartedCampaignHelper campaignHelper;
     private final ExerciseRepository exerciseRepository;
     private final UserRepository userRepository;
 
@@ -77,10 +78,35 @@ public class GettingStartedServiceImpl implements GettingStartedService {
     }
 
     @Override
+    @Transactional
     public GettingStartedProgramResponse publishProgram(Long adminId) {
         GettingStartedProgram program = programRepository.findLatest()
                 .orElseThrow(() -> new IllegalStateException("No Getting Started program found to publish"));
 
+        return publishResolvedProgram(program);
+    }
+
+    @Override
+    @Transactional
+    public GettingStartedProgramResponse publishProgramById(Long adminId, Long programId) {
+        GettingStartedProgram program = resolveAdminTargetProgram(programId, false);
+        List<String> validationErrors = helper().collectValidationErrors(program);
+        if (!validationErrors.isEmpty()) {
+            throw new IllegalArgumentException(String.join(" ", validationErrors));
+        }
+        return publishResolvedProgram(program);
+    }
+
+    private GettingStartedProgramResponse publishResolvedProgram(GettingStartedProgram program) {
+        List<GettingStartedProgram> activeOthers = programRepository.findAllByPublishedTrueOrderByPublishedAtDescUpdatedAtDesc();
+        if (activeOthers != null) {
+            for (GettingStartedProgram other : activeOthers) {
+                if (!Objects.equals(other.getId(), program.getId())) {
+                    other.setPublished(false);
+                    programRepository.save(other);
+                }
+            }
+        }
         program.setPublished(true);
         program.setPublishedAt(ZonedDateTime.now());
         GettingStartedProgram saved = programRepository.save(program);
@@ -88,10 +114,28 @@ public class GettingStartedServiceImpl implements GettingStartedService {
     }
 
     @Override
+    @Transactional
     public GettingStartedProgramResponse unpublishProgram(Long adminId) {
         GettingStartedProgram program = programRepository.findLatest()
                 .orElseThrow(() -> new IllegalStateException("No Getting Started program found to unpublish"));
 
+        program.setPublished(false);
+        GettingStartedProgram saved = programRepository.save(program);
+        return mapToProgramResponse(saved, null, false, OnboardingStatus.DISMISSED);
+    }
+
+    @Override
+    @Transactional
+    public GettingStartedProgramResponse unpublishProgramById(Long adminId, Long programId) {
+        GettingStartedProgram program = (programId != null)
+                ? programRepository.findById(programId)
+                        .orElseThrow(() -> new IllegalArgumentException("Getting Started program not found: " + programId))
+                : programRepository.findFirstPublished()
+                        .orElseThrow(() -> new IllegalStateException("No active published Getting Started campaign found to unpublish"));
+
+        if (!program.isPublished()) {
+            throw new IllegalStateException("Getting Started program '" + program.getTitle() + "' is not currently published.");
+        }
         program.setPublished(false);
         GettingStartedProgram saved = programRepository.save(program);
         return mapToProgramResponse(saved, null, false, OnboardingStatus.DISMISSED);
@@ -156,8 +200,14 @@ public class GettingStartedServiceImpl implements GettingStartedService {
                         .programVersion(program.getVersion())
                         .build());
 
+        boolean previouslyNotShown = userState.getState() == OnboardingStatus.NOT_SHOWN;
         userState.setState(status);
         programUserStateRepository.save(userState);
+
+        if (previouslyNotShown
+                && (status == OnboardingStatus.COMPACT_BANNER || status == OnboardingStatus.DISMISSED)) {
+            recordEventIfAbsent(program, user, GettingStartedCampaignEventType.MODAL_DISMISSAL);
+        }
 
         boolean eligible = isUserEligibleForProgram(user, program);
         GettingStartedEnrollment enrollment = enrollmentRepository.findByUserIdAndProgramId(userId, program.getId()).orElse(null);
@@ -379,5 +429,217 @@ public class GettingStartedServiceImpl implements GettingStartedService {
                 .completedDaysCount(completedDays.size())
                 .isCompleted(enrollment.getStatus() == GettingStartedEnrollmentStatus.COMPLETED)
                 .build();
+    }
+
+    @Override
+    public GettingStartedProgramResponse createNewProgram(Long adminId, AdminGettingStartedProgramRequest request) {
+        validateProgramStrictly(request);
+        User admin = userRepository.findById(adminId)
+                .orElseThrow(() -> new IllegalArgumentException("Admin user not found"));
+        TargetAudience audience = request.getTargetAudience() != null
+                ? request.getTargetAudience()
+                : TargetAudience.ALL_ATHLETES;
+
+        GettingStartedProgram program = GettingStartedProgram.builder()
+                .creator(admin)
+                .title(request.getTitle().trim())
+                .description(request.getDescription() != null ? request.getDescription().trim() : null)
+                .targetAudience(audience)
+                .published(false)
+                .version(1)
+                .build();
+        buildProgramDays(program, request.getDays());
+        GettingStartedProgram saved = programRepository.save(program);
+        return mapToProgramResponse(saved, null, false, OnboardingStatus.DISMISSED);
+    }
+
+    @Override
+    public GettingStartedProgramResponse updateProgramById(Long adminId, Long programId, AdminGettingStartedProgramRequest request) {
+        validateProgramStrictly(request);
+        User admin = userRepository.findById(adminId)
+                .orElseThrow(() -> new IllegalArgumentException("Admin user not found"));
+        GettingStartedProgram program = resolveAdminTargetProgram(programId, true);
+
+        program.setCreator(admin);
+        program.setTitle(request.getTitle().trim());
+        program.setDescription(request.getDescription() != null ? request.getDescription().trim() : null);
+        if (request.getTargetAudience() != null) {
+            program.setTargetAudience(request.getTargetAudience());
+        }
+        program.setVersion(program.getVersion() + 1);
+        program.getDays().clear();
+        programRepository.saveAndFlush(program);
+
+        buildProgramDays(program, request.getDays());
+        GettingStartedProgram saved = programRepository.save(program);
+        return mapToProgramResponse(saved, null, false, OnboardingStatus.DISMISSED);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public GettingStartedProgramResponse getProgramById(Long programId) {
+        GettingStartedProgram program = resolveAdminTargetProgram(programId, false);
+        return mapToProgramResponse(program, null, false, OnboardingStatus.DISMISSED);
+    }
+
+    @Override
+    public GettingStartedProgramResponse configureAudience(Long adminId, Long programId, TargetAudience targetAudience) {
+        if (targetAudience == null) {
+            throw new IllegalArgumentException("Target audience is required");
+        }
+        GettingStartedProgram program = resolveAdminTargetProgram(programId, false);
+        program.setTargetAudience(targetAudience);
+        GettingStartedProgram saved = programRepository.save(program);
+        return mapToProgramResponse(saved, null, false, OnboardingStatus.DISMISSED);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public GettingStartedProgramPreviewResponse previewProgram(Long programId) {
+        GettingStartedProgram program = resolveAdminTargetProgram(programId, false);
+        List<String> validationErrors = helper().collectValidationErrors(program);
+        TargetAudience audience = program.getTargetAudience() != null
+                ? program.getTargetAudience()
+                : TargetAudience.ALL_ATHLETES;
+        long eligible = helper().countEligibleAthletes(audience, userRepository);
+        long totalAthletes = userRepository.countByRole(Role.ROLE_USER);
+
+        return GettingStartedProgramPreviewResponse.builder()
+                .program(mapToProgramResponse(program, null, false, OnboardingStatus.DISMISSED))
+                .valid(validationErrors.isEmpty())
+                .validationErrors(validationErrors)
+                .targetAudience(audience)
+                .audienceLabel(helper().audienceLabel(audience))
+                .eligibleAthleteCount(eligible)
+                .totalAthleteCount(totalAthletes)
+                .estimatedAudienceSize(eligible)
+                .build();
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public List<GettingStartedCampaignSummaryResponse> getActiveCampaigns() {
+        List<GettingStartedProgram> activePrograms = programRepository.findAllByPublishedTrueOrderByPublishedAtDescUpdatedAtDesc();
+        if (activePrograms == null) {
+            return Collections.emptyList();
+        }
+        return activePrograms.stream()
+                .map(program -> {
+                    TargetAudience audience = program.getTargetAudience() != null
+                            ? program.getTargetAudience()
+                            : TargetAudience.ALL_ATHLETES;
+                    GettingStartedProgramResponse mapped = mapToProgramResponse(program, null, false, OnboardingStatus.DISMISSED);
+                    return GettingStartedCampaignSummaryResponse.builder()
+                            .programId(program.getId())
+                            .title(program.getTitle())
+                            .description(program.getDescription())
+                            .published(program.isPublished())
+                            .version(program.getVersion())
+                            .targetAudience(audience)
+                            .audienceLabel(helper().audienceLabel(audience))
+                            .eligibleAthleteCount(helper().countEligibleAthletes(audience, userRepository))
+                            .enrollments(enrollmentRepository.countByProgramId(program.getId()))
+                            .publishedAt(program.getPublishedAt())
+                            .updatedAt(program.getUpdatedAt())
+                            .days(mapped.getDays())
+                            .build();
+                })
+                .toList();
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public GettingStartedCampaignAnalyticsResponse getCampaignAnalytics(Long programId) {
+        GettingStartedProgram program = (programId != null)
+                ? programRepository.findById(programId)
+                        .orElseThrow(() -> new IllegalArgumentException("Getting Started program not found: " + programId))
+                : programRepository.findFirstPublished()
+                        .or(programRepository::findLatest)
+                        .orElseThrow(() -> new IllegalStateException("No Getting Started campaign found"));
+        return helper().buildAnalyticsResponse(
+                program, userRepository, campaignEventRepository, enrollmentRepository, dayCompletionRepository);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public long countEligibleAthletes(TargetAudience targetAudience) {
+        return helper().countEligibleAthletes(targetAudience, userRepository);
+    }
+
+    @Override
+    public void recordCampaignEvent(Long userId, GettingStartedCampaignEventRequest request) {
+        if (userId == null) {
+            throw new IllegalArgumentException("User ID is required");
+        }
+        if (request == null || request.getEventType() == null) {
+            throw new IllegalArgumentException("Event type is required");
+        }
+        if (campaignEventRepository == null) {
+            return;
+        }
+        GettingStartedProgram program = (request.getProgramId() != null)
+                ? programRepository.findById(request.getProgramId())
+                        .filter(GettingStartedProgram::isPublished)
+                        .orElseThrow(() -> new IllegalStateException("No published Getting Started program found"))
+                : programRepository.findFirstPublished()
+                        .orElseThrow(() -> new IllegalStateException("No published Getting Started program found"));
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new IllegalArgumentException("User not found"));
+        if (!isUserEligibleForProgram(user, program)) {
+            return;
+        }
+        campaignEventRepository.save(GettingStartedCampaignEvent.builder()
+                .program(program)
+                .programVersion(program.getVersion())
+                .user(user)
+                .eventType(request.getEventType())
+                .build());
+    }
+
+    private void recordEventIfAbsent(
+            GettingStartedProgram program,
+            User user,
+            GettingStartedCampaignEventType eventType
+    ) {
+        if (campaignEventRepository == null || program == null || user == null) {
+            return;
+        }
+        boolean alreadyRecorded = campaignEventRepository.existsByProgramIdAndProgramVersionAndUserIdAndEventType(
+                program.getId(), program.getVersion(), user.getId(), eventType);
+        if (!alreadyRecorded) {
+            campaignEventRepository.save(GettingStartedCampaignEvent.builder()
+                    .program(program)
+                    .programVersion(program.getVersion())
+                    .user(user)
+                    .eventType(eventType)
+                    .build());
+        }
+    }
+
+    private GettingStartedProgram resolveAdminTargetProgram(Long programId, boolean preferDraftWhenNull) {
+        if (programId != null) {
+            return programRepository.findById(programId)
+                    .orElseThrow(() -> new IllegalArgumentException("Getting Started program not found: " + programId));
+        }
+        if (preferDraftWhenNull) {
+            Optional<GettingStartedProgram> draft = programRepository.findLatestDraft();
+            if (draft != null && draft.isPresent()) {
+                return draft.get();
+            }
+        }
+        return programRepository.findLatest()
+                .orElseThrow(() -> new IllegalStateException("No Getting Started program found"));
+    }
+
+    private void validateProgramStrictly(AdminGettingStartedProgramRequest request) {
+        List<String> errors = helper().collectValidationErrors(request);
+        if (!errors.isEmpty()) {
+            throw new IllegalArgumentException(String.join(" ", errors));
+        }
+        validateProgramRequest(request);
+    }
+
+    private GettingStartedCampaignHelper helper() {
+        return campaignHelper != null ? campaignHelper : new GettingStartedCampaignHelper();
     }
 }

@@ -1,5 +1,6 @@
 package com.calisthenics.backend.gettingstarted.controller;
 
+import com.calisthenics.backend.gettingstarted.dto.GettingStartedCampaignEventRequest;
 import com.calisthenics.backend.gettingstarted.dto.GettingStartedEnrollmentResponse;
 import com.calisthenics.backend.gettingstarted.dto.GettingStartedProgramResponse;
 import com.calisthenics.backend.gettingstarted.dto.UpdateDismissalStatusRequest;
@@ -62,5 +63,15 @@ public class GettingStartedController {
             @AuthenticationPrincipal UserPrincipal currentUser,
             @PathVariable Integer dayNumber) {
         return ResponseEntity.ok(gettingStartedService.completeDay(currentUser.getId(), dayNumber));
+    }
+
+    @PostMapping("/events")
+    @PreAuthorize("isAuthenticated()")
+    @Operation(summary = "Record Getting Started campaign impression, dismissal, or detail view event")
+    public ResponseEntity<Void> recordCampaignEvent(
+            @AuthenticationPrincipal UserPrincipal currentUser,
+            @Valid @RequestBody GettingStartedCampaignEventRequest request) {
+        gettingStartedService.recordCampaignEvent(currentUser.getId(), request);
+        return ResponseEntity.noContent().build();
     }
 }

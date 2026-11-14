@@ -16,4 +16,8 @@ public interface GettingStartedEnrollmentRepository extends JpaRepository<Gettin
     Optional<GettingStartedEnrollment> findFirstByUserIdAndStatusOrderByEnrolledAtDesc(Long userId, GettingStartedEnrollmentStatus status);
 
     List<GettingStartedEnrollment> findAllByUserIdOrderByEnrolledAtDesc(Long userId);
+
+    long countByProgramId(Long programId);
+
+    long countByProgramIdAndStatus(Long programId, GettingStartedEnrollmentStatus status);
 }
