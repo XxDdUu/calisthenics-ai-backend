@@ -4,10 +4,7 @@ import com.calisthenics.backend.adminai.dto.AdminChatRequest;
 import com.calisthenics.backend.adminai.dto.data.AdminConfirmationDecisionRequest;
 import com.calisthenics.backend.adminai.dto.data.AdminToolExecuteRequest;
 import com.calisthenics.backend.adminai.repository.AdminAiAuditLogRepository;
-import com.calisthenics.backend.adminai.repository.AdminAiConversationRepository;
-import com.calisthenics.backend.adminai.repository.AdminAiMessageRepository;
 import com.calisthenics.backend.adminai.repository.AdminAiPendingActionRepository;
-import com.calisthenics.backend.adminai.repository.AdminAiRecommendationRepository;
 import com.calisthenics.backend.adminai.service.AdminToolRouter;
 import com.calisthenics.backend.adminai.type.AdminPendingActionStatus;
 import com.calisthenics.backend.adminai.type.AdminToolName;
@@ -31,11 +28,8 @@ import com.calisthenics.backend.gettingstarted.dto.UpdateDismissalStatusRequest;
 import com.calisthenics.backend.gettingstarted.entity.GettingStartedProgram;
 import com.calisthenics.backend.gettingstarted.enums.GettingStartedCampaignEventType;
 import com.calisthenics.backend.gettingstarted.enums.TargetAudience;
-import com.calisthenics.backend.gettingstarted.repository.GettingStartedCampaignEventRepository;
-import com.calisthenics.backend.gettingstarted.repository.GettingStartedDayCompletionRepository;
 import com.calisthenics.backend.gettingstarted.repository.GettingStartedEnrollmentRepository;
 import com.calisthenics.backend.gettingstarted.repository.GettingStartedProgramRepository;
-import com.calisthenics.backend.gettingstarted.repository.GettingStartedProgramUserStateRepository;
 import com.calisthenics.backend.profile.entity.CoachProfile;
 import com.calisthenics.backend.profile.repository.CoachProfileRepository;
 import com.calisthenics.backend.security.JwtTokenProvider;
@@ -44,6 +38,10 @@ import com.calisthenics.backend.user.OnboardingStatus;
 import com.calisthenics.backend.user.Role;
 import com.calisthenics.backend.user.User;
 import com.calisthenics.backend.user.UserRepository;
+import com.calisthenics.backend.workout.WorkoutSession;
+import com.calisthenics.backend.workout.WorkoutSessionRepository;
+import com.calisthenics.backend.workout.WorkoutSessionSource;
+import com.calisthenics.backend.workout.WorkoutSessionStatus;
 import com.calisthenics.backend.workoutplan.entity.WorkoutPlan;
 import com.calisthenics.backend.workoutplan.repository.WorkoutPlanRepository;
 import com.calisthenics.backend.workoutplan.type.WorkoutSplitType;
@@ -100,18 +98,13 @@ class AdminAiGettingStartedCampaignIntegrationTest {
     @Autowired private CoachClientRelationshipRepository relationshipRepository;
     @Autowired private WorkoutPlanRepository workoutPlanRepository;
     @Autowired private WorkoutPlanAssignmentRepository assignmentRepository;
+    @Autowired private WorkoutSessionRepository workoutSessionRepository;
 
     @Autowired private GettingStartedProgramRepository programRepository;
     @Autowired private GettingStartedEnrollmentRepository enrollmentRepository;
-    @Autowired private GettingStartedDayCompletionRepository dayCompletionRepository;
-    @Autowired private GettingStartedProgramUserStateRepository userStateRepository;
-    @Autowired private GettingStartedCampaignEventRepository campaignEventRepository;
 
     @Autowired private AdminAiPendingActionRepository pendingActionRepository;
     @Autowired private AdminAiAuditLogRepository auditLogRepository;
-    @Autowired private AdminAiRecommendationRepository recommendationRepository;
-    @Autowired private AdminAiMessageRepository messageRepository;
-    @Autowired private AdminAiConversationRepository conversationRepository;
 
     @MockBean
     private GeminiApiClient geminiApiClient;
@@ -146,27 +139,64 @@ class AdminAiGettingStartedCampaignIntegrationTest {
         cleanDb();
     }
 
-    private void cleanDb() {
-        adminAiPendingActionRepositoryClean();
-        auditLogRepository.deleteAll();
-        recommendationRepository.deleteAll();
-        messageRepository.deleteAll();
-        conversationRepository.deleteAll();
-        campaignEventRepository.deleteAll();
-        dayCompletionRepository.deleteAll();
-        enrollmentRepository.deleteAll();
-        userStateRepository.deleteAll();
-        programRepository.deleteAll();
-        assignmentRepository.deleteAll();
-        workoutPlanRepository.deleteAll();
-        relationshipRepository.deleteAll();
-        coachProfileRepository.deleteAll();
-        exerciseRepository.deleteAll();
-        userRepository.deleteAll();
-    }
+    // Delete children before parents across all schema tables so shared H2 test state from
+    // earlier non-transactional tests (e.g., workout_sessions -> workout_plan_assignments) never blocks cleanup.
+    private static final List<String> TABLES_IN_DELETE_ORDER = List.of(
+            "admin_ai_pending_actions",
+            "admin_ai_audit_logs",
+            "admin_ai_recommendations",
+            "admin_ai_messages",
+            "admin_ai_conversations",
+            "getting_started_campaign_events",
+            "getting_started_day_completions",
+            "getting_started_enrollments",
+            "getting_started_program_user_states",
+            "getting_started_program_exercises",
+            "getting_started_program_days",
+            "getting_started_programs",
+            "shared_personal_records",
+            "personal_records",
+            "workout_logs",
+            "workout_session_sets",
+            "workout_session_exercises",
+            "workout_sessions",
+            "workout_plan_assignments",
+            "workout_plan_exercises",
+            "workout_plan_days",
+            "workout_plans",
+            "coach_client_relationships",
+            "chat_messages",
+            "chat_conversations",
+            "user_presence",
+            "ai_messages",
+            "ai_conversations",
+            "ai_workout_plan_logs",
+            "coach_review_events",
+            "coach_reviews",
+            "user_report_evidence",
+            "user_report_actions",
+            "user_reports",
+            "notifications",
+            "rep_histories",
+            "analysis_sessions",
+            "analyses",
+            "video_analysis_keypoints",
+            "video_analyses",
+            "profile_media_items",
+            "client_body_measurements",
+            "client_profiles",
+            "coach_profiles",
+            "exercise_media_items",
+            "exercises",
+            "password_reset_otps",
+            "registration_otps",
+            "users"
+    );
 
-    private void adminAiPendingActionRepositoryClean() {
-        pendingActionRepository.deleteAll();
+    private void cleanDb() {
+        for (String table : TABLES_IN_DELETE_ORDER) {
+            jdbcTemplate.update("DELETE FROM " + table);
+        }
     }
 
     private void seedData() {
@@ -773,5 +803,26 @@ class AdminAiGettingStartedCampaignIntegrationTest {
                         .toolName(AdminToolName.CREATE_PROGRAM.getToolName())
                         .instruction("Create program")
                         .build()));
+    }
+
+    @Test
+    void cleanDb_deletesDependentWorkoutSessionsBeforeAssignments() {
+        workoutSessionRepository.save(WorkoutSession.builder()
+                .user(recentAthleteA)
+                .workoutPlan(coachPlan)
+                .workoutPlanAssignment(coachAssignment)
+                .title("Assigned Coach Session")
+                .source(WorkoutSessionSource.COACH)
+                .status(WorkoutSessionStatus.COMPLETED)
+                .workoutDate(LocalDate.now())
+                .build());
+
+        assertThat(workoutSessionRepository.count()).isPositive();
+        cleanDb();
+
+        assertThat(workoutSessionRepository.count()).isZero();
+        assertThat(assignmentRepository.count()).isZero();
+        assertThat(workoutPlanRepository.count()).isZero();
+        assertThat(userRepository.count()).isZero();
     }
 }
