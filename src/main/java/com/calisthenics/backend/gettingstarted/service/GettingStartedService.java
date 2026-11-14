@@ -1,15 +1,19 @@
 package com.calisthenics.backend.gettingstarted.service;
 
 import com.calisthenics.backend.gettingstarted.dto.AdminGettingStartedProgramRequest;
+import com.calisthenics.backend.gettingstarted.dto.EnrollGettingStartedRequest;
 import com.calisthenics.backend.gettingstarted.dto.GettingStartedCampaignAnalyticsResponse;
 import com.calisthenics.backend.gettingstarted.dto.GettingStartedCampaignEventRequest;
 import com.calisthenics.backend.gettingstarted.dto.GettingStartedCampaignSummaryResponse;
+import com.calisthenics.backend.gettingstarted.dto.GettingStartedEnrollPreviewResponse;
 import com.calisthenics.backend.gettingstarted.dto.GettingStartedEnrollmentResponse;
 import com.calisthenics.backend.gettingstarted.dto.GettingStartedProgramPreviewResponse;
 import com.calisthenics.backend.gettingstarted.dto.GettingStartedProgramResponse;
 import com.calisthenics.backend.gettingstarted.enums.TargetAudience;
 import com.calisthenics.backend.user.OnboardingStatus;
+import com.calisthenics.backend.workout.dto.PersistentWorkoutSessionResponse;
 
+import java.time.LocalDate;
 import java.util.List;
 
 public interface GettingStartedService {
@@ -53,6 +57,14 @@ public interface GettingStartedService {
     void recordCampaignEvent(Long userId, GettingStartedCampaignEventRequest request);
 
     GettingStartedEnrollmentResponse enrollAthlete(Long userId);
+
+    GettingStartedEnrollPreviewResponse previewEnrollment(Long userId, LocalDate startDate);
+
+    GettingStartedEnrollmentResponse enrollAthlete(Long userId, EnrollGettingStartedRequest request);
+
+    PersistentWorkoutSessionResponse startDaySession(Long userId, Integer dayNumber, LocalDate workoutDate);
+
+    List<GettingStartedEnrollmentResponse> getUserEnrollments(Long userId);
 
     GettingStartedEnrollmentResponse completeDay(Long userId, Integer dayNumber);
 }

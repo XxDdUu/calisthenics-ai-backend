@@ -1,20 +1,32 @@
 package com.calisthenics.backend.gettingstarted.service.impl;
 
+import com.calisthenics.backend.coachclient.type.WorkoutPlanAssignmentStatus;
 import com.calisthenics.backend.exercise.Exercise;
 import com.calisthenics.backend.exercise.ExerciseRepository;
 import com.calisthenics.backend.gettingstarted.dto.*;
 import com.calisthenics.backend.gettingstarted.entity.*;
 import com.calisthenics.backend.gettingstarted.enums.*;
+import com.calisthenics.backend.gettingstarted.exception.GettingStartedScheduleConflictException;
 import com.calisthenics.backend.gettingstarted.repository.*;
 import com.calisthenics.backend.gettingstarted.service.GettingStartedService;
 import com.calisthenics.backend.user.OnboardingStatus;
 import com.calisthenics.backend.user.Role;
 import com.calisthenics.backend.user.User;
 import com.calisthenics.backend.user.UserRepository;
+import com.calisthenics.backend.workout.PersistentWorkoutSessionService;
+import com.calisthenics.backend.workout.TodayWorkoutResolver;
+import com.calisthenics.backend.workout.WorkoutSession;
+import com.calisthenics.backend.workout.WorkoutSessionRepository;
+import com.calisthenics.backend.workout.WorkoutSessionSource;
+import com.calisthenics.backend.workout.WorkoutSessionStatus;
+import com.calisthenics.backend.workout.dto.PersistentWorkoutSessionResponse;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.server.ResponseStatusException;
 
+import java.time.LocalDate;
 import java.time.ZonedDateTime;
 import java.util.*;
 import java.util.stream.Collectors;
@@ -32,6 +44,11 @@ public class GettingStartedServiceImpl implements GettingStartedService {
     private final GettingStartedCampaignHelper campaignHelper;
     private final ExerciseRepository exerciseRepository;
     private final UserRepository userRepository;
+    private final GettingStartedDayProgressRepository dayProgressRepository;
+    private final GettingStartedLifecycleService lifecycleService;
+    private final com.calisthenics.backend.workout.WorkoutSessionRepository workoutSessionRepository;
+    private final com.calisthenics.backend.workout.TodayWorkoutResolver todayWorkoutResolver;
+    private final com.calisthenics.backend.workout.PersistentWorkoutSessionService persistentWorkoutSessionService;
 
     @Override
     @Transactional(readOnly = true)
@@ -217,26 +234,205 @@ public class GettingStartedServiceImpl implements GettingStartedService {
 
     @Override
     public GettingStartedEnrollmentResponse enrollAthlete(Long userId) {
+        return enrollAthlete(userId, null);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public GettingStartedEnrollPreviewResponse previewEnrollment(Long userId, LocalDate startDate) {
         GettingStartedProgram program = programRepository.findFirstPublished()
-                .orElseThrow(() -> new IllegalStateException("Getting Started program is not published"));
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Getting Started program is not published"));
+        userRepository.findById(userId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
+
+        LocalDate effectiveStartDate = startDate != null ? startDate : LocalDate.now();
+        GettingStartedEnrollment existing = enrollmentRepository
+                .findByUserIdAndProgramId(userId, program.getId())
+                .orElse(null);
+
+        List<LocalDate> plannedDates = List.of(
+                effectiveStartDate,
+                effectiveStartDate.plusDays(1),
+                effectiveStartDate.plusDays(2)
+        );
+        Set<Integer> completedDays = existing != null ? completedDayNumbers(existing) : Collections.emptySet();
+        List<GettingStartedScheduleConflictResponse> conflicts = detectScheduleConflicts(
+                userId, program, effectiveStartDate, completedDays);
+
+        return GettingStartedEnrollPreviewResponse.builder()
+                .programId(program.getId())
+                .programTitle(program.getTitle())
+                .alreadyEnrolled(existing != null)
+                .alreadyAddedToWorkoutPlan(existing != null && existing.isAddedToWorkoutPlan())
+                .startDate(effectiveStartDate)
+                .plannedDates(plannedDates)
+                .hasConflicts(!conflicts.isEmpty())
+                .conflicts(conflicts)
+                .build();
+    }
+
+    @Override
+    public GettingStartedEnrollmentResponse enrollAthlete(Long userId, EnrollGettingStartedRequest request) {
+        GettingStartedProgram program = programRepository.findFirstPublished()
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Getting Started program is not published"));
 
         User user = userRepository.findById(userId)
-                .orElseThrow(() -> new IllegalArgumentException("User not found"));
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
 
-        GettingStartedEnrollment existing = enrollmentRepository.findByUserIdAndProgramId(userId, program.getId()).orElse(null);
+        boolean addToWorkoutPlan = request != null && Boolean.TRUE.equals(request.getAddToWorkoutPlan());
+        boolean confirmConflicts = request != null && Boolean.TRUE.equals(request.getConfirmConflicts());
+        LocalDate effectiveStartDate = request != null && request.getStartDate() != null
+                ? request.getStartDate()
+                : LocalDate.now();
+
+        GettingStartedEnrollment existing = enrollmentRepository
+                .findByUserIdAndProgramId(userId, program.getId())
+                .orElse(null);
+
         if (existing != null) {
-            return mapToEnrollmentResponse(existing);
+            if (!addToWorkoutPlan
+                    || existing.isAddedToWorkoutPlan()
+                    || existing.getStatus() == GettingStartedEnrollmentStatus.COMPLETED) {
+                if (lifecycleService != null) {
+                    lifecycleService.initializeDayProgressForEnrollment(existing, existing.getStartDate());
+                }
+                return mapToEnrollmentResponse(existing);
+            }
+
+            Set<Integer> completedDays = completedDayNumbers(existing);
+            List<GettingStartedScheduleConflictResponse> conflicts = detectScheduleConflicts(
+                    userId, program, effectiveStartDate, completedDays);
+            if (!conflicts.isEmpty() && !confirmConflicts) {
+                throw new GettingStartedScheduleConflictException(
+                        "Your Workout Plan already has workouts scheduled on overlapping dates.",
+                        conflicts
+                );
+            }
+
+            existing.setAddedToWorkoutPlan(true);
+            if (existing.getStartDate() == null) {
+                existing.setStartDate(effectiveStartDate);
+            }
+            GettingStartedEnrollment updated = enrollmentRepository.save(existing);
+            scheduleDailySessionsForEnrollment(updated, program, effectiveStartDate);
+            return mapToEnrollmentResponse(updated);
+        }
+
+        if (addToWorkoutPlan) {
+            List<GettingStartedScheduleConflictResponse> conflicts = detectScheduleConflicts(
+                    userId, program, effectiveStartDate, Collections.emptySet());
+            if (!conflicts.isEmpty() && !confirmConflicts) {
+                throw new GettingStartedScheduleConflictException(
+                        "Your Workout Plan already has workouts scheduled on overlapping dates.",
+                        conflicts
+                );
+            }
         }
 
         GettingStartedEnrollment newEnrollment = GettingStartedEnrollment.builder()
                 .user(user)
                 .program(program)
                 .programVersion(program.getVersion())
-                .status(GettingStartedEnrollmentStatus.ACTIVE)
+                .status(GettingStartedEnrollmentStatus.NOT_STARTED)
+                .addedToWorkoutPlan(addToWorkoutPlan)
+                .startDate(addToWorkoutPlan ? effectiveStartDate : null)
                 .build();
 
         GettingStartedEnrollment saved = enrollmentRepository.save(newEnrollment);
+        if (lifecycleService != null) {
+            lifecycleService.initializeDayProgressForEnrollment(saved, saved.getStartDate());
+        }
+        if (addToWorkoutPlan) {
+            scheduleDailySessionsForEnrollment(saved, program, effectiveStartDate);
+        }
         return mapToEnrollmentResponse(saved);
+    }
+
+    @Override
+    public PersistentWorkoutSessionResponse startDaySession(Long userId, Integer dayNumber, LocalDate workoutDate) {
+        if (dayNumber == null || dayNumber < 1 || dayNumber > GettingStartedCampaignHelper.EXPECTED_DAYS) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Day number must be 1, 2, or 3");
+        }
+
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
+
+        GettingStartedEnrollment enrollment = resolveEnrollmentForUser(userId)
+                .orElseThrow(() -> new ResponseStatusException(
+                        HttpStatus.CONFLICT,
+                        "Enroll in the Getting Started program before starting a day."));
+
+        GettingStartedProgram program = enrollment.getProgram();
+        GettingStartedProgramDay programDay = program.getDays().stream()
+                .filter(d -> dayNumber.equals(d.getDayNumber()))
+                .findFirst()
+                .orElseThrow(() -> new ResponseStatusException(
+                        HttpStatus.NOT_FOUND, "Program day " + dayNumber + " not found"));
+
+        GettingStartedDayProgress existingProgress = dayProgressRepository != null
+                ? dayProgressRepository.findByEnrollmentIdAndDayNumber(enrollment.getId(), dayNumber).orElse(null)
+                : null;
+        boolean alreadyCompleted = (existingProgress != null
+                && existingProgress.getStatus() == GettingStartedDayStatus.COMPLETED)
+                || completedDayNumbers(enrollment).contains(dayNumber);
+        if (alreadyCompleted) {
+            throw new ResponseStatusException(
+                    HttpStatus.CONFLICT,
+                    "Day " + dayNumber + " has already been completed.");
+        }
+
+        Optional<WorkoutSession> activeOrScheduled = workoutSessionRepository
+                .findFirstByGettingStartedEnrollmentIdAndGettingStartedDayNumberAndStatusInOrderByIdDesc(
+                        enrollment.getId(),
+                        dayNumber,
+                        List.of(WorkoutSessionStatus.IN_PROGRESS, WorkoutSessionStatus.SCHEDULED)
+                );
+
+        WorkoutSession session;
+        if (activeOrScheduled.isPresent()) {
+            session = activeOrScheduled.get();
+            if (session.getStatus() == WorkoutSessionStatus.SCHEDULED) {
+                session.setStatus(WorkoutSessionStatus.IN_PROGRESS);
+                if (session.getStartedAt() == null) {
+                    session.setStartedAt(ZonedDateTime.now());
+                }
+            }
+            if ((session.getExercises() == null || session.getExercises().isEmpty()) && lifecycleService != null) {
+                lifecycleService.populateGettingStartedExercises(session, programDay);
+            }
+            session = workoutSessionRepository.saveAndFlush(session);
+        } else {
+            LocalDate sessionDate = existingProgress != null && existingProgress.getScheduledDate() != null
+                    ? existingProgress.getScheduledDate()
+                    : (workoutDate != null ? workoutDate : LocalDate.now());
+            session = WorkoutSession.builder()
+                    .user(user)
+                    .source(WorkoutSessionSource.GETTING_STARTED)
+                    .gettingStartedEnrollment(enrollment)
+                    .gettingStartedDayNumber(dayNumber)
+                    .title(buildSessionTitle(programDay))
+                    .workoutDate(sessionDate)
+                    .status(WorkoutSessionStatus.IN_PROGRESS)
+                    .startedAt(ZonedDateTime.now())
+                    .build();
+            if (lifecycleService != null) {
+                lifecycleService.populateGettingStartedExercises(session, programDay);
+            }
+            session = workoutSessionRepository.saveAndFlush(session);
+        }
+
+        if (lifecycleService != null) {
+            lifecycleService.markDayInProgress(enrollment, dayNumber, session);
+        }
+        return persistentWorkoutSessionService.toResponse(session);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public List<GettingStartedEnrollmentResponse> getUserEnrollments(Long userId) {
+        return enrollmentRepository.findAllByUserIdOrderByEnrolledAtDesc(userId).stream()
+                .map(this::mapToEnrollmentResponse)
+                .collect(Collectors.toList());
     }
 
     @Override
@@ -245,35 +441,217 @@ public class GettingStartedServiceImpl implements GettingStartedService {
             throw new IllegalArgumentException("Day number must be 1, 2, or 3");
         }
 
-        GettingStartedProgram program = programRepository.findFirstPublished()
-                .orElseThrow(() -> new IllegalStateException("Getting Started program is not published"));
-
-        GettingStartedEnrollment enrollment = enrollmentRepository.findByUserIdAndProgramId(userId, program.getId())
+        GettingStartedEnrollment enrollment = resolveEnrollmentForUser(userId)
                 .orElseThrow(() -> new IllegalStateException("Athlete is not enrolled in the Getting Started program"));
 
         Optional<GettingStartedDayCompletion> existingCompletion =
                 dayCompletionRepository.findByEnrollmentIdAndDayNumber(enrollment.getId(), dayNumber);
+        if (existingCompletion.isPresent()) {
+            return mapToEnrollmentResponse(enrollment);
+        }
 
-        if (existingCompletion.isEmpty()) {
-            GettingStartedDayCompletion completion = GettingStartedDayCompletion.builder()
-                    .enrollment(enrollment)
-                    .dayNumber(dayNumber)
+        WorkoutSession latestSession = workoutSessionRepository != null
+                ? workoutSessionRepository
+                        .findFirstByGettingStartedEnrollmentIdAndGettingStartedDayNumberOrderByIdDesc(
+                                enrollment.getId(), dayNumber)
+                        .orElse(null)
+                : null;
+        if (latestSession == null
+                || lifecycleService == null
+                || !lifecycleService.qualifiesForDayCompletion(latestSession)) {
+            throw new ResponseStatusException(
+                    HttpStatus.CONFLICT,
+                    "Complete all required exercises in Day " + dayNumber + " workout session before completing the day.");
+        }
+
+        lifecycleService.onWorkoutSessionFinished(latestSession);
+        GettingStartedEnrollment refreshed = enrollmentRepository.findById(enrollment.getId()).orElse(enrollment);
+        return mapToEnrollmentResponse(refreshed);
+    }
+
+    private Optional<GettingStartedEnrollment> resolveEnrollmentForUser(Long userId) {
+        Optional<GettingStartedProgram> published = programRepository.findFirstPublished();
+        if (published.isPresent()) {
+            Optional<GettingStartedEnrollment> byPublished = enrollmentRepository
+                    .findByUserIdAndProgramId(userId, published.get().getId());
+            if (byPublished.isPresent()) {
+                return byPublished;
+            }
+        }
+        List<GettingStartedEnrollment> all = enrollmentRepository.findAllByUserIdOrderByEnrolledAtDesc(userId);
+        return all.isEmpty() ? Optional.empty() : Optional.of(all.getFirst());
+    }
+
+    private void scheduleDailySessionsForEnrollment(
+            GettingStartedEnrollment enrollment,
+            GettingStartedProgram program,
+            LocalDate startDate
+    ) {
+        if (workoutSessionRepository == null) {
+            return;
+        }
+        Set<Integer> completedDays = completedDayNumbers(enrollment);
+        Map<Integer, GettingStartedProgramDay> daysByNum = program.getDays().stream()
+                .collect(Collectors.toMap(GettingStartedProgramDay::getDayNumber, d -> d, (a, b) -> a));
+
+        for (int dayNumber = 1; dayNumber <= GettingStartedCampaignHelper.EXPECTED_DAYS; dayNumber++) {
+            LocalDate scheduledDate = startDate.plusDays(dayNumber - 1L);
+            GettingStartedDayProgress progress = dayProgressRepository != null
+                    ? dayProgressRepository.findByEnrollmentIdAndDayNumber(enrollment.getId(), dayNumber).orElse(null)
+                    : null;
+            if (progress != null && progress.getScheduledDate() == null) {
+                progress.setScheduledDate(scheduledDate);
+                dayProgressRepository.save(progress);
+            }
+
+            if (completedDays.contains(dayNumber)
+                    || (progress != null && progress.getStatus() == GettingStartedDayStatus.COMPLETED)) {
+                continue;
+            }
+
+            Optional<WorkoutSession> existingSession = workoutSessionRepository
+                    .findFirstByGettingStartedEnrollmentIdAndGettingStartedDayNumberAndStatusInOrderByIdDesc(
+                            enrollment.getId(),
+                            dayNumber,
+                            List.of(WorkoutSessionStatus.SCHEDULED, WorkoutSessionStatus.IN_PROGRESS)
+                    );
+            if (existingSession.isPresent()) {
+                if (progress != null && progress.getWorkoutSession() == null) {
+                    progress.setWorkoutSession(existingSession.get());
+                    dayProgressRepository.save(progress);
+                }
+                continue;
+            }
+
+            GettingStartedProgramDay programDay = daysByNum.get(dayNumber);
+            WorkoutSession scheduled = WorkoutSession.builder()
+                    .user(enrollment.getUser())
+                    .source(WorkoutSessionSource.GETTING_STARTED)
+                    .gettingStartedEnrollment(enrollment)
+                    .gettingStartedDayNumber(dayNumber)
+                    .title(buildSessionTitle(programDay, dayNumber))
+                    .workoutDate(scheduledDate)
+                    .status(WorkoutSessionStatus.SCHEDULED)
                     .build();
-            dayCompletionRepository.save(completion);
-            enrollment.getCompletions().add(completion);
+            WorkoutSession savedSession = workoutSessionRepository.save(scheduled);
+
+            if (progress != null) {
+                progress.setScheduledDate(scheduledDate);
+                progress.setWorkoutSession(savedSession);
+                dayProgressRepository.save(progress);
+            } else if (dayProgressRepository != null) {
+                dayProgressRepository.save(GettingStartedDayProgress.builder()
+                        .enrollment(enrollment)
+                        .dayNumber(dayNumber)
+                        .status(GettingStartedDayStatus.NOT_STARTED)
+                        .scheduledDate(scheduledDate)
+                        .workoutSession(savedSession)
+                        .build());
+            }
         }
+    }
 
-        Set<Integer> completedDays = enrollment.getCompletions().stream()
-                .map(GettingStartedDayCompletion::getDayNumber)
-                .collect(Collectors.toSet());
-
-        if (completedDays.contains(1) && completedDays.contains(2) && completedDays.contains(3)) {
-            enrollment.setStatus(GettingStartedEnrollmentStatus.COMPLETED);
-            enrollment.setCompletedAt(ZonedDateTime.now());
-            enrollmentRepository.save(enrollment);
+    private List<GettingStartedScheduleConflictResponse> detectScheduleConflicts(
+            Long userId,
+            GettingStartedProgram program,
+            LocalDate startDate,
+            Set<Integer> completedDays
+    ) {
+        if (workoutSessionRepository == null || todayWorkoutResolver == null) {
+            return Collections.emptyList();
         }
+        Map<Integer, GettingStartedProgramDay> daysByNum = program.getDays().stream()
+                .collect(Collectors.toMap(GettingStartedProgramDay::getDayNumber, d -> d, (a, b) -> a));
 
-        return mapToEnrollmentResponse(enrollment);
+        List<GettingStartedScheduleConflictResponse> conflicts = new ArrayList<>();
+        for (int dayNumber = 1; dayNumber <= GettingStartedCampaignHelper.EXPECTED_DAYS; dayNumber++) {
+            if (completedDays.contains(dayNumber)) {
+                continue;
+            }
+            LocalDate date = startDate.plusDays(dayNumber - 1L);
+            GettingStartedProgramDay gsDay = daysByNum.get(dayNumber);
+            String gsDayTitle = gsDay != null ? gsDay.getTitle() : "Day " + dayNumber;
+
+            Set<Long> sessionPlanIdsOnDate = new HashSet<>();
+            List<WorkoutSession> existingSessions = workoutSessionRepository
+                    .findByUserIdAndWorkoutDateOrderByIdAsc(userId, date);
+            for (WorkoutSession session : existingSessions) {
+                if (session.getSource() == WorkoutSessionSource.GETTING_STARTED) {
+                    continue;
+                }
+                if (session.getStatus() != WorkoutSessionStatus.SCHEDULED
+                        && session.getStatus() != WorkoutSessionStatus.IN_PROGRESS) {
+                    continue;
+                }
+                if (session.getWorkoutPlanAssignment() != null
+                        && session.getWorkoutPlanAssignment().getStatus() != WorkoutPlanAssignmentStatus.ACTIVE) {
+                    continue;
+                }
+                if (session.getWorkoutPlan() != null) {
+                    sessionPlanIdsOnDate.add(session.getWorkoutPlan().getId());
+                }
+                conflicts.add(GettingStartedScheduleConflictResponse.builder()
+                        .date(date)
+                        .gettingStartedDayNumber(dayNumber)
+                        .gettingStartedDayTitle(gsDayTitle)
+                        .existingWorkoutTitle(session.getTitle())
+                        .existingSource(session.getSource())
+                        .workoutSessionId(session.getId())
+                        .workoutPlanId(session.getWorkoutPlan() != null ? session.getWorkoutPlan().getId() : null)
+                        .build());
+            }
+
+            TodayWorkoutResolver.ResolutionCandidates resolved = todayWorkoutResolver.resolveCandidates(userId, date);
+            for (TodayWorkoutResolver.ResolvedWorkout candidate : resolved.candidates()) {
+                if (candidate.day() == null || candidate.day().isRestDay()) {
+                    continue;
+                }
+                if (candidate.plan() != null && sessionPlanIdsOnDate.contains(candidate.plan().getId())) {
+                    continue;
+                }
+                String planName = candidate.plan() != null ? candidate.plan().getName() : "Workout Plan";
+                String dayFocus = candidate.day().getSessionType() != null
+                        ? candidate.day().getSessionType().name()
+                        : "Workout";
+                conflicts.add(GettingStartedScheduleConflictResponse.builder()
+                        .date(date)
+                        .gettingStartedDayNumber(dayNumber)
+                        .gettingStartedDayTitle(gsDayTitle)
+                        .existingWorkoutTitle(planName + " · " + dayFocus)
+                        .existingSource(candidate.assignment() != null
+                                ? WorkoutSessionSource.COACH
+                                : WorkoutSessionSource.PERSONAL)
+                        .workoutPlanId(candidate.plan() != null ? candidate.plan().getId() : null)
+                        .build());
+            }
+        }
+        return conflicts;
+    }
+
+    private Set<Integer> completedDayNumbers(GettingStartedEnrollment enrollment) {
+        Set<Integer> completed = new HashSet<>();
+        if (enrollment.getCompletions() != null) {
+            enrollment.getCompletions().forEach(c -> completed.add(c.getDayNumber()));
+        }
+        if (dayCompletionRepository != null && enrollment.getId() != null) {
+            dayCompletionRepository.findByEnrollmentIdOrderByDayNumberAsc(enrollment.getId())
+                    .forEach(c -> completed.add(c.getDayNumber()));
+        }
+        return completed;
+    }
+
+    private String buildSessionTitle(GettingStartedProgramDay day) {
+        return buildSessionTitle(day, day != null ? day.getDayNumber() : 1);
+    }
+
+    private String buildSessionTitle(GettingStartedProgramDay day, int fallbackDayNumber) {
+        String rawTitle = day != null && day.getTitle() != null && !day.getTitle().isBlank()
+                ? day.getTitle().trim()
+                : "Day " + fallbackDayNumber;
+        if (rawTitle.toLowerCase(Locale.US).startsWith("getting started")) {
+            return rawTitle;
+        }
+        return "Getting Started · " + rawTitle;
     }
 
     private boolean isUserEligibleForProgram(User user, GettingStartedProgram program) {
@@ -362,35 +740,50 @@ public class GettingStartedServiceImpl implements GettingStartedService {
             boolean eligible,
             OnboardingStatus userDismissalState
     ) {
-        Set<Integer> completedDays = (enrollment != null)
-                ? enrollment.getCompletions().stream()
-                    .map(GettingStartedDayCompletion::getDayNumber)
-                    .collect(Collectors.toSet())
-                : Collections.emptySet();
+        GettingStartedEnrollmentResponse enrollmentResponse =
+                enrollment != null ? mapToEnrollmentResponse(enrollment) : null;
+        Map<Integer, GettingStartedDayProgressResponse> progressByDay = enrollmentResponse != null
+                ? enrollmentResponse.getDayProgress().stream()
+                        .collect(Collectors.toMap(
+                                GettingStartedDayProgressResponse::getDayNumber,
+                                item -> item,
+                                (a, b) -> a))
+                : Collections.emptyMap();
 
         List<GettingStartedDayResponse> dayResponses = program.getDays().stream()
                 .sorted(Comparator.comparingInt(GettingStartedProgramDay::getDayNumber))
-                .map(day -> GettingStartedDayResponse.builder()
-                        .id(day.getId())
-                        .dayNumber(day.getDayNumber())
-                        .title(day.getTitle())
-                        .description(day.getDescription())
-                        .completed(completedDays.contains(day.getDayNumber()))
-                        .exercises(day.getExercises().stream()
-                                .sorted(Comparator.comparingInt(GettingStartedProgramExercise::getDisplayOrder))
-                                .map(ex -> GettingStartedExerciseResponse.builder()
-                                        .id(ex.getId())
-                                        .exerciseId(ex.getExercise() != null ? ex.getExercise().getId() : null)
-                                        .exerciseName(ex.getExerciseName())
-                                        .sets(ex.getSets())
-                                        .reps(ex.getReps())
-                                        .durationSeconds(ex.getDurationSeconds())
-                                        .restSeconds(ex.getRestSeconds())
-                                        .instructions(ex.getInstructions())
-                                        .displayOrder(ex.getDisplayOrder())
-                                        .build())
-                                .collect(Collectors.toList()))
-                        .build())
+                .map(day -> {
+                    GettingStartedDayProgressResponse dp = progressByDay.get(day.getDayNumber());
+                    GettingStartedDayStatus dayStatus = dp != null && dp.getStatus() != null
+                            ? dp.getStatus()
+                            : GettingStartedDayStatus.NOT_STARTED;
+                    return GettingStartedDayResponse.builder()
+                            .id(day.getId())
+                            .dayNumber(day.getDayNumber())
+                            .title(day.getTitle())
+                            .description(day.getDescription())
+                            .status(dayStatus)
+                            .completed(dayStatus == GettingStartedDayStatus.COMPLETED)
+                            .scheduledDate(dp != null ? dp.getScheduledDate() : null)
+                            .workoutSessionId(dp != null ? dp.getWorkoutSessionId() : null)
+                            .startedAt(dp != null ? dp.getStartedAt() : null)
+                            .completedAt(dp != null ? dp.getCompletedAt() : null)
+                            .exercises(day.getExercises().stream()
+                                    .sorted(Comparator.comparingInt(GettingStartedProgramExercise::getDisplayOrder))
+                                    .map(ex -> GettingStartedExerciseResponse.builder()
+                                            .id(ex.getId())
+                                            .exerciseId(ex.getExercise() != null ? ex.getExercise().getId() : null)
+                                            .exerciseName(ex.getExerciseName())
+                                            .sets(ex.getSets())
+                                            .reps(ex.getReps())
+                                            .durationSeconds(ex.getDurationSeconds())
+                                            .restSeconds(ex.getRestSeconds())
+                                            .instructions(ex.getInstructions())
+                                            .displayOrder(ex.getDisplayOrder())
+                                            .build())
+                                    .collect(Collectors.toList()))
+                            .build();
+                })
                 .collect(Collectors.toList());
 
         return GettingStartedProgramResponse.builder()
@@ -408,27 +801,126 @@ public class GettingStartedServiceImpl implements GettingStartedService {
                 .eligible(eligible)
                 .userDismissalState(userDismissalState)
                 .days(dayResponses)
-                .enrollment(enrollment != null ? mapToEnrollmentResponse(enrollment) : null)
+                .enrollment(enrollmentResponse)
                 .build();
     }
 
     private GettingStartedEnrollmentResponse mapToEnrollmentResponse(GettingStartedEnrollment enrollment) {
-        List<Integer> completedDays = enrollment.getCompletions().stream()
-                .map(GettingStartedDayCompletion::getDayNumber)
-                .sorted()
-                .collect(Collectors.toList());
+        Map<Integer, GettingStartedDayCompletion> completionByDay = new HashMap<>();
+        if (enrollment.getCompletions() != null) {
+            enrollment.getCompletions().forEach(c -> completionByDay.put(c.getDayNumber(), c));
+        }
+        if (dayCompletionRepository != null && enrollment.getId() != null) {
+            dayCompletionRepository.findByEnrollmentIdOrderByDayNumberAsc(enrollment.getId())
+                    .forEach(c -> completionByDay.put(c.getDayNumber(), c));
+        }
+
+        Map<Integer, GettingStartedDayProgress> progressByDay = new HashMap<>();
+        if (enrollment.getDayProgress() != null) {
+            enrollment.getDayProgress().forEach(p -> progressByDay.put(p.getDayNumber(), p));
+        }
+        if (dayProgressRepository != null && enrollment.getId() != null) {
+            dayProgressRepository.findByEnrollmentIdOrderByDayNumberAsc(enrollment.getId())
+                    .forEach(p -> progressByDay.put(p.getDayNumber(), p));
+        }
+
+        Map<Integer, GettingStartedProgramDay> programDaysByNumber = new HashMap<>();
+        if (enrollment.getProgram() != null && enrollment.getProgram().getDays() != null) {
+            enrollment.getProgram().getDays()
+                    .forEach(d -> programDaysByNumber.put(d.getDayNumber(), d));
+        }
+
+        List<GettingStartedDayProgressResponse> dayProgressResponses = new ArrayList<>();
+        List<Integer> completedDays = new ArrayList<>();
+        boolean anyStarted = false;
+
+        for (int dayNumber = 1; dayNumber <= GettingStartedCampaignHelper.EXPECTED_DAYS; dayNumber++) {
+            GettingStartedDayCompletion completion = completionByDay.get(dayNumber);
+            GettingStartedDayProgress progress = progressByDay.get(dayNumber);
+            GettingStartedProgramDay programDay = programDaysByNumber.get(dayNumber);
+
+            GettingStartedDayStatus dayStatus;
+            if (completion != null || (progress != null && progress.getStatus() == GettingStartedDayStatus.COMPLETED)) {
+                dayStatus = GettingStartedDayStatus.COMPLETED;
+                completedDays.add(dayNumber);
+                anyStarted = true;
+            } else if (progress != null && progress.getStatus() == GettingStartedDayStatus.IN_PROGRESS) {
+                dayStatus = GettingStartedDayStatus.IN_PROGRESS;
+                anyStarted = true;
+            } else {
+                dayStatus = GettingStartedDayStatus.NOT_STARTED;
+            }
+
+            Long sessionId = resolveNavigableSessionId(dayStatus, progress, completion);
+            LocalDate scheduledDate = progress != null && progress.getScheduledDate() != null
+                    ? progress.getScheduledDate()
+                    : (enrollment.isAddedToWorkoutPlan() && enrollment.getStartDate() != null
+                            ? enrollment.getStartDate().plusDays(dayNumber - 1L)
+                            : null);
+
+            dayProgressResponses.add(GettingStartedDayProgressResponse.builder()
+                    .dayNumber(dayNumber)
+                    .title(programDay != null ? programDay.getTitle() : "Day " + dayNumber)
+                    .status(dayStatus)
+                    .scheduledDate(scheduledDate)
+                    .workoutSessionId(sessionId)
+                    .startedAt(progress != null ? progress.getStartedAt() : null)
+                    .completedAt(completion != null ? completion.getCompletedAt()
+                            : (progress != null ? progress.getCompletedAt() : null))
+                    .build());
+        }
+
+        GettingStartedEnrollmentStatus effectiveStatus = enrollment.getStatus();
+        if (completedDays.size() >= GettingStartedCampaignHelper.EXPECTED_DAYS) {
+            effectiveStatus = GettingStartedEnrollmentStatus.COMPLETED;
+        } else if (effectiveStatus == GettingStartedEnrollmentStatus.ACTIVE) {
+            effectiveStatus = anyStarted
+                    ? GettingStartedEnrollmentStatus.IN_PROGRESS
+                    : GettingStartedEnrollmentStatus.NOT_STARTED;
+        }
 
         return GettingStartedEnrollmentResponse.builder()
                 .id(enrollment.getId())
                 .programId(enrollment.getProgram().getId())
+                .programTitle(enrollment.getProgram().getTitle())
+                .programDescription(enrollment.getProgram().getDescription())
                 .programVersion(enrollment.getProgramVersion())
-                .status(enrollment.getStatus().name())
+                .status(effectiveStatus)
+                .addedToWorkoutPlan(enrollment.isAddedToWorkoutPlan())
+                .startDate(enrollment.getStartDate())
                 .enrolledAt(enrollment.getEnrolledAt())
+                .startedAt(enrollment.getStartedAt())
                 .completedAt(enrollment.getCompletedAt())
                 .completedDays(completedDays)
+                .dayProgress(dayProgressResponses)
                 .completedDaysCount(completedDays.size())
-                .isCompleted(enrollment.getStatus() == GettingStartedEnrollmentStatus.COMPLETED)
+                .totalDays(GettingStartedCampaignHelper.EXPECTED_DAYS)
+                .isCompleted(effectiveStatus == GettingStartedEnrollmentStatus.COMPLETED)
                 .build();
+    }
+
+    private Long resolveNavigableSessionId(
+            GettingStartedDayStatus dayStatus,
+            GettingStartedDayProgress progress,
+            GettingStartedDayCompletion completion
+    ) {
+        if (dayStatus == GettingStartedDayStatus.COMPLETED) {
+            if (completion != null && completion.getWorkoutSession() != null) {
+                return completion.getWorkoutSession().getId();
+            }
+            if (progress != null && progress.getWorkoutSession() != null) {
+                return progress.getWorkoutSession().getId();
+            }
+            return null;
+        }
+        if (progress != null && progress.getWorkoutSession() != null) {
+            WorkoutSessionStatus sessionStatus = progress.getWorkoutSession().getStatus();
+            if (sessionStatus == WorkoutSessionStatus.IN_PROGRESS
+                    || sessionStatus == WorkoutSessionStatus.SCHEDULED) {
+                return progress.getWorkoutSession().getId();
+            }
+        }
+        return null;
     }
 
     @Override

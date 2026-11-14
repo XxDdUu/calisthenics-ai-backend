@@ -78,6 +78,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -148,18 +149,19 @@ class AdminAiGettingStartedCampaignIntegrationTest {
             "admin_ai_messages",
             "admin_ai_conversations",
             "getting_started_campaign_events",
+            "getting_started_day_progress",
             "getting_started_day_completions",
-            "getting_started_enrollments",
-            "getting_started_program_user_states",
-            "getting_started_program_exercises",
-            "getting_started_program_days",
-            "getting_started_programs",
             "shared_personal_records",
             "personal_records",
             "workout_logs",
             "workout_session_sets",
             "workout_session_exercises",
             "workout_sessions",
+            "getting_started_enrollments",
+            "getting_started_program_user_states",
+            "getting_started_program_exercises",
+            "getting_started_program_days",
+            "getting_started_programs",
             "workout_plan_assignments",
             "workout_plan_exercises",
             "workout_plan_days",
@@ -197,6 +199,11 @@ class AdminAiGettingStartedCampaignIntegrationTest {
         for (String table : TABLES_IN_DELETE_ORDER) {
             jdbcTemplate.update("DELETE FROM " + table);
         }
+    }
+
+    @org.junit.jupiter.api.AfterEach
+    void tearDownGettingStartedCampaignTest() {
+        cleanDb();
     }
 
     private void seedData() {
@@ -655,8 +662,35 @@ class AdminAiGettingStartedCampaignIntegrationTest {
                 .andExpect(status().isCreated());
 
         for (int day = 1; day <= completedDays; day++) {
-            mockMvc.perform(post("/api/v1/getting-started-program/complete-day/" + day)
+            MvcResult startRes = mockMvc.perform(post("/api/v1/getting-started-program/days/" + day + "/start")
                             .header("Authorization", "Bearer " + token))
+                    .andExpect(status().isOk())
+                    .andReturn();
+            JsonNode sessionNode = objectMapper.readTree(startRes.getResponse().getContentAsString());
+            long sessionId = sessionNode.get("id").asLong();
+            for (JsonNode exNode : sessionNode.get("exercises")) {
+                long exId = exNode.get("id").asLong();
+                for (JsonNode setNode : exNode.get("sets")) {
+                    long setId = setNode.get("id").asLong();
+                    long setVersion = setNode.get("version").asLong();
+                    Integer reps = setNode.hasNonNull("reps") ? setNode.get("reps").asInt() : 10;
+                    String hold = setNode.hasNonNull("holdDurationSeconds")
+                            ? String.valueOf(setNode.get("holdDurationSeconds").asInt())
+                            : "null";
+                    String setBody = String.format(
+                            "{\"reps\":%d,\"holdDurationSeconds\":%s,\"completed\":true,\"expectedVersion\":%d}",
+                            reps, hold, setVersion);
+                    mockMvc.perform(put("/api/v1/workout-sessions/" + sessionId + "/exercises/" + exId + "/sets/" + setId)
+                                    .header("Authorization", "Bearer " + token)
+                                    .contentType(MediaType.APPLICATION_JSON)
+                                    .content(setBody))
+                            .andExpect(status().isOk());
+                }
+            }
+            mockMvc.perform(post("/api/v1/workout-sessions/" + sessionId + "/finish")
+                            .header("Authorization", "Bearer " + token)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"confirmPartial\":false}"))
                     .andExpect(status().isOk());
         }
     }

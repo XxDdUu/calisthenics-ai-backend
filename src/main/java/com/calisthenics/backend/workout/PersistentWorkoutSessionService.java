@@ -5,6 +5,9 @@ import com.calisthenics.backend.coachclient.type.CoachClientRelationshipStatus;
 import com.calisthenics.backend.coachclient.type.WorkoutPlanAssignmentStatus;
 import com.calisthenics.backend.config.AppProperties;
 import com.calisthenics.backend.config.UserTimeResolver;
+import com.calisthenics.backend.gettingstarted.entity.GettingStartedProgramDay;
+import com.calisthenics.backend.gettingstarted.enums.GettingStartedEnrollmentStatus;
+import com.calisthenics.backend.gettingstarted.service.impl.GettingStartedLifecycleService;
 import com.calisthenics.backend.workout.dto.*;
 import com.calisthenics.backend.workoutplan.entity.WorkoutPlan;
 import com.calisthenics.backend.workoutplan.entity.WorkoutPlanDay;
@@ -39,6 +42,7 @@ public class PersistentWorkoutSessionService {
     private final TodayWorkoutResolver todayWorkoutResolver;
     private final com.calisthenics.backend.analytics.service.PersonalRecordService personalRecordService;
     private final UserTimeResolver userTimeResolver;
+    private final GettingStartedLifecycleService gettingStartedLifecycleService;
 
     public PersistentWorkoutSessionService(
             WorkoutSessionRepository sessionRepository,
@@ -48,7 +52,19 @@ public class PersistentWorkoutSessionService {
             com.calisthenics.backend.analytics.service.PersonalRecordService personalRecordService
     ) {
         this(sessionRepository, dayRepository, planExerciseRepository, todayWorkoutResolver,
-                personalRecordService, new UserTimeResolver(new AppProperties()));
+                personalRecordService, new UserTimeResolver(new AppProperties()), null);
+    }
+
+    public PersistentWorkoutSessionService(
+            WorkoutSessionRepository sessionRepository,
+            WorkoutPlanDayRepository dayRepository,
+            WorkoutPlanExerciseRepository planExerciseRepository,
+            TodayWorkoutResolver todayWorkoutResolver,
+            com.calisthenics.backend.analytics.service.PersonalRecordService personalRecordService,
+            UserTimeResolver userTimeResolver
+    ) {
+        this(sessionRepository, dayRepository, planExerciseRepository, todayWorkoutResolver,
+                personalRecordService, userTimeResolver, null);
     }
 
     @Autowired
@@ -58,7 +74,8 @@ public class PersistentWorkoutSessionService {
             WorkoutPlanExerciseRepository planExerciseRepository,
             TodayWorkoutResolver todayWorkoutResolver,
             com.calisthenics.backend.analytics.service.PersonalRecordService personalRecordService,
-            UserTimeResolver userTimeResolver
+            UserTimeResolver userTimeResolver,
+            GettingStartedLifecycleService gettingStartedLifecycleService
     ) {
         this.sessionRepository = sessionRepository;
         this.dayRepository = dayRepository;
@@ -66,12 +83,14 @@ public class PersistentWorkoutSessionService {
         this.todayWorkoutResolver = todayWorkoutResolver;
         this.personalRecordService = personalRecordService;
         this.userTimeResolver = userTimeResolver;
+        this.gettingStartedLifecycleService = gettingStartedLifecycleService;
     }
 
     @Transactional
     public PersistentWorkoutSessionResponse startOrResume(Long userId, StartWorkoutSessionRequest request) {
         List<WorkoutSession> activeSessions = sessionRepository.findByUserIdAndWorkoutDateAndStatus(
                         userId, request.workoutDate(), WorkoutSessionStatus.IN_PROGRESS).stream()
+                .filter(session -> session.getSource() != WorkoutSessionSource.GETTING_STARTED)
                 .filter(session -> isSessionAssignmentUsable(session, true))
                 .toList();
         if (activeSessions.size() == 1) {
@@ -369,6 +388,9 @@ public class PersistentWorkoutSessionService {
         session.setStatus(WorkoutSessionStatus.COMPLETED);
         sessionRepository.flush();
         personalRecordService.detectAndSavePRs(session);
+        if (gettingStartedLifecycleService != null) {
+            gettingStartedLifecycleService.onWorkoutSessionFinished(session);
+        }
         return map(session);
     }
 
@@ -415,6 +437,34 @@ public class PersistentWorkoutSessionService {
         return map(session);
     }
 
+    @Transactional
+    public PersistentWorkoutSessionResponse startScheduledSession(Long userId, Long sessionId) {
+        WorkoutSession session = sessionRepository.findByIdAndUserId(sessionId, userId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Workout session not found"));
+        if (!isSessionAssignmentUsable(session, true)) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "This workout session is no longer active because its source plan ended");
+        }
+        if (session.getStatus() == WorkoutSessionStatus.COMPLETED
+                || session.getStatus() == WorkoutSessionStatus.CANCELLED) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Workout session is already completed or cancelled");
+        }
+        if (session.getStatus() == WorkoutSessionStatus.SCHEDULED) {
+            promoteScheduledSession(session);
+        }
+        if (session.getGettingStartedEnrollment() != null
+                && session.getGettingStartedDayNumber() != null
+                && gettingStartedLifecycleService != null) {
+            gettingStartedLifecycleService.markDayInProgress(
+                    session.getGettingStartedEnrollment(),
+                    session.getGettingStartedDayNumber(),
+                    session
+            );
+        }
+        return map(session);
+    }
+
     private PersistentWorkoutSessionResponse promoteScheduledSession(WorkoutSession session) {
         ZonedDateTime now = ZonedDateTime.now();
         session.setStatus(WorkoutSessionStatus.IN_PROGRESS);
@@ -422,14 +472,30 @@ public class PersistentWorkoutSessionService {
             session.setStartedAt(now);
         }
         session.setLastSavedAt(now);
-        if ((session.getExercises() == null || session.getExercises().isEmpty()) && session.getWorkoutPlanDay() != null) {
+        hydrateExercisesIfNeeded(session);
+        return map(sessionRepository.saveAndFlush(session));
+    }
+
+    private void hydrateExercisesIfNeeded(WorkoutSession session) {
+        if (session.getExercises() != null && !session.getExercises().isEmpty()) {
+            return;
+        }
+        if (session.getWorkoutPlanDay() != null) {
             List<WorkoutPlanExercise> planned = planExerciseRepository
                     .findByWorkoutPlanDayIdOrderByDisplayOrderAsc(session.getWorkoutPlanDay().getId());
             if (!planned.isEmpty()) {
                 populateSessionExercises(session, planned);
             }
+        } else if (session.getGettingStartedEnrollment() != null
+                && session.getGettingStartedDayNumber() != null
+                && gettingStartedLifecycleService != null) {
+            GettingStartedProgramDay gsDay = session.getGettingStartedEnrollment().getProgram().getDays()
+                    .stream()
+                    .filter(d -> d.getDayNumber().equals(session.getGettingStartedDayNumber()))
+                    .findFirst()
+                    .orElse(null);
+            gettingStartedLifecycleService.populateGettingStartedExercises(session, gsDay);
         }
-        return map(sessionRepository.saveAndFlush(session));
     }
 
     private void populateSessionExercises(WorkoutSession session, List<WorkoutPlanExercise> plannedExercises) {
@@ -478,14 +544,21 @@ public class PersistentWorkoutSessionService {
         if (session.getStatus() != WorkoutSessionStatus.IN_PROGRESS) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Workout session is not in progress");
         }
-        if (session.getWorkoutPlanAssignment() != null && !isSessionAssignmentUsable(session, true)) {
-            throw new ResponseStatusException(
-                    HttpStatus.CONFLICT, "This coach workout assignment has been canceled and can no longer be continued");
+        if (!isSessionAssignmentUsable(session, true)) {
+            String message = session.getWorkoutPlanAssignment() != null
+                    ? "This coach workout assignment has been canceled and can no longer be continued"
+                    : "This workout session is no longer active and cannot be continued";
+            throw new ResponseStatusException(HttpStatus.CONFLICT, message);
         }
         return session;
     }
 
     private boolean isSessionAssignmentUsable(WorkoutSession session, boolean allowInactive) {
+        if (session.getGettingStartedEnrollment() != null
+                && session.getGettingStartedEnrollment().getStatus() == GettingStartedEnrollmentStatus.COMPLETED
+                && session.getStatus() != WorkoutSessionStatus.COMPLETED) {
+            return false;
+        }
         WorkoutPlanAssignment assignment = session.getWorkoutPlanAssignment();
         if (assignment == null) {
             return true;
@@ -506,6 +579,10 @@ public class PersistentWorkoutSessionService {
                 .filter(exercise -> Objects.equals(exercise.getId(), exerciseId))
                 .findFirst()
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Session exercise not found"));
+    }
+
+    public PersistentWorkoutSessionResponse toResponse(WorkoutSession session) {
+        return map(session);
     }
 
     private PersistentWorkoutSessionResponse map(WorkoutSession session) {
@@ -575,6 +652,8 @@ public class PersistentWorkoutSessionService {
                 completedSets,
                 totalReps,
                 totalHoldSeconds,
-                exercises);
+                exercises,
+                session.getGettingStartedEnrollment() == null ? null : session.getGettingStartedEnrollment().getId(),
+                session.getGettingStartedDayNumber());
     }
 }

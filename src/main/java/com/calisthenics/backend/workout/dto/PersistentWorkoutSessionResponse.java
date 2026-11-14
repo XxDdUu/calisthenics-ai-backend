@@ -28,6 +28,8 @@ public record PersistentWorkoutSessionResponse(
         Integer completedSets,
         Integer totalReps,
         Integer totalHoldDurationSeconds,
-        List<WorkoutSessionExerciseResponse> exercises
+        List<WorkoutSessionExerciseResponse> exercises,
+        Long gettingStartedEnrollmentId,
+        Integer gettingStartedDayNumber
 ) {
 }

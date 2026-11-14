@@ -1,6 +1,7 @@
 package com.calisthenics.backend.workout;
 
 import com.calisthenics.backend.user.User;
+import com.calisthenics.backend.gettingstarted.entity.GettingStartedEnrollment;
 import com.calisthenics.backend.coachclient.entity.WorkoutPlanAssignment;
 import com.calisthenics.backend.workoutplan.entity.WorkoutPlan;
 import com.calisthenics.backend.workoutplan.entity.WorkoutPlanDay;
@@ -36,6 +37,13 @@ public class WorkoutSession {
 
     @Column(nullable = false)
     private String title;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "getting_started_enrollment_id")
+    private GettingStartedEnrollment gettingStartedEnrollment;
+
+    @Column(name = "getting_started_day_number")
+    private Integer gettingStartedDayNumber;
 
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "workout_plan_id")

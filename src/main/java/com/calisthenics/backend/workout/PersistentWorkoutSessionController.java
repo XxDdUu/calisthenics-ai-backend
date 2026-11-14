@@ -66,6 +66,13 @@ public class PersistentWorkoutSessionController {
         return ResponseEntity.ok(sessionService.get(currentUser.getId(), sessionId));
     }
 
+    @PostMapping("/{sessionId}/start")
+    public ResponseEntity<PersistentWorkoutSessionResponse> startScheduled(
+            @AuthenticationPrincipal UserPrincipal currentUser,
+            @PathVariable Long sessionId) {
+        return ResponseEntity.ok(sessionService.startScheduledSession(currentUser.getId(), sessionId));
+    }
+
     @PutMapping("/{sessionId}/exercises/{exerciseId}/sets/{setId}")
     public ResponseEntity<PersistentWorkoutSessionResponse> updateSet(
             @AuthenticationPrincipal UserPrincipal currentUser,

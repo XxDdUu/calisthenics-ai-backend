@@ -6,6 +6,7 @@ import jakarta.persistence.*;
 import lombok.*;
 import org.hibernate.annotations.CreationTimestamp;
 
+import java.time.LocalDate;
 import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -41,7 +42,17 @@ public class GettingStartedEnrollment {
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 30)
     @Builder.Default
-    private GettingStartedEnrollmentStatus status = GettingStartedEnrollmentStatus.ACTIVE;
+    private GettingStartedEnrollmentStatus status = GettingStartedEnrollmentStatus.NOT_STARTED;
+
+    @Column(name = "added_to_workout_plan", nullable = false)
+    @Builder.Default
+    private boolean addedToWorkoutPlan = false;
+
+    @Column(name = "start_date")
+    private LocalDate startDate;
+
+    @Column(name = "started_at")
+    private ZonedDateTime startedAt;
 
     @CreationTimestamp
     @Column(name = "enrolled_at", nullable = false, updatable = false)
@@ -54,4 +65,9 @@ public class GettingStartedEnrollment {
     @OrderBy("dayNumber ASC")
     @Builder.Default
     private List<GettingStartedDayCompletion> completions = new ArrayList<>();
+
+    @OneToMany(mappedBy = "enrollment", cascade = CascadeType.ALL, orphanRemoval = true)
+    @OrderBy("dayNumber ASC")
+    @Builder.Default
+    private List<GettingStartedDayProgress> dayProgress = new ArrayList<>();
 }

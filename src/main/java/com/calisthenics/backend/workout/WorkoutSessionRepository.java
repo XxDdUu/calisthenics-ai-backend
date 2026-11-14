@@ -143,4 +143,14 @@ public interface WorkoutSessionRepository extends JpaRepository<WorkoutSession, 
             nativeQuery = true
     )
     int deleteAllByWorkoutPlanId(@Param("workoutPlanId") Long workoutPlanId);
+    List<WorkoutSession> findByUserIdAndWorkoutDateOrderByIdAsc(Long userId, LocalDate workoutDate);
+
+    List<WorkoutSession> findByGettingStartedEnrollmentIdAndStatusIn(
+            Long enrollmentId, java.util.Collection<WorkoutSessionStatus> statuses);
+
+    Optional<WorkoutSession> findFirstByGettingStartedEnrollmentIdAndGettingStartedDayNumberAndStatusInOrderByIdDesc(
+            Long enrollmentId, Integer dayNumber, java.util.Collection<WorkoutSessionStatus> statuses);
+
+    Optional<WorkoutSession> findFirstByGettingStartedEnrollmentIdAndGettingStartedDayNumberOrderByIdDesc(
+            Long enrollmentId, Integer dayNumber);
 }

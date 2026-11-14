@@ -9,6 +9,7 @@ import com.calisthenics.backend.coachclient.exception.CoachClientForbiddenExcept
 import com.calisthenics.backend.coachclient.exception.CoachClientRelationshipNotFoundException;
 import com.calisthenics.backend.coachclient.exception.WorkoutPlanAssignmentConflictException;
 import com.calisthenics.backend.coachclient.exception.WorkoutPlanAssignmentNotFoundException;
+import com.calisthenics.backend.gettingstarted.exception.GettingStartedScheduleConflictException;
 import com.calisthenics.backend.security.FirebaseAuthenticationException;
 import com.calisthenics.backend.security.passwordreset.PasswordResetException;
 import com.calisthenics.backend.security.registration.AddressField;
@@ -198,6 +199,18 @@ public class GlobalExceptionHandler {
         body.put("error", "Not Found");
         body.put("message", "The requested resource was not found");
         return ResponseEntity.status(HttpStatus.NOT_FOUND).body(body);
+    }
+
+    @ExceptionHandler(GettingStartedScheduleConflictException.class)
+    public ResponseEntity<Map<String, Object>> handleGettingStartedConflict(
+            GettingStartedScheduleConflictException ex) {
+        Map<String, Object> body = new HashMap<>();
+        body.put("status", HttpStatus.CONFLICT.value());
+        body.put("error", HttpStatus.CONFLICT.getReasonPhrase());
+        body.put("code", "SCHEDULE_CONFLICT");
+        body.put("message", ex.getMessage());
+        body.put("conflicts", ex.getConflicts());
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(body);
     }
 
     @ExceptionHandler(ResponseStatusException.class)
