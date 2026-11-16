@@ -8,6 +8,7 @@ import com.calisthenics.backend.analysis.dto.DetectedFormErrorDto;
 import com.calisthenics.backend.analysis.dto.ExerciseFormMetricDto;
 import com.calisthenics.backend.analysis.dto.RepHistoryDto;
 import com.calisthenics.backend.security.UserPrincipal;
+import com.calisthenics.backend.user.MembershipTier;
 import com.calisthenics.backend.user.Role;
 import com.calisthenics.backend.user.User;
 import com.calisthenics.backend.user.UserRepository;
@@ -75,6 +76,7 @@ class AnalysisSessionControllerIntegrationTest {
                 .passwordHash(passwordEncoder.encode("Password123!"))
                 .fullName("Summary Test Athlete")
                 .role(Role.ROLE_USER)
+                .membershipTier(MembershipTier.PRO)
                 .experienceLevel("INTERMEDIATE")
                 .build());
         athletePrincipal = UserPrincipal.create(athlete);

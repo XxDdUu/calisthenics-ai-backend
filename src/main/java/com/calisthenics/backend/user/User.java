@@ -56,6 +56,11 @@ public class User {
     @Builder.Default
     private OnboardingStatus onboardingStatus = OnboardingStatus.NOT_SHOWN;
 
+    @Enumerated(EnumType.STRING)
+    @Column(name = "membership_tier", nullable = false, length = 20)
+    @Builder.Default
+    private MembershipTier membershipTier = MembershipTier.FREE;
+
     @CreationTimestamp
     @Column(name = "created_at", updatable = false)
     private ZonedDateTime createdAt;

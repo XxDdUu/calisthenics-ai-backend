@@ -12,6 +12,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.util.List;
 
@@ -60,8 +61,15 @@ public class AnalysisController {
 
     @GetMapping("/{id}")
     @Operation(summary = "Get detailed analysis report by ID")
-    public ResponseEntity<AnalysisResponse> getAnalysisById(@PathVariable Long id) {
-        AnalysisResponse response = analysisService.getAnalysisById(id);
+    public ResponseEntity<AnalysisResponse> getAnalysisById(
+            @AuthenticationPrincipal UserPrincipal currentUser,
+            @PathVariable Long id) {
+        if (currentUser == null) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "User must be authenticated.");
+        }
+        boolean isAdmin = currentUser.getAuthorities().stream()
+                .anyMatch(a -> a.getAuthority().equals("ROLE_ADMIN"));
+        AnalysisResponse response = analysisService.getAnalysisById(id, currentUser.getId(), isAdmin);
         return ResponseEntity.ok(response);
     }
 }

@@ -54,9 +54,21 @@ public class AiServiceClient {
     }
 
     public AiVideoScoringResponseDto scoreVideo(byte[] fileBytes, String filename, String exercise, int sampleFps, String analysisId) {
+        return scoreVideo(fileBytes, filename, exercise, sampleFps, analysisId, false);
+    }
+
+    public AiVideoScoringResponseDto scoreVideo(
+            byte[] fileBytes,
+            String filename,
+            String exercise,
+            int sampleFps,
+            String analysisId,
+            boolean sideView
+    ) {
         String baseUrl = appProperties.getAiService().getUrl() + "/api/v1/analysis/video/score";
         UriComponentsBuilder builder = UriComponentsBuilder.fromHttpUrl(baseUrl)
-                .queryParam("sample_fps", sampleFps);
+                .queryParam("sample_fps", sampleFps)
+                .queryParam("side_view", sideView);
         if (exercise != null && !exercise.isBlank()) {
             builder.queryParam("exercise", exercise);
         }

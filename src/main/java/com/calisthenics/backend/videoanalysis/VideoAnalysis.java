@@ -11,7 +11,12 @@ import java.math.BigDecimal;
 import java.time.ZonedDateTime;
 
 @Entity
-@Table(name = "video_analyses")
+@Table(
+        name = "video_analyses",
+        uniqueConstraints = {
+                @UniqueConstraint(name = "uq_video_analyses_user_idempotency", columnNames = {"user_id", "idempotency_key"})
+        }
+)
 @Getter
 @Setter
 @NoArgsConstructor
@@ -30,6 +35,16 @@ public class VideoAnalysis {
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "exercise_id")
     private Exercise exercise;
+
+    @Column(name = "schema_version", length = 20)
+    @Builder.Default
+    private String schemaVersion = "1.0";
+
+    @Column(name = "exercise_code", length = 50)
+    private String exerciseCode;
+
+    @Column(name = "idempotency_key", length = 128)
+    private String idempotencyKey;
 
     @Column(name = "original_video_key", nullable = false)
     private String originalVideoKey;
@@ -51,7 +66,16 @@ public class VideoAnalysis {
 
     @Column(name = "status", nullable = false)
     @Builder.Default
-    private String status = "PENDING"; // PENDING, PROCESSING, COMPLETED, FAILED
+    private String status = "PENDING"; // PENDING, PROCESSING, COMPLETED, FAILED, NO_PERSON_DETECTED, INSUFFICIENT_POSE_QUALITY, INVALID_INPUT
+
+    @Column(name = "rep_count")
+    private Integer repCount;
+
+    @Column(name = "valid_reps")
+    private Integer validReps;
+
+    @Column(name = "incomplete_reps")
+    private Integer incompleteReps;
 
     @Column(name = "duration_ms")
     private Long durationMs;
@@ -70,6 +94,21 @@ public class VideoAnalysis {
 
     @Column(name = "feedback_json", columnDefinition = "TEXT")
     private String feedbackJson;
+
+    @Column(name = "reps_json", columnDefinition = "TEXT")
+    private String repsJson;
+
+    @Column(name = "movement_metrics_json", columnDefinition = "TEXT")
+    private String movementMetricsJson;
+
+    @Column(name = "issues_json", columnDefinition = "TEXT")
+    private String issuesJson;
+
+    @Column(name = "recommendations_json", columnDefinition = "TEXT")
+    private String recommendationsJson;
+
+    @Column(name = "camera_quality_json", columnDefinition = "TEXT")
+    private String cameraQualityJson;
 
     @Column(name = "error_message", columnDefinition = "TEXT")
     private String errorMessage;

@@ -3,7 +3,9 @@ package com.calisthenics.backend.user;
 import com.calisthenics.backend.user.dto.CoachProfileResponse;
 import com.calisthenics.backend.user.dto.UpdateProfileRequest;
 import com.calisthenics.backend.user.dto.UserProfileResponse;
-import lombok.RequiredArgsConstructor;
+import com.calisthenics.backend.videoanalysis.VideoAnalysisQuotaService;
+import com.calisthenics.backend.videoanalysis.dto.QuotaEntitlementResponseDto;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -13,10 +15,23 @@ import java.util.List;
 import java.util.stream.Collectors;
 
 @Service
-@RequiredArgsConstructor
 public class UserService {
 
     private final UserRepository userRepository;
+    private final VideoAnalysisQuotaService videoAnalysisQuotaService;
+
+    public UserService(UserRepository userRepository) {
+        this(userRepository, null);
+    }
+
+    @Autowired
+    public UserService(
+            UserRepository userRepository,
+            @Autowired(required = false) VideoAnalysisQuotaService videoAnalysisQuotaService
+    ) {
+        this.userRepository = userRepository;
+        this.videoAnalysisQuotaService = videoAnalysisQuotaService;
+    }
 
     @Transactional(readOnly = true)
     public UserProfileResponse getUserProfile(Long userId) {
@@ -105,6 +120,23 @@ public class UserService {
     }
 
     private UserProfileResponse mapToProfileResponse(User user) {
+        MembershipTier tier = videoAnalysisQuotaService != null
+                ? videoAnalysisQuotaService.resolveEffectiveTier(user)
+                : (user.getRole() == Role.ROLE_ADMIN ? MembershipTier.ADMIN : (user.getMembershipTier() != null ? user.getMembershipTier() : MembershipTier.FREE));
+        Integer dailyLimit = tier.getDailyLimit();
+        int dailyUsed = 0;
+        Integer dailyRemaining = dailyLimit;
+        boolean liveUnlocked = tier.isLiveAnalysisUnlocked();
+
+        if (videoAnalysisQuotaService != null && user.getId() != null) {
+            QuotaEntitlementResponseDto entitlement = videoAnalysisQuotaService.getQuotaStatusForUser(user);
+            tier = entitlement.getMembershipTier() != null ? entitlement.getMembershipTier() : tier;
+            dailyLimit = entitlement.getDailyLimit();
+            dailyUsed = entitlement.getUsedToday() != null ? entitlement.getUsedToday() : 0;
+            dailyRemaining = entitlement.getRemainingToday();
+            liveUnlocked = entitlement.getLiveAnalysisUnlocked() != null ? entitlement.getLiveAnalysisUnlocked() : liveUnlocked;
+        }
+
         return UserProfileResponse.builder()
                 .id(user.getId())
                 .email(user.getEmail())
@@ -114,6 +146,11 @@ public class UserService {
                 .experienceLevel(user.getExperienceLevel())
                 .gender(user.getGender())
                 .onboardingStatus(user.getOnboardingStatus() != null ? user.getOnboardingStatus() : OnboardingStatus.NOT_SHOWN)
+                .membershipTier(tier)
+                .dailyQuotaLimit(dailyLimit)
+                .dailyQuotaUsed(dailyUsed)
+                .dailyQuotaRemaining(dailyRemaining)
+                .liveAnalysisUnlocked(liveUnlocked)
                 .createdAt(user.getCreatedAt())
                 .build();
     }

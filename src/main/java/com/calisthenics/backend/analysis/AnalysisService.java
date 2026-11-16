@@ -13,9 +13,11 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
 
 import java.math.BigDecimal;
@@ -66,6 +68,16 @@ public class AnalysisService {
     public AnalysisResponse getAnalysisById(Long analysisId) {
         Analysis analysis = analysisRepository.findById(analysisId)
                 .orElseThrow(() -> new RuntimeException("Analysis record not found with id: " + analysisId));
+        return mapToResponse(analysis);
+    }
+
+    @Transactional(readOnly = true)
+    public AnalysisResponse getAnalysisById(Long analysisId, Long currentUserId, boolean isAdmin) {
+        Analysis analysis = analysisRepository.findById(analysisId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Analysis record not found with id: " + analysisId));
+        if (!isAdmin && (analysis.getUser() == null || !analysis.getUser().getId().equals(currentUserId))) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "You do not have access to this analysis.");
+        }
         return mapToResponse(analysis);
     }
 

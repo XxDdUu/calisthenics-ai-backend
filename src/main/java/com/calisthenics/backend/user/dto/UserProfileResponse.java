@@ -1,6 +1,7 @@
 package com.calisthenics.backend.user.dto;
 
 import com.calisthenics.backend.user.Gender;
+import com.calisthenics.backend.user.MembershipTier;
 import com.calisthenics.backend.user.OnboardingStatus;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -23,5 +24,10 @@ public class UserProfileResponse {
     private String experienceLevel;
     private Gender gender;
     private OnboardingStatus onboardingStatus;
+    private MembershipTier membershipTier;
+    private Integer dailyQuotaLimit;
+    private Integer dailyQuotaUsed;
+    private Integer dailyQuotaRemaining;
+    private Boolean liveAnalysisUnlocked;
     private ZonedDateTime createdAt;
 }

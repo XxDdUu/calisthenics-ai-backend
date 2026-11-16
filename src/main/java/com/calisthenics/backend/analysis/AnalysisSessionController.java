@@ -2,12 +2,14 @@ package com.calisthenics.backend.analysis;
 
 import com.calisthenics.backend.analysis.dto.*;
 import com.calisthenics.backend.security.UserPrincipal;
+import com.calisthenics.backend.videoanalysis.VideoAnalysisQuotaService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.util.List;
 
@@ -17,12 +19,14 @@ import java.util.List;
 public class AnalysisSessionController {
 
     private final AnalysisSessionService sessionService;
+    private final VideoAnalysisQuotaService videoAnalysisQuotaService;
 
     @PostMapping("/sessions")
     public ResponseEntity<AnalysisSessionResponseDto> createSession(
             @AuthenticationPrincipal UserPrincipal currentUser,
             @Valid @RequestBody CreateAnalysisSessionRequest request
     ) {
+        requireProLiveAccess(currentUser);
         AnalysisSessionResponseDto response = sessionService.createSession(currentUser.getId(), request);
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
     }
@@ -33,6 +37,7 @@ public class AnalysisSessionController {
             @PathVariable String sessionId,
             @Valid @RequestBody RepHistoryDto repDto
     ) {
+        requireProLiveAccess(currentUser);
         AnalysisSessionResponseDto response = sessionService.recordRep(currentUser.getId(), sessionId, repDto);
         return ResponseEntity.ok(response);
     }
@@ -43,6 +48,7 @@ public class AnalysisSessionController {
             @PathVariable String sessionId,
             @RequestBody CompleteAnalysisSessionRequest request
     ) {
+        requireProLiveAccess(currentUser);
         AnalysisSessionResponseDto response = sessionService.completeSession(currentUser.getId(), sessionId, request);
         return ResponseEntity.ok(response);
     }
@@ -52,8 +58,16 @@ public class AnalysisSessionController {
             @AuthenticationPrincipal UserPrincipal currentUser,
             @PathVariable String sessionId
     ) {
+        requireProLiveAccess(currentUser);
         AiPerformanceSummaryDto summary = sessionService.generateOrGetAiSummary(currentUser.getId(), sessionId);
         return ResponseEntity.ok(summary);
+    }
+
+    private void requireProLiveAccess(UserPrincipal currentUser) {
+        if (currentUser == null) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "User must be authenticated.");
+        }
+        videoAnalysisQuotaService.requireProForLiveAnalysis(currentUser.getId());
     }
 
     @GetMapping({"/sessions", "/sessions/history"})

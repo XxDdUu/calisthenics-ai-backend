@@ -15,6 +15,10 @@ import com.calisthenics.backend.security.passwordreset.PasswordResetException;
 import com.calisthenics.backend.security.registration.AddressField;
 import com.calisthenics.backend.security.registration.EmailAddressException;
 import com.calisthenics.backend.security.registration.RegistrationException;
+import com.calisthenics.backend.user.MembershipTier;
+import com.calisthenics.backend.videoanalysis.dto.QuotaEntitlementResponseDto;
+import com.calisthenics.backend.videoanalysis.exception.ProMembershipRequiredException;
+import com.calisthenics.backend.videoanalysis.exception.QuotaExceededException;
 import com.calisthenics.backend.workoutplan.exception.ExerciseCatalogEntryNotFoundException;
 import com.calisthenics.backend.workoutplan.exception.WorkoutPlanExerciseNotFoundException;
 import com.calisthenics.backend.workoutplan.exception.WorkoutPlanExerciseOrderConflictException;
@@ -33,7 +37,9 @@ import org.springframework.web.servlet.resource.NoResourceFoundException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.OptimisticLockingFailureException;
 
+import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.stream.Collectors;
 
@@ -248,6 +254,40 @@ public class GlobalExceptionHandler {
         body.put("code", ex.getCode());
         body.put("message", ex.getMessage());
         return ResponseEntity.status(ex.getStatus()).body(body);
+    }
+
+    @ExceptionHandler(QuotaExceededException.class)
+    public ResponseEntity<Map<String, Object>> handleQuotaExceededException(QuotaExceededException ex) {
+        QuotaEntitlementResponseDto quota = ex.getQuota();
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("status", HttpStatus.TOO_MANY_REQUESTS.value());
+        body.put("error", HttpStatus.TOO_MANY_REQUESTS.getReasonPhrase());
+        body.put("code", "QUOTA_EXCEEDED");
+        body.put("message", ex.getMessage());
+        if (quota != null) {
+            body.put("membershipTier", quota.getMembershipTier() != null ? quota.getMembershipTier().name() : null);
+            body.put("dailyLimit", quota.getDailyLimit());
+            body.put("usedToday", quota.getUsedToday());
+            body.put("remainingToday", quota.getRemainingToday());
+            body.put("timezone", quota.getTimezone());
+            body.put("quotaDate", quota.getQuotaDate() != null ? quota.getQuotaDate().toString() : null);
+            body.put("resetsAt", quota.getResetsAt() != null
+                    ? quota.getResetsAt().format(DateTimeFormatter.ISO_OFFSET_DATE_TIME)
+                    : null);
+        }
+        return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).body(body);
+    }
+
+    @ExceptionHandler(ProMembershipRequiredException.class)
+    public ResponseEntity<Map<String, Object>> handleProMembershipRequiredException(ProMembershipRequiredException ex) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("status", HttpStatus.FORBIDDEN.value());
+        body.put("error", HttpStatus.FORBIDDEN.getReasonPhrase());
+        body.put("code", "PRO_MEMBERSHIP_REQUIRED");
+        body.put("message", ex.getMessage());
+        body.put("membershipTier", ex.getMembershipTier() != null ? ex.getMembershipTier().name() : MembershipTier.FREE.name());
+        body.put("liveAnalysisUnlocked", ex.isLiveAnalysisUnlocked());
+        return ResponseEntity.status(HttpStatus.FORBIDDEN).body(body);
     }
 
     @ExceptionHandler(Exception.class)

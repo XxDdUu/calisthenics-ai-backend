@@ -2,6 +2,7 @@ package com.calisthenics.backend.videoanalysis;
 
 import com.calisthenics.backend.security.UserPrincipal;
 import com.calisthenics.backend.storage.MinioAnalysisMediaStorageService;
+import com.calisthenics.backend.videoanalysis.dto.QuotaEntitlementResponseDto;
 import com.calisthenics.backend.videoanalysis.dto.VideoAnalysisKeypointsResponseDto;
 import com.calisthenics.backend.videoanalysis.dto.VideoAnalysisResponseDto;
 import io.swagger.v3.oas.annotations.Operation;
@@ -31,12 +32,29 @@ public class VideoAnalysisController {
 
     private final VideoAnalysisService videoAnalysisService;
     private final MinioAnalysisMediaStorageService minioStorageService;
+    private final VideoAnalysisQuotaService videoAnalysisQuotaService;
+
+    @GetMapping("/quota")
+    @Operation(summary = "Get current authenticated user's daily video analysis quota and membership entitlements")
+    public ResponseEntity<QuotaEntitlementResponseDto> getQuota(
+            @AuthenticationPrincipal UserPrincipal currentUser
+    ) {
+        if (currentUser == null) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "User must be authenticated.");
+        }
+        return ResponseEntity.ok(videoAnalysisQuotaService.getQuotaStatus(currentUser.getId()));
+    }
 
     @PostMapping(consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     @Operation(summary = "Upload workout video for asynchronous AI pose scoring and keypoint visualization")
     public ResponseEntity<VideoAnalysisResponseDto> uploadVideo(
             @AuthenticationPrincipal UserPrincipal currentUser,
             @RequestParam(value = "exerciseId", required = false) Long exerciseId,
+            @RequestParam(value = "exerciseType", required = false) String exerciseType,
+            @RequestParam(value = "exerciseCode", required = false) String exerciseCode,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyHeader,
+            @RequestParam(value = "idempotencyKey", required = false) String idempotencyParam,
+            @RequestParam(value = "sideView", required = false, defaultValue = "false") boolean sideView,
             @RequestPart(value = "video", required = false) MultipartFile videoPart,
             @RequestPart(value = "file", required = false) MultipartFile filePart
     ) {
@@ -48,12 +66,21 @@ public class VideoAnalysisController {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "A non-empty video file part ('video' or 'file') is required.");
         }
 
+        String effectiveExerciseCode = (exerciseType != null && !exerciseType.isBlank()) ? exerciseType : exerciseCode;
+        String effectiveIdempotencyKey = (idempotencyHeader != null && !idempotencyHeader.isBlank())
+                ? idempotencyHeader
+                : idempotencyParam;
+
         VideoAnalysisResponseDto response = videoAnalysisService.initiateVideoAnalysis(
                 currentUser.getId(),
                 exerciseId,
+                effectiveExerciseCode,
+                effectiveIdempotencyKey,
+                sideView,
                 file
         );
-        return ResponseEntity.status(HttpStatus.ACCEPTED).body(response);
+        HttpStatus status = (response != null && response.isIdempotentReplay()) ? HttpStatus.OK : HttpStatus.ACCEPTED;
+        return ResponseEntity.status(status).body(response);
     }
 
     @GetMapping("/{id}")

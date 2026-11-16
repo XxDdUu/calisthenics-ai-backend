@@ -2,6 +2,7 @@ package com.calisthenics.backend.analysis;
 
 import com.calisthenics.backend.security.JwtTokenProvider;
 import com.calisthenics.backend.security.UserPrincipal;
+import com.calisthenics.backend.user.MembershipTier;
 import com.calisthenics.backend.user.Role;
 import com.calisthenics.backend.user.User;
 import com.calisthenics.backend.user.UserRepository;
@@ -66,6 +67,7 @@ public class LiveAnalysisControllerSecurityTest {
                 .passwordHash(passwordEncoder.encode("Password123!"))
                 .fullName("Live Athlete")
                 .role(Role.ROLE_USER)
+                .membershipTier(MembershipTier.PRO)
                 .experienceLevel("INTERMEDIATE")
                 .build();
         testUser = userRepository.save(testUser);
