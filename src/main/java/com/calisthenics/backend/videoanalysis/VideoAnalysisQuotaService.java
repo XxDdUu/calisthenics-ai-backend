@@ -4,6 +4,10 @@ import com.calisthenics.backend.user.MembershipTier;
 import com.calisthenics.backend.user.Role;
 import com.calisthenics.backend.user.User;
 import com.calisthenics.backend.user.UserRepository;
+import com.calisthenics.backend.user.dto.LiveAnalysisUsageDto;
+import com.calisthenics.backend.user.dto.MembershipUsageDto;
+import com.calisthenics.backend.user.dto.UserUsageResponseDto;
+import com.calisthenics.backend.user.dto.VideoAnalysisUsageDto;
 import com.calisthenics.backend.videoanalysis.dto.QuotaEntitlementResponseDto;
 import com.calisthenics.backend.videoanalysis.exception.ProMembershipRequiredException;
 import com.calisthenics.backend.videoanalysis.exception.QuotaExceededException;
@@ -43,6 +47,105 @@ public class VideoAnalysisQuotaService {
         LocalDate quotaDate = currentQuotaDate();
         int usedToday = quotaUsageRepository.findUsedCountByUserIdAndQuotaDate(user.getId(), quotaDate).orElse(0);
         return buildEntitlementResponse(user, quotaDate, usedToday);
+    }
+
+    @Transactional(readOnly = true)
+    public UserUsageResponseDto getUserUsage(Long userId) {
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found."));
+        return getUserUsageForUser(user);
+    }
+
+    @Transactional(readOnly = true)
+    public UserUsageResponseDto getUserUsageForUser(User user) {
+        if (user == null) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found.");
+        }
+        MembershipTier effectiveTier = resolveEffectiveTier(user);
+        LocalDate quotaDate = currentQuotaDate();
+        int usedToday = user.getId() != null
+                ? quotaUsageRepository.findUsedCountByUserIdAndQuotaDate(user.getId(), quotaDate).orElse(0)
+                : 0;
+        int safeUsed = Math.max(0, usedToday);
+
+        if (effectiveTier == MembershipTier.ADMIN) {
+            return UserUsageResponseDto.builder()
+                    .membership(MembershipUsageDto.builder()
+                            .tier("ADMIN")
+                            .status("ACTIVE")
+                            .expiresAt(null)
+                            .source("ADMIN Role")
+                            .build())
+                    .videoAnalysis(VideoAnalysisUsageDto.builder()
+                            .used(safeUsed)
+                            .limit(null)
+                            .remaining(null)
+                            .unlimited(true)
+                            .resetAt(null)
+                            .timezone("Asia/Ho_Chi_Minh")
+                            .build())
+                    .liveAnalysis(LiveAnalysisUsageDto.builder()
+                            .available(true)
+                            .unlimited(true)
+                            .build())
+                    .build();
+        }
+
+        if (effectiveTier == MembershipTier.PRO) {
+            ZonedDateTime expiresAt = user.getUpdatedAt() != null
+                    ? user.getUpdatedAt().plusDays(30)
+                    : (user.getCreatedAt() != null
+                            ? user.getCreatedAt().plusDays(30)
+                            : ZonedDateTime.now(VIETNAM_ZONE).plusDays(30));
+
+            int limit = 10;
+            int remaining = Math.max(0, limit - safeUsed);
+
+            return UserUsageResponseDto.builder()
+                    .membership(MembershipUsageDto.builder()
+                            .tier("PRO")
+                            .status("ACTIVE")
+                            .expiresAt(expiresAt)
+                            .source("Subscription")
+                            .build())
+                    .videoAnalysis(VideoAnalysisUsageDto.builder()
+                            .used(safeUsed)
+                            .limit(limit)
+                            .remaining(remaining)
+                            .unlimited(false)
+                            .resetAt(nextResetAt(quotaDate))
+                            .timezone("Asia/Ho_Chi_Minh")
+                            .build())
+                    .liveAnalysis(LiveAnalysisUsageDto.builder()
+                            .available(true)
+                            .unlimited(false)
+                            .build())
+                    .build();
+        }
+
+        int limit = 1;
+        int remaining = Math.max(0, limit - safeUsed);
+
+        return UserUsageResponseDto.builder()
+                .membership(MembershipUsageDto.builder()
+                        .tier("FREE")
+                        .status("ACTIVE")
+                        .expiresAt(null)
+                        .source("Default")
+                        .build())
+                .videoAnalysis(VideoAnalysisUsageDto.builder()
+                        .used(safeUsed)
+                        .limit(limit)
+                        .remaining(remaining)
+                        .unlimited(false)
+                        .resetAt(nextResetAt(quotaDate))
+                        .timezone("Asia/Ho_Chi_Minh")
+                        .build())
+                .liveAnalysis(LiveAnalysisUsageDto.builder()
+                        .available(false)
+                        .unlimited(false)
+                        .build())
+                .build();
     }
 
     @Transactional(noRollbackFor = QuotaExceededException.class)

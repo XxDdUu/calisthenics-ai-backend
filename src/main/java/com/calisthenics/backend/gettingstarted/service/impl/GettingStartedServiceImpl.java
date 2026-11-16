@@ -9,6 +9,8 @@ import com.calisthenics.backend.gettingstarted.enums.*;
 import com.calisthenics.backend.gettingstarted.exception.GettingStartedScheduleConflictException;
 import com.calisthenics.backend.gettingstarted.repository.*;
 import com.calisthenics.backend.gettingstarted.service.GettingStartedService;
+import com.calisthenics.backend.notification.model.NotificationType;
+import com.calisthenics.backend.notification.service.NotificationService;
 import com.calisthenics.backend.user.OnboardingStatus;
 import com.calisthenics.backend.user.Role;
 import com.calisthenics.backend.user.User;
@@ -21,6 +23,7 @@ import com.calisthenics.backend.workout.WorkoutSessionSource;
 import com.calisthenics.backend.workout.WorkoutSessionStatus;
 import com.calisthenics.backend.workout.dto.PersistentWorkoutSessionResponse;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -49,6 +52,8 @@ public class GettingStartedServiceImpl implements GettingStartedService {
     private final com.calisthenics.backend.workout.WorkoutSessionRepository workoutSessionRepository;
     private final com.calisthenics.backend.workout.TodayWorkoutResolver todayWorkoutResolver;
     private final com.calisthenics.backend.workout.PersistentWorkoutSessionService persistentWorkoutSessionService;
+    @Autowired(required = false)
+    private NotificationService notificationService;
 
     @Override
     @Transactional(readOnly = true)
@@ -127,7 +132,40 @@ public class GettingStartedServiceImpl implements GettingStartedService {
         program.setPublished(true);
         program.setPublishedAt(ZonedDateTime.now());
         GettingStartedProgram saved = programRepository.save(program);
+        notifyEligibleUsersOfPublishedProgram(saved);
         return mapToProgramResponse(saved, null, false, OnboardingStatus.DISMISSED);
+    }
+
+    private void notifyEligibleUsersOfPublishedProgram(GettingStartedProgram program) {
+        if (notificationService == null || program == null || program.getId() == null) {
+            return;
+        }
+        int version = program.getVersion() != null ? program.getVersion() : 1;
+        String eventKey = "PROGRAM_AVAILABLE:" + program.getId() + ":v" + version;
+        String title = "New Program Available";
+        String programTitle = program.getTitle() != null && !program.getTitle().isBlank()
+                ? program.getTitle()
+                : "Getting Started";
+        String message = "A new " + programTitle + " program is ready for you.";
+        String deepLink = "getting_started/" + program.getId();
+
+        List<User> allUsers = userRepository.findAll();
+        for (User user : allUsers) {
+            if (isUserEligibleForProgram(user, program)) {
+                notificationService.createNotification(
+                        user,
+                        program.getCreator(),
+                        NotificationType.PROGRAM_AVAILABLE,
+                        program.getId(),
+                        "GETTING_STARTED_PROGRAM",
+                        program.getId(),
+                        deepLink,
+                        title,
+                        message,
+                        eventKey
+                );
+            }
+        }
     }
 
     @Override

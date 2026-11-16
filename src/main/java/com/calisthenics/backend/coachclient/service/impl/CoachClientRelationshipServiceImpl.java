@@ -13,6 +13,8 @@ import com.calisthenics.backend.coachclient.repository.WorkoutPlanAssignmentRepo
 import com.calisthenics.backend.coachclient.service.CoachClientRelationshipService;
 import com.calisthenics.backend.coachclient.type.CoachClientRelationshipStatus;
 import com.calisthenics.backend.coachclient.type.WorkoutPlanAssignmentStatus;
+import com.calisthenics.backend.notification.model.NotificationType;
+import com.calisthenics.backend.notification.service.NotificationService;
 import com.calisthenics.backend.user.Role;
 import com.calisthenics.backend.user.User;
 import com.calisthenics.backend.user.UserRepository;
@@ -22,6 +24,7 @@ import com.calisthenics.backend.workout.WorkoutSessionStatus;
 import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -48,6 +51,8 @@ public class CoachClientRelationshipServiceImpl implements CoachClientRelationsh
     private final WorkoutPlanAssignmentRepository assignmentRepository;
     private final WorkoutSessionRepository workoutSessionRepository;
     private final UserRepository userRepository;
+    @Autowired(required = false)
+    private NotificationService notificationService;
 
     @Override
     @Transactional
@@ -94,6 +99,7 @@ public class CoachClientRelationshipServiceImpl implements CoachClientRelationsh
                     .status(CoachClientRelationshipStatus.PENDING)
                     .build();
             CoachClientRelationship saved = relationshipRepository.saveAndFlush(relationship);
+            notifyRelationshipCreated(saved, requester, requesterId.equals(coachId) ? client : coach);
             log.info(
                     "Coach-client request operation={} senderId={} receiverId={} result=created relationshipId={}",
                     operation, requesterId, receiverId, saved.getId());
@@ -183,6 +189,7 @@ public class CoachClientRelationshipServiceImpl implements CoachClientRelationsh
             }
 
             CoachClientRelationship saved = relationshipRepository.saveAndFlush(relationship);
+            notifyRelationshipTransition(saved, userId, targetStatus);
             log.info(
                     "Coach-client request operation={} senderId={} receiverId={} actorId={} relationshipId={} result=updated status={}",
                     operation, senderId, receiverId, userId, relationshipId, saved.getStatus());
@@ -244,6 +251,81 @@ public class CoachClientRelationshipServiceImpl implements CoachClientRelationsh
                 ? relationship.getClient().getId()
                 : relationship.getCoach().getId();
         return respondentId.equals(userId);
+    }
+
+    private void notifyRelationshipCreated(CoachClientRelationship relationship, User sender, User receiver) {
+        if (notificationService == null || receiver == null || relationship == null) {
+            return;
+        }
+        boolean isClientToCoach = relationship.getCoach().getId().equals(receiver.getId());
+        String senderName = displayName(sender);
+        String title = isClientToCoach ? "New Coaching Request" : "New Coaching Invitation";
+        String message = isClientToCoach
+                ? senderName + " sent you a coaching request."
+                : senderName + " invited you to connect as a client.";
+        String eventKey = "COACH_CLIENT_REQUEST:PENDING:" + relationship.getId();
+        notificationService.createNotification(
+                receiver,
+                sender,
+                NotificationType.COACH_CLIENT_REQUEST,
+                relationship.getId(),
+                "COACH_CLIENT_RELATIONSHIP",
+                relationship.getId(),
+                "coach",
+                title,
+                message,
+                eventKey
+        );
+    }
+
+    private void notifyRelationshipTransition(
+            CoachClientRelationship relationship,
+            Long actorId,
+            CoachClientRelationshipStatus targetStatus) {
+        if (notificationService == null || relationship == null) {
+            return;
+        }
+        if (targetStatus != CoachClientRelationshipStatus.ACTIVE
+                && targetStatus != CoachClientRelationshipStatus.REJECTED) {
+            return;
+        }
+        Long requesterId = relationship.getRequestedBy() != null ? relationship.getRequestedBy().getId() : null;
+        if (requesterId == null || requesterId.equals(actorId)) {
+            return;
+        }
+        User recipient = requesterId.equals(relationship.getCoach().getId())
+                ? relationship.getCoach()
+                : relationship.getClient();
+        User actor = actorId.equals(relationship.getCoach().getId())
+                ? relationship.getCoach()
+                : relationship.getClient();
+        String actorName = displayName(actor);
+        String title = targetStatus == CoachClientRelationshipStatus.ACTIVE
+                ? "Coaching Request Accepted"
+                : "Coaching Request Declined";
+        String message = targetStatus == CoachClientRelationshipStatus.ACTIVE
+                ? actorName + " accepted your coaching request."
+                : actorName + " declined your coaching request.";
+        String eventKey = "COACH_CLIENT_REQUEST:" + targetStatus.name() + ":" + relationship.getId();
+        notificationService.createNotification(
+                recipient,
+                actor,
+                NotificationType.COACH_CLIENT_REQUEST,
+                relationship.getId(),
+                "COACH_CLIENT_RELATIONSHIP",
+                relationship.getId(),
+                "coach",
+                title,
+                message,
+                eventKey
+        );
+    }
+
+    private String displayName(User user) {
+        if (user == null || user.getFullName() == null || user.getFullName().isBlank()) {
+            return "A user";
+        }
+        return user.getFullName().trim();
     }
 
     private void cancelRelationshipAssignments(Long relationshipId) {

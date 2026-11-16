@@ -41,6 +41,18 @@ public class Notification {
     @Column(name = "reference_id")
     private Long referenceId;
 
+    @Column(name = "related_entity_type", length = 64)
+    private String relatedEntityType;
+
+    @Column(name = "related_entity_id")
+    private Long relatedEntityId;
+
+    @Column(name = "deep_link", length = 255)
+    private String deepLink;
+
+    @Column(name = "event_key", length = 160)
+    private String eventKey;
+
     @Column(nullable = false, length = 255)
     private String title;
 
@@ -50,6 +62,9 @@ public class Notification {
     @Column(name = "is_read", nullable = false)
     @Builder.Default
     private boolean isRead = false;
+
+    @Column(name = "read_at")
+    private ZonedDateTime readAt;
 
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)

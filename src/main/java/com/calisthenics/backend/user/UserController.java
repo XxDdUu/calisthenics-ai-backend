@@ -6,6 +6,7 @@ import com.calisthenics.backend.user.dto.UpdateMembershipRequest;
 import com.calisthenics.backend.user.dto.UpdateOnboardingStatusRequest;
 import com.calisthenics.backend.user.dto.UpdateProfileRequest;
 import com.calisthenics.backend.user.dto.UserProfileResponse;
+import com.calisthenics.backend.user.dto.UserUsageResponseDto;
 import com.calisthenics.backend.videoanalysis.VideoAnalysisQuotaService;
 import com.calisthenics.backend.videoanalysis.dto.QuotaEntitlementResponseDto;
 import io.swagger.v3.oas.annotations.Operation;
@@ -23,7 +24,7 @@ import org.springframework.web.server.ResponseStatusException;
 import java.util.List;
 
 @RestController
-@RequestMapping("/api/v1/users")
+@RequestMapping({"/api/v1/users", "/api/users"})
 @RequiredArgsConstructor
 @Tag(name = "Users", description = "User profile and account management endpoints")
 @SecurityRequirement(name = "Bearer Authentication")
@@ -70,6 +71,16 @@ public class UserController {
                 updateRequest.getStatus()
         );
         return ResponseEntity.ok(updatedProfile);
+    }
+
+    @GetMapping({"/me/usage", "/usage"})
+    @Operation(summary = "Get authenticated user's detailed usage and quota breakdown")
+    public ResponseEntity<UserUsageResponseDto> getCurrentUserUsage(
+            @AuthenticationPrincipal UserPrincipal currentUser) {
+        if (currentUser == null) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "User must be authenticated.");
+        }
+        return ResponseEntity.ok(videoAnalysisQuotaService.getUserUsage(currentUser.getId()));
     }
 
     @GetMapping("/me/entitlements")

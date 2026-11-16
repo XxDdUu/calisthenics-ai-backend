@@ -1,13 +1,18 @@
 package com.calisthenics.backend.notification.controller;
 
+import com.calisthenics.backend.notification.dto.CreateAnnouncementRequest;
 import com.calisthenics.backend.notification.dto.NotificationResponse;
 import com.calisthenics.backend.notification.service.NotificationService;
 import com.calisthenics.backend.security.UserPrincipal;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.data.domain.Page;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
 
@@ -25,11 +30,31 @@ public class NotificationController {
     private final NotificationService notificationService;
 
     @GetMapping
-    @Operation(summary = "Get notifications for authenticated user")
+    @Operation(summary = "Get notifications for authenticated user (optionally paginated)")
     public ResponseEntity<List<NotificationResponse>> getNotifications(
             @AuthenticationPrincipal UserPrincipal currentUser,
-            @RequestParam(required = false) Boolean unreadOnly) {
-        return ResponseEntity.ok(notificationService.getNotifications(currentUser.getId(), unreadOnly));
+            @RequestParam(required = false) Boolean unreadOnly,
+            @RequestParam(required = false) Integer page,
+            @RequestParam(required = false) Integer size) {
+        return ResponseEntity.ok(notificationService.getNotifications(currentUser.getId(), unreadOnly, page, size));
+    }
+
+    @GetMapping("/paged")
+    @Operation(summary = "Get paginated notifications page metadata for authenticated user")
+    public ResponseEntity<Page<NotificationResponse>> getNotificationsPaged(
+            @AuthenticationPrincipal UserPrincipal currentUser,
+            @RequestParam(required = false) Boolean unreadOnly,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size) {
+        return ResponseEntity.ok(notificationService.getNotificationsPage(currentUser.getId(), unreadOnly, page, size));
+    }
+
+    @GetMapping("/{id}")
+    @Operation(summary = "Get a single notification belonging to the authenticated user")
+    public ResponseEntity<NotificationResponse> getNotification(
+            @AuthenticationPrincipal UserPrincipal currentUser,
+            @PathVariable Long id) {
+        return ResponseEntity.ok(notificationService.getNotification(currentUser.getId(), id));
     }
 
     @GetMapping("/unread-count")
@@ -54,6 +79,19 @@ public class NotificationController {
             @AuthenticationPrincipal UserPrincipal currentUser) {
         notificationService.markAllAsRead(currentUser.getId());
         return ResponseEntity.ok(Collections.singletonMap("message", "All notifications marked as read"));
+    }
+
+    @PostMapping("/announcements")
+    @PreAuthorize("hasRole('ADMIN')")
+    @Operation(summary = "Create and broadcast a platform announcement to targeted users (Admin only)")
+    public ResponseEntity<Map<String, Object>> createAnnouncement(
+            @AuthenticationPrincipal UserPrincipal currentUser,
+            @Valid @RequestBody CreateAnnouncementRequest request) {
+        int recipientCount = notificationService.publishAdminAnnouncement(currentUser.getId(), request);
+        return ResponseEntity.status(HttpStatus.CREATED).body(Map.of(
+                "status", "created",
+                "recipientCount", recipientCount
+        ));
     }
 }
 

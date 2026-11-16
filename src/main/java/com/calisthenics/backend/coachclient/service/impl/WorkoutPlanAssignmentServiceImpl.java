@@ -14,6 +14,8 @@ import com.calisthenics.backend.coachclient.repository.WorkoutPlanAssignmentRepo
 import com.calisthenics.backend.coachclient.service.WorkoutPlanAssignmentService;
 import com.calisthenics.backend.coachclient.type.CoachClientRelationshipStatus;
 import com.calisthenics.backend.coachclient.type.WorkoutPlanAssignmentStatus;
+import com.calisthenics.backend.notification.model.NotificationType;
+import com.calisthenics.backend.notification.service.NotificationService;
 import com.calisthenics.backend.user.User;
 import com.calisthenics.backend.user.UserRepository;
 import com.calisthenics.backend.workoutplan.dto.response.WorkoutPlanResponse;
@@ -22,11 +24,13 @@ import com.calisthenics.backend.workoutplan.exception.WorkoutPlanNotFoundExcepti
 import com.calisthenics.backend.workoutplan.mapper.WorkoutPlanMapper;
 import com.calisthenics.backend.workoutplan.repository.WorkoutPlanRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Objects;
 
 @Service
 @RequiredArgsConstructor
@@ -43,6 +47,8 @@ public class WorkoutPlanAssignmentServiceImpl implements WorkoutPlanAssignmentSe
     private final WorkoutPlanRepository workoutPlanRepository;
     private final UserRepository userRepository;
     private final WorkoutPlanMapper workoutPlanMapper;
+    @Autowired(required = false)
+    private NotificationService notificationService;
 
     @Override
     @Transactional
@@ -66,25 +72,65 @@ public class WorkoutPlanAssignmentServiceImpl implements WorkoutPlanAssignmentSe
                 .findFirstByRelationshipIdAndWorkoutPlanIdAndStatusOrderByCreatedAtDesc(
                         relationshipId, request.getWorkoutPlanId(), WorkoutPlanAssignmentStatus.INACTIVE)
                 .orElse(null);
+        WorkoutPlanAssignment saved;
+        boolean reactivated = false;
         if (inactiveAssignment != null) {
             inactiveAssignment.setStatus(WorkoutPlanAssignmentStatus.ACTIVE);
             inactiveAssignment.setStartDate(start);
             inactiveAssignment.setEndDate(request.getEndDate());
             inactiveAssignment.setNotes(request.getNotes());
-            return toResponse(assignmentRepository.saveAndFlush(inactiveAssignment));
+            saved = assignmentRepository.saveAndFlush(inactiveAssignment);
+            reactivated = true;
+        } else {
+            WorkoutPlanAssignment assignment = WorkoutPlanAssignment.builder()
+                    .relationship(relationship)
+                    .workoutPlan(plan)
+                    .coach(coach)
+                    .client(relationship.getClient())
+                    .status(WorkoutPlanAssignmentStatus.ACTIVE)
+                    .startDate(start)
+                    .endDate(request.getEndDate())
+                    .notes(request.getNotes())
+                    .build();
+            saved = assignmentRepository.saveAndFlush(assignment);
         }
 
-        WorkoutPlanAssignment assignment = WorkoutPlanAssignment.builder()
-                .relationship(relationship)
-                .workoutPlan(plan)
-                .coach(coach)
-                .client(relationship.getClient())
-                .status(WorkoutPlanAssignmentStatus.ACTIVE)
-                .startDate(start)
-                .endDate(request.getEndDate())
-                .notes(request.getNotes())
-                .build();
-        return toResponse(assignmentRepository.saveAndFlush(assignment));
+        notifyClientWorkoutAssigned(saved, coach, relationship.getClient(), plan, reactivated);
+        return toResponse(saved);
+    }
+
+    private void notifyClientWorkoutAssigned(
+            WorkoutPlanAssignment assignment,
+            User coach,
+            User client,
+            WorkoutPlan plan,
+            boolean reactivated) {
+        if (notificationService == null || client == null || plan == null) {
+            return;
+        }
+        String coachName = coach != null && coach.getFullName() != null && !coach.getFullName().isBlank()
+                ? coach.getFullName()
+                : "Your coach";
+        String normalizedNotes = assignment.getNotes() != null ? assignment.getNotes().trim() : "";
+        String eventKey = "WORKOUT_ASSIGNED:"
+                + assignment.getRelationship().getId() + ":"
+                + plan.getId() + ":"
+                + assignment.getStartDate() + ":"
+                + Objects.toString(assignment.getEndDate(), "") + ":"
+                + Objects.hashCode(normalizedNotes) + ":"
+                + (reactivated ? "reactivated" : "assigned");
+        notificationService.createNotification(
+                client,
+                coach,
+                NotificationType.WORKOUT_ASSIGNED,
+                plan.getId(),
+                "WORKOUT_PLAN",
+                plan.getId(),
+                "workout_plan_details/" + plan.getId(),
+                "New Workout Assigned",
+                coachName + " assigned you a new workout: " + plan.getName() + ".",
+                eventKey
+        );
     }
 
     @Override

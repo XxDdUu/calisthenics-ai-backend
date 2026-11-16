@@ -746,6 +746,124 @@ class VideoAnalysisQuotaAndLifecycleQaTest {
                 .andExpect(status().isPayloadTooLarge());
     }
 
+    @Test
+    void detailedUsage_unauthenticated_returns401() throws Exception {
+        mockMvc.perform(get("/api/v1/users/me/usage"))
+                .andExpect(status().isUnauthorized());
+
+        mockMvc.perform(get("/api/users/me/usage"))
+                .andExpect(status().isUnauthorized());
+
+        mockMvc.perform(get("/api/v1/users/usage"))
+                .andExpect(status().isUnauthorized());
+
+        mockMvc.perform(get("/api/users/usage"))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void detailedUsage_freeTier_verification() throws Exception {
+        User freeUser = createUser(MembershipTier.FREE);
+
+        for (String url : List.of("/api/v1/users/me/usage", "/api/users/me/usage")) {
+            MvcResult result = mockMvc.perform(get(url).with(auth(freeUser)))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.membership.tier").value("FREE"))
+                    .andExpect(jsonPath("$.membership.status").value("ACTIVE"))
+                    .andExpect(jsonPath("$.membership.source").value("Default"))
+                    .andExpect(jsonPath("$.membership.expiresAt").doesNotExist())
+                    .andExpect(jsonPath("$.videoAnalysis.used").value(0))
+                    .andExpect(jsonPath("$.videoAnalysis.limit").value(1))
+                    .andExpect(jsonPath("$.videoAnalysis.remaining").value(1))
+                    .andExpect(jsonPath("$.videoAnalysis.unlimited").value(false))
+                    .andExpect(jsonPath("$.videoAnalysis.resetAt").value("2026-11-17T00:00:00+07:00"))
+                    .andExpect(jsonPath("$.videoAnalysis.timezone").value("Asia/Ho_Chi_Minh"))
+                    .andExpect(jsonPath("$.liveAnalysis.available").value(false))
+                    .andExpect(jsonPath("$.liveAnalysis.unlimited").value(false))
+                    .andReturn();
+
+            JsonNode root = objectMapper.readTree(result.getResponse().getContentAsString());
+            assertThat(root.path("membership").has("expiresAt")).isFalse();
+        }
+    }
+
+    @Test
+    void detailedUsage_proTier_verification() throws Exception {
+        User proUser = createUser(MembershipTier.PRO);
+
+        MvcResult result = mockMvc.perform(get("/api/v1/users/me/usage").with(auth(proUser)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.membership.tier").value("PRO"))
+                .andExpect(jsonPath("$.membership.status").value("ACTIVE"))
+                .andExpect(jsonPath("$.membership.source").value("Subscription"))
+                .andExpect(jsonPath("$.membership.expiresAt").exists())
+                .andExpect(jsonPath("$.videoAnalysis.used").value(0))
+                .andExpect(jsonPath("$.videoAnalysis.limit").value(10))
+                .andExpect(jsonPath("$.videoAnalysis.remaining").value(10))
+                .andExpect(jsonPath("$.videoAnalysis.unlimited").value(false))
+                .andExpect(jsonPath("$.videoAnalysis.resetAt").value("2026-11-17T00:00:00+07:00"))
+                .andExpect(jsonPath("$.videoAnalysis.timezone").value("Asia/Ho_Chi_Minh"))
+                .andExpect(jsonPath("$.liveAnalysis.available").value(true))
+                .andExpect(jsonPath("$.liveAnalysis.unlimited").value(false))
+                .andReturn();
+
+        JsonNode root = objectMapper.readTree(result.getResponse().getContentAsString());
+        assertThat(root.path("membership").hasNonNull("expiresAt")).isTrue();
+    }
+
+    @Test
+    void detailedUsage_adminTier_verificationWithExplicitNulls() throws Exception {
+        User adminUser = createAdmin(MembershipTier.FREE);
+
+        MvcResult result = mockMvc.perform(get("/api/v1/users/me/usage").with(auth(adminUser)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.membership.tier").value("ADMIN"))
+                .andExpect(jsonPath("$.membership.status").value("ACTIVE"))
+                .andExpect(jsonPath("$.membership.source").value("ADMIN Role"))
+                .andExpect(jsonPath("$.membership.expiresAt").doesNotExist())
+                .andExpect(jsonPath("$.videoAnalysis.used").value(0))
+                .andExpect(jsonPath("$.videoAnalysis.unlimited").value(true))
+                .andExpect(jsonPath("$.videoAnalysis.timezone").value("Asia/Ho_Chi_Minh"))
+                .andExpect(jsonPath("$.liveAnalysis.available").value(true))
+                .andExpect(jsonPath("$.liveAnalysis.unlimited").value(true))
+                .andReturn();
+
+        JsonNode root = objectMapper.readTree(result.getResponse().getContentAsString());
+        // Verify expiresAt is omitted on membership
+        assertThat(root.path("membership").has("expiresAt")).isFalse();
+
+        // Verify limit, remaining, resetAt are explicitly present with null values in videoAnalysis
+        JsonNode videoNode = root.path("videoAnalysis");
+        assertThat(videoNode.has("limit")).isTrue();
+        assertThat(videoNode.get("limit").isNull()).isTrue();
+
+        assertThat(videoNode.has("remaining")).isTrue();
+        assertThat(videoNode.get("remaining").isNull()).isTrue();
+
+        assertThat(videoNode.has("resetAt")).isTrue();
+        assertThat(videoNode.get("resetAt").isNull()).isTrue();
+    }
+
+    @Test
+    void detailedUsage_quotaConsumptionReflectedInUsageEndpoint() throws Exception {
+        User freeUser = createUser(MembershipTier.FREE);
+
+        // Initial: 0 used, 1 remaining
+        mockMvc.perform(get("/api/v1/users/me/usage").with(auth(freeUser)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.videoAnalysis.used").value(0))
+                .andExpect(jsonPath("$.videoAnalysis.remaining").value(1));
+
+        // Consume quota
+        videoAnalysisQuotaService.reserveVideoAnalysisQuota(freeUser.getId());
+
+        // After: 1 used, 0 remaining
+        mockMvc.perform(get("/api/users/me/usage").with(auth(freeUser)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.videoAnalysis.used").value(1))
+                .andExpect(jsonPath("$.videoAnalysis.remaining").value(0));
+    }
+
     // ---------------------------------------------------------------- helpers
 
     private User createAdmin(MembershipTier underlyingTier) {
