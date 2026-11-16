@@ -7,10 +7,12 @@ import com.calisthenics.backend.security.UserPrincipal;
 import com.calisthenics.backend.user.Role;
 import com.calisthenics.backend.user.User;
 import com.calisthenics.backend.user.UserRepository;
+import com.calisthenics.backend.videoanalysis.VideoAnalysisQuotaService;
 import com.calisthenics.backend.workout.PersistentWorkoutSessionService;
 import com.calisthenics.backend.workout.WorkoutSessionRepository;
 import com.calisthenics.backend.workoutplan.mapper.WorkoutPlanMapper;
 import com.calisthenics.backend.workoutplan.repository.WorkoutPlanRepository;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
@@ -38,6 +40,7 @@ public class AdminService {
     private final WorkoutPlanMapper workoutPlanMapper;
     private final PersistentWorkoutSessionService persistentWorkoutSessionService;
     private final com.calisthenics.backend.exercise.ExerciseRepository exerciseRepository;
+    private final VideoAnalysisQuotaService videoAnalysisQuotaService;
 
     public AdminService(
             UserRepository userRepository,
@@ -49,6 +52,31 @@ public class AdminService {
             PersistentWorkoutSessionService persistentWorkoutSessionService,
             com.calisthenics.backend.exercise.ExerciseRepository exerciseRepository
     ) {
+        this(
+                userRepository,
+                coachProfileRepository,
+                clientProfileRepository,
+                workoutPlanRepository,
+                workoutSessionRepository,
+                workoutPlanMapper,
+                persistentWorkoutSessionService,
+                exerciseRepository,
+                null
+        );
+    }
+
+    @Autowired
+    public AdminService(
+            UserRepository userRepository,
+            CoachProfileRepository coachProfileRepository,
+            ClientProfileRepository clientProfileRepository,
+            WorkoutPlanRepository workoutPlanRepository,
+            WorkoutSessionRepository workoutSessionRepository,
+            WorkoutPlanMapper workoutPlanMapper,
+            PersistentWorkoutSessionService persistentWorkoutSessionService,
+            com.calisthenics.backend.exercise.ExerciseRepository exerciseRepository,
+            @Autowired(required = false) VideoAnalysisQuotaService videoAnalysisQuotaService
+    ) {
         this.userRepository = userRepository;
         this.coachProfileRepository = coachProfileRepository;
         this.clientProfileRepository = clientProfileRepository;
@@ -57,6 +85,7 @@ public class AdminService {
         this.workoutPlanMapper = workoutPlanMapper;
         this.persistentWorkoutSessionService = persistentWorkoutSessionService;
         this.exerciseRepository = exerciseRepository;
+        this.videoAnalysisQuotaService = videoAnalysisQuotaService;
     }
 
     @Transactional(readOnly = true)
@@ -137,6 +166,9 @@ public class AdminService {
 
         user.setRole(requestedRole);
         User updated = userRepository.save(user);
+        if (videoAnalysisQuotaService != null) {
+            videoAnalysisQuotaService.syncQuotaOnRoleChange(updated.getId(), requestedRole, updated.getMembershipTier());
+        }
         return getUser(updated.getId());
     }
 

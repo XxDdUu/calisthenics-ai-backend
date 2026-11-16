@@ -35,8 +35,7 @@ public interface UserRepository extends JpaRepository<User, Long>, JpaSpecificat
 
     long countByRoleAndCreatedAtGreaterThanEqual(Role role, ZonedDateTime cutoff);
 
-    @Lock(LockModeType.PESSIMISTIC_WRITE)
-    @Query("select u from User u where u.role = :role order by u.id")
+    @Query(value = "select * from users where role = :#{#role.name()} order by id for update", nativeQuery = true)
     List<User> findByRoleForUpdate(@Param("role") Role role);
 
     @Query(value = "select * from users where id = :id for update", nativeQuery = true)

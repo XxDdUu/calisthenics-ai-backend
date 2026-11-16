@@ -13,6 +13,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.minio.StatObjectResponse;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -24,6 +25,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 import org.springframework.context.annotation.Primary;
 import org.springframework.http.MediaType;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
@@ -128,6 +130,11 @@ class VideoAnalysisQuotaAndLifecycleQaTest {
     @Autowired
     private MutableTestClock testClock;
 
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    private final List<Long> createdUserIds = Collections.synchronizedList(new ArrayList<>());
+
     @MockBean
     private MinioAnalysisMediaStorageService minioStorageService;
 
@@ -139,6 +146,7 @@ class VideoAnalysisQuotaAndLifecycleQaTest {
 
     @BeforeEach
     void setUp() {
+        createdUserIds.clear();
         testClock.setInstant(DEFAULT_INSTANT);
         reset(minioStorageService, aiServiceClient, liveAnalysisService);
 
@@ -160,6 +168,29 @@ class VideoAnalysisQuotaAndLifecycleQaTest {
                 .thenReturn(objectMapper.createObjectNode().put("status", "RESET_SUCCESS"));
         when(liveAnalysisService.terminateSession(anyString()))
                 .thenReturn(objectMapper.createObjectNode().put("status", "TERMINATED"));
+    }
+
+    @AfterEach
+    void tearDown() throws InterruptedException {
+        List<Long> userIds = new ArrayList<>(createdUserIds);
+        createdUserIds.clear();
+        for (Long userId : userIds) {
+            for (VideoAnalysis analysis : videoAnalysisRepository.findByUserIdOrderByCreatedAtDesc(userId)) {
+                awaitTerminalStatus(analysis.getId());
+            }
+            jdbcTemplate.update(
+                    "DELETE FROM video_analysis_keypoints WHERE video_analysis_id IN (SELECT id FROM video_analyses WHERE user_id = ?)",
+                    userId
+            );
+            jdbcTemplate.update("DELETE FROM video_analyses WHERE user_id = ?", userId);
+            jdbcTemplate.update("DELETE FROM video_analysis_quota_usages WHERE user_id = ?", userId);
+            jdbcTemplate.update(
+                    "DELETE FROM rep_histories WHERE session_id IN (SELECT id FROM analysis_sessions WHERE user_id = ?)",
+                    userId
+            );
+            jdbcTemplate.update("DELETE FROM analysis_sessions WHERE user_id = ?", userId);
+            jdbcTemplate.update("DELETE FROM users WHERE id = ?", userId);
+        }
     }
 
     @Test
@@ -718,21 +749,25 @@ class VideoAnalysisQuotaAndLifecycleQaTest {
     // ---------------------------------------------------------------- helpers
 
     private User createAdmin(MembershipTier underlyingTier) {
-        return userRepository.saveAndFlush(User.builder()
+        User saved = userRepository.saveAndFlush(User.builder()
                 .email("admin_" + UUID.randomUUID() + "@example.com")
                 .fullName("Admin QA Athlete")
                 .role(Role.ROLE_ADMIN)
                 .membershipTier(underlyingTier != null ? underlyingTier : MembershipTier.FREE)
                 .build());
+        createdUserIds.add(saved.getId());
+        return saved;
     }
 
     private User createUser(MembershipTier tier) {
-        return userRepository.saveAndFlush(User.builder()
+        User saved = userRepository.saveAndFlush(User.builder()
                 .email("qa_" + UUID.randomUUID() + "@example.com")
                 .fullName("QA Athlete " + tier.name())
                 .role(Role.ROLE_USER)
                 .membershipTier(tier)
                 .build());
+        createdUserIds.add(saved.getId());
+        return saved;
     }
 
     private RequestPostProcessor auth(User user) {
