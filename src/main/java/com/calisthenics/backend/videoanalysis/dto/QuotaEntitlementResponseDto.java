@@ -23,6 +23,8 @@ public class QuotaEntitlementResponseDto {
     private Integer remainingToday;
     private Boolean liveAnalysisUnlocked;
     private Boolean unlimited;
+    private String grantSource;
+    private Boolean adminGrantedPro;
     private String timezone;
 
     @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd")

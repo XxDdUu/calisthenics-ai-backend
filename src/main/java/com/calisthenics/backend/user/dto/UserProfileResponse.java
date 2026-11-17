@@ -29,5 +29,8 @@ public class UserProfileResponse {
     private Integer dailyQuotaUsed;
     private Integer dailyQuotaRemaining;
     private Boolean liveAnalysisUnlocked;
+    private Boolean unlimited;
+    private String membershipSource;
+    private Boolean adminGrantedPro;
     private ZonedDateTime createdAt;
 }

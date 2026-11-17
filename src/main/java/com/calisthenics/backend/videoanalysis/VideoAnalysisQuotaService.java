@@ -1,5 +1,8 @@
 package com.calisthenics.backend.videoanalysis;
 
+import com.calisthenics.backend.user.EntitlementGrantSource;
+import com.calisthenics.backend.user.EntitlementStatus;
+import com.calisthenics.backend.user.MembershipEntitlementRepository;
 import com.calisthenics.backend.user.MembershipTier;
 import com.calisthenics.backend.user.Role;
 import com.calisthenics.backend.user.User;
@@ -11,8 +14,8 @@ import com.calisthenics.backend.user.dto.VideoAnalysisUsageDto;
 import com.calisthenics.backend.videoanalysis.dto.QuotaEntitlementResponseDto;
 import com.calisthenics.backend.videoanalysis.exception.ProMembershipRequiredException;
 import com.calisthenics.backend.videoanalysis.exception.QuotaExceededException;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -25,7 +28,6 @@ import java.time.ZonedDateTime;
 
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class VideoAnalysisQuotaService {
 
     public static final ZoneId VIETNAM_ZONE = ZoneId.of("Asia/Ho_Chi_Minh");
@@ -34,6 +36,28 @@ public class VideoAnalysisQuotaService {
     private final UserRepository userRepository;
     private final VideoAnalysisQuotaUsageRepository quotaUsageRepository;
     private final Clock clock;
+    private final MembershipEntitlementRepository membershipEntitlementRepository;
+
+    public VideoAnalysisQuotaService(
+            UserRepository userRepository,
+            VideoAnalysisQuotaUsageRepository quotaUsageRepository,
+            Clock clock
+    ) {
+        this(userRepository, quotaUsageRepository, clock, null);
+    }
+
+    @Autowired
+    public VideoAnalysisQuotaService(
+            UserRepository userRepository,
+            VideoAnalysisQuotaUsageRepository quotaUsageRepository,
+            Clock clock,
+            @Autowired(required = false) MembershipEntitlementRepository membershipEntitlementRepository
+    ) {
+        this.userRepository = userRepository;
+        this.quotaUsageRepository = quotaUsageRepository;
+        this.clock = clock;
+        this.membershipEntitlementRepository = membershipEntitlementRepository;
+    }
 
     @Transactional(readOnly = true)
     public QuotaEntitlementResponseDto getQuotaStatus(Long userId) {
@@ -75,6 +99,30 @@ public class VideoAnalysisQuotaService {
                             .status("ACTIVE")
                             .expiresAt(null)
                             .source("ADMIN Role")
+                            .build())
+                    .videoAnalysis(VideoAnalysisUsageDto.builder()
+                            .used(safeUsed)
+                            .limit(null)
+                            .remaining(null)
+                            .unlimited(true)
+                            .resetAt(null)
+                            .timezone("Asia/Ho_Chi_Minh")
+                            .build())
+                    .liveAnalysis(LiveAnalysisUsageDto.builder()
+                            .available(true)
+                            .unlimited(true)
+                            .build())
+                    .build();
+        }
+
+        boolean adminGrantedPro = hasActiveAdminProGrant(user.getId());
+        if (effectiveTier == MembershipTier.PRO && adminGrantedPro) {
+            return UserUsageResponseDto.builder()
+                    .membership(MembershipUsageDto.builder()
+                            .tier("PRO")
+                            .status("ACTIVE")
+                            .expiresAt(null)
+                            .source("Admin Grant")
                             .build())
                     .videoAnalysis(VideoAnalysisUsageDto.builder()
                             .used(safeUsed)
@@ -156,16 +204,16 @@ public class VideoAnalysisQuotaService {
         MembershipTier effectiveTier = resolveEffectiveTier(user);
         LocalDate quotaDate = currentQuotaDate();
 
-        // 1. ADMIN ROLE-BASED OVERRIDE:
+        // 1. ADMIN ROLE OR ADMIN-GRANTED PRO UNLIMITED OVERRIDE:
         // Must bypass FREE and PRO daily quota checks entirely.
         // Still records usage and analysis history!
-        if (effectiveTier == MembershipTier.ADMIN) {
+        if (effectiveTier == MembershipTier.ADMIN || hasActiveAdminProGrant(userId)) {
             quotaUsageRepository.insertIfAbsent(userId, quotaDate, UNLIMITED_DAILY_LIMIT_DB_VALUE);
             quotaUsageRepository.incrementUsedCountUnconditional(userId, quotaDate, UNLIMITED_DAILY_LIMIT_DB_VALUE);
             int currentUsed = quotaUsageRepository.findUsedCountByUserIdAndQuotaDate(userId, quotaDate).orElse(0);
 
-            log.debug("Recorded video analysis quota for ADMIN userId={} usedToday={} date={}",
-                    userId, currentUsed, quotaDate);
+            log.debug("Recorded unlimited video analysis quota for userId={} effectiveTier={} usedToday={} date={}",
+                    userId, effectiveTier, currentUsed, quotaDate);
             return buildEntitlementResponse(user, quotaDate, currentUsed);
         }
 
@@ -223,6 +271,13 @@ public class VideoAnalysisQuotaService {
         User user = userRepository.findByIdForUpdate(userId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found."));
 
+        if (hasActiveAdminProGrant(userId)) {
+            throw new ResponseStatusException(
+                    HttpStatus.FORBIDDEN,
+                    "Admin-granted PRO entitlement cannot be modified by user membership updates."
+            );
+        }
+
         user.setMembershipTier(membershipTier);
         User saved = userRepository.save(user);
 
@@ -240,11 +295,25 @@ public class VideoAnalysisQuotaService {
             return;
         }
         LocalDate quotaDate = currentQuotaDate();
-        if (newRole == Role.ROLE_ADMIN) {
+        if (newRole == Role.ROLE_ADMIN || hasActiveAdminProGrant(userId)) {
             quotaUsageRepository.updateDailyLimit(userId, quotaDate, UNLIMITED_DAILY_LIMIT_DB_VALUE);
         } else {
             MembershipTier tier = fallbackTier != null ? fallbackTier : MembershipTier.FREE;
             quotaUsageRepository.updateDailyLimit(userId, quotaDate, tier.getDailyLimit());
+        }
+    }
+
+    @Transactional
+    public void syncQuotaOnEntitlementChange(User user) {
+        if (user == null || user.getId() == null) {
+            return;
+        }
+        LocalDate quotaDate = currentQuotaDate();
+        if (isUnlimitedAccess(user)) {
+            quotaUsageRepository.updateDailyLimit(user.getId(), quotaDate, UNLIMITED_DAILY_LIMIT_DB_VALUE);
+        } else {
+            MembershipTier effectiveTier = resolveEffectiveTier(user);
+            quotaUsageRepository.updateDailyLimit(user.getId(), quotaDate, effectiveTier.getDailyLimit());
         }
     }
 
@@ -256,15 +325,51 @@ public class VideoAnalysisQuotaService {
         return quotaDate.plusDays(1).atStartOfDay(VIETNAM_ZONE);
     }
 
+    @Transactional(readOnly = true)
+    public boolean hasActiveAdminProGrant(Long userId) {
+        if (membershipEntitlementRepository == null || userId == null) {
+            return false;
+        }
+        return membershipEntitlementRepository.existsByUserIdAndGrantSourceAndStatus(
+                userId,
+                EntitlementGrantSource.ADMIN_GRANT,
+                EntitlementStatus.ACTIVE
+        );
+    }
+
+    public boolean isUnlimitedAccess(User user) {
+        if (user == null) {
+            return false;
+        }
+        return user.getRole() == Role.ROLE_ADMIN || hasActiveAdminProGrant(user.getId());
+    }
+
+    public String resolveMembershipSource(User user) {
+        if (user != null && user.getRole() == Role.ROLE_ADMIN) {
+            return "ADMIN Role";
+        }
+        if (user != null && hasActiveAdminProGrant(user.getId())) {
+            return "Admin Grant";
+        }
+        if (user != null && user.getMembershipTier() == MembershipTier.PRO) {
+            return "Subscription";
+        }
+        return "Default";
+    }
+
     public MembershipTier resolveEffectiveTier(User user) {
         if (user != null && user.getRole() == Role.ROLE_ADMIN) {
             return MembershipTier.ADMIN;
+        }
+        if (user != null && hasActiveAdminProGrant(user.getId())) {
+            return MembershipTier.PRO;
         }
         return user != null && user.getMembershipTier() != null ? user.getMembershipTier() : MembershipTier.FREE;
     }
 
     private QuotaEntitlementResponseDto buildEntitlementResponse(User user, LocalDate quotaDate, int usedToday) {
         MembershipTier effectiveTier = resolveEffectiveTier(user);
+        boolean adminGrantedPro = hasActiveAdminProGrant(user.getId());
         int safeUsed = Math.max(0, usedToday);
 
         if (effectiveTier == MembershipTier.ADMIN) {
@@ -276,6 +381,25 @@ public class VideoAnalysisQuotaService {
                     .remainingToday(null)
                     .liveAnalysisUnlocked(true)
                     .unlimited(true)
+                    .grantSource("ADMIN_ROLE")
+                    .adminGrantedPro(adminGrantedPro)
+                    .timezone(VIETNAM_ZONE.getId())
+                    .quotaDate(quotaDate)
+                    .resetsAt(nextResetAt(quotaDate))
+                    .build();
+        }
+
+        if (effectiveTier == MembershipTier.PRO && adminGrantedPro) {
+            return QuotaEntitlementResponseDto.builder()
+                    .userId(user.getId())
+                    .membershipTier(MembershipTier.PRO)
+                    .dailyLimit(null)
+                    .usedToday(safeUsed)
+                    .remainingToday(null)
+                    .liveAnalysisUnlocked(true)
+                    .unlimited(true)
+                    .grantSource(EntitlementGrantSource.ADMIN_GRANT.name())
+                    .adminGrantedPro(true)
                     .timezone(VIETNAM_ZONE.getId())
                     .quotaDate(quotaDate)
                     .resetsAt(nextResetAt(quotaDate))
@@ -293,6 +417,10 @@ public class VideoAnalysisQuotaService {
                 .remainingToday(remaining)
                 .liveAnalysisUnlocked(effectiveTier.isLiveAnalysisUnlocked())
                 .unlimited(false)
+                .grantSource(effectiveTier == MembershipTier.PRO
+                        ? EntitlementGrantSource.PAID_SUBSCRIPTION.name()
+                        : "DEFAULT")
+                .adminGrantedPro(false)
                 .timezone(VIETNAM_ZONE.getId())
                 .quotaDate(quotaDate)
                 .resetsAt(nextResetAt(quotaDate))

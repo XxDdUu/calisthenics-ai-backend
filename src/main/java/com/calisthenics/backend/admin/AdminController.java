@@ -68,6 +68,55 @@ public class AdminController {
         return ResponseEntity.ok(adminService.updateUserRole(userId, request.role(), currentAdmin.getId()));
     }
 
+    @GetMapping("/pro/users")
+    public ResponseEntity<AdminPageResponse<AdminUserResponse>> searchProUsers(
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size,
+            @RequestParam(required = false) String search,
+            @RequestParam(required = false) Role role,
+            @RequestParam(defaultValue = "createdAt") String sortBy,
+            @RequestParam(defaultValue = "DESC") String sortDirection
+    ) {
+        return ResponseEntity.ok(adminService.getUsers(page, size, search, role, sortBy, sortDirection));
+    }
+
+    @PostMapping("/users/{userId}/pro/grant")
+    public ResponseEntity<AdminUserResponse> grantUserPro(
+            @PathVariable Long userId,
+            @Valid @RequestBody(required = false) AdminProActionRequest request,
+            @AuthenticationPrincipal UserPrincipal currentAdmin
+    ) {
+        String reason = request != null ? request.reason() : null;
+        return ResponseEntity.ok(adminService.grantAdminPro(userId, currentAdmin.getId(), reason));
+    }
+
+    @PostMapping("/users/{userId}/pro/revoke")
+    public ResponseEntity<AdminUserResponse> revokeUserPro(
+            @PathVariable Long userId,
+            @Valid @RequestBody(required = false) AdminProActionRequest request,
+            @AuthenticationPrincipal UserPrincipal currentAdmin
+    ) {
+        String reason = request != null ? request.reason() : null;
+        return ResponseEntity.ok(adminService.revokeAdminPro(userId, currentAdmin.getId(), reason));
+    }
+
+    @GetMapping("/users/{userId}/pro/audit-logs")
+    public ResponseEntity<AdminPageResponse<AdminProAuditLogResponse>> getUserProAuditLogs(
+            @PathVariable Long userId,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size
+    ) {
+        return ResponseEntity.ok(adminService.getProAuditLogs(userId, page, size));
+    }
+
+    @GetMapping("/pro/audit-logs")
+    public ResponseEntity<AdminPageResponse<AdminProAuditLogResponse>> getProAuditLogs(
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size
+    ) {
+        return ResponseEntity.ok(adminService.getProAuditLogs(null, page, size));
+    }
+
     @GetMapping("/workout-plans")
     public ResponseEntity<AdminPageResponse<AdminWorkoutPlanSummaryResponse>> getWorkoutPlans(
             @RequestParam(defaultValue = "0") int page,

@@ -128,6 +128,12 @@ public class UserService {
         Integer dailyRemaining = dailyLimit;
         boolean liveUnlocked = tier.isLiveAnalysisUnlocked();
 
+        boolean unlimited = tier == MembershipTier.ADMIN;
+        String membershipSource = user.getRole() == Role.ROLE_ADMIN
+                ? "ADMIN Role"
+                : (tier == MembershipTier.PRO ? "Subscription" : "Default");
+        boolean adminGrantedPro = false;
+
         if (videoAnalysisQuotaService != null && user.getId() != null) {
             QuotaEntitlementResponseDto entitlement = videoAnalysisQuotaService.getQuotaStatusForUser(user);
             tier = entitlement.getMembershipTier() != null ? entitlement.getMembershipTier() : tier;
@@ -135,6 +141,9 @@ public class UserService {
             dailyUsed = entitlement.getUsedToday() != null ? entitlement.getUsedToday() : 0;
             dailyRemaining = entitlement.getRemainingToday();
             liveUnlocked = entitlement.getLiveAnalysisUnlocked() != null ? entitlement.getLiveAnalysisUnlocked() : liveUnlocked;
+            unlimited = Boolean.TRUE.equals(entitlement.getUnlimited());
+            membershipSource = videoAnalysisQuotaService.resolveMembershipSource(user);
+            adminGrantedPro = Boolean.TRUE.equals(entitlement.getAdminGrantedPro());
         }
 
         return UserProfileResponse.builder()
@@ -151,6 +160,9 @@ public class UserService {
                 .dailyQuotaUsed(dailyUsed)
                 .dailyQuotaRemaining(dailyRemaining)
                 .liveAnalysisUnlocked(liveUnlocked)
+                .unlimited(unlimited)
+                .membershipSource(membershipSource)
+                .adminGrantedPro(adminGrantedPro)
                 .createdAt(user.getCreatedAt())
                 .build();
     }
