@@ -41,10 +41,7 @@ import java.util.*;
 @RequiredArgsConstructor
 public class AdminGettingStartedToolService {
 
-    private static final int CONFIRMATION_TTL_MINUTES = 30;
-    private static final Set<String> NEGATION_TOKENS = Set.of(
-            "no", "not", "don't", "dont", "do not", "cancel", "abort", "stop", "deny", "reject", "never", "wait", "hold"
-    );
+    private static final int CONFIRMATION_TTL_MINUTES = AdminPendingConfirmationSupport.CONFIRMATION_TTL_MINUTES;
 
     private final GettingStartedService gettingStartedService;
     private final GettingStartedAiDraftService aiDraftService;
@@ -54,6 +51,7 @@ public class AdminGettingStartedToolService {
     private final AdminAiPendingActionRepository pendingActionRepository;
     private final AdminAiConversationRepository conversationRepository;
     private final AdminAuthorizationService authorizationService;
+    private final AdminPendingConfirmationSupport confirmationSupport;
 
     public GettingStartedToolResultResponse executeTool(
             User admin,
@@ -401,18 +399,11 @@ public class AdminGettingStartedToolService {
             boolean approved,
             Long conversationIdHint
     ) {
-        AdminAiPendingAction action = pendingActionRepository
-                .findByConfirmationTokenAndAdminUserId(confirmationToken, admin.getId())
-                .orElseThrow(() -> new IllegalArgumentException("Pending confirmation request not found."));
-
-        if (action.getStatus() != AdminPendingActionStatus.PENDING) {
-            throw new IllegalStateException("Confirmation request was already " + action.getStatus().name().toLowerCase(Locale.US) + ".");
-        }
-        if (action.getExpiresAt().isBefore(ZonedDateTime.now())) {
-            action.setStatus(AdminPendingActionStatus.EXPIRED);
-            action.setResolvedAt(ZonedDateTime.now());
-            pendingActionRepository.save(action);
-            throw new IllegalStateException("Confirmation request has expired. Please request approval again.");
+        AdminAiPendingAction action = confirmationSupport.validatePendingActionForResolution(
+                admin, confirmationToken, null);
+        if (action.getActionType() != AdminPendingActionType.PUBLISH_PROGRAM
+                && action.getActionType() != AdminPendingActionType.UNPUBLISH_PROGRAM) {
+            throw new IllegalArgumentException("Confirmation token is not a Getting Started campaign action.");
         }
 
         Long convId = action.getConversation() != null ? action.getConversation().getId() : conversationIdHint;
@@ -467,43 +458,15 @@ public class AdminGettingStartedToolService {
 
     @Transactional(readOnly = true)
     public Optional<AdminAiPendingAction> findActivePendingConfirmation(Long adminId, Long conversationId) {
-        if (adminId == null || conversationId == null) {
-            return Optional.empty();
-        }
-        return pendingActionRepository
-                .findFirstByAdminUserIdAndConversationIdAndStatusOrderByCreatedAtDesc(
-                        adminId, conversationId, AdminPendingActionStatus.PENDING)
-                .filter(a -> a.getExpiresAt().isAfter(ZonedDateTime.now()));
+        return confirmationSupport.findActivePendingConfirmation(adminId, conversationId);
     }
 
     public boolean isExplicitConfirmationMessage(String message) {
-        if (message == null || message.isBlank()) {
-            return false;
-        }
-        String lower = message.trim().toLowerCase(Locale.US);
-        if (containsAnyToken(lower, NEGATION_TOKENS)) {
-            return false;
-        }
-        String normalized = lower.replaceAll("[,]+", " ")
-                .replaceAll("[.!]+$", "")
-                .replaceAll("\\s+", " ")
-                .trim();
-        return normalized.matches("^(?:yes|yeah|yep|confirm|confirmed|approve|approved|proceed|ok|okay|sure|go ahead)(?:\\s+(?:and\\s+)?(?:please\\s+)?(?:confirm|approve|publish|unpublish|proceed|it|do it|now|please|campaign|program))*$");
+        return confirmationSupport.isExplicitConfirmationMessage(message);
     }
 
     public boolean isExplicitCancellationMessage(String message) {
-        if (message == null || message.isBlank()) {
-            return false;
-        }
-        String normalized = message.trim()
-                .toLowerCase(Locale.US)
-                .replaceAll("[.!]+$", "")
-                .replaceAll("\\s+", " ")
-                .trim();
-        return normalized.equals("no") || normalized.equals("cancel") || normalized.equals("abort")
-                || normalized.equals("stop") || normalized.equals("deny") || normalized.equals("reject")
-                || normalized.startsWith("cancel ") || normalized.startsWith("no,") || normalized.startsWith("no ")
-                || normalized.startsWith("don't ") || normalized.startsWith("do not ");
+        return confirmationSupport.isExplicitCancellationMessage(message);
     }
 
     private AdminPendingConfirmationResponse createPendingAction(
@@ -514,17 +477,7 @@ public class AdminGettingStartedToolService {
             TargetAudience targetAudience,
             String programTitle
     ) {
-        if (conversationId != null) {
-            List<AdminAiPendingAction> stale = pendingActionRepository
-                    .findAllByAdminUserIdAndConversationIdAndStatus(admin.getId(), conversationId, AdminPendingActionStatus.PENDING);
-            for (AdminAiPendingAction old : stale) {
-                old.setStatus(AdminPendingActionStatus.EXPIRED);
-                old.setResolvedAt(ZonedDateTime.now());
-            }
-            if (!stale.isEmpty()) {
-                pendingActionRepository.saveAll(stale);
-            }
-        }
+        confirmationSupport.expirePendingActionsForConversation(admin.getId(), conversationId);
 
         GettingStartedProgram programRef = programRepository.findById(programId)
                 .orElseThrow(() -> new IllegalArgumentException("Getting Started program not found: " + programId));
@@ -575,24 +528,11 @@ public class AdminGettingStartedToolService {
             AdminPendingActionType expectedType,
             Long expectedProgramId
     ) {
-        AdminAiPendingAction action = pendingActionRepository
-                .findByConfirmationTokenAndAdminUserId(token, admin.getId())
-                .orElseThrow(() -> new IllegalArgumentException("Invalid or unauthorized confirmation token."));
-
-        if (action.getActionType() != expectedType) {
-            throw new IllegalArgumentException("Confirmation token does not match requested action " + expectedType);
-        }
-        if (expectedProgramId != null && !Objects.equals(action.getProgram().getId(), expectedProgramId)) {
+        AdminAiPendingAction action = confirmationSupport.validatePendingActionForResolution(
+                admin, token, expectedType);
+        if (expectedProgramId != null && (action.getProgram() == null
+                || !Objects.equals(action.getProgram().getId(), expectedProgramId))) {
             throw new IllegalArgumentException("Confirmation token does not match target program ID " + expectedProgramId);
-        }
-        if (action.getStatus() != AdminPendingActionStatus.PENDING) {
-            throw new IllegalStateException("Confirmation token has already been used or cancelled.");
-        }
-        if (action.getExpiresAt().isBefore(ZonedDateTime.now())) {
-            action.setStatus(AdminPendingActionStatus.EXPIRED);
-            action.setResolvedAt(ZonedDateTime.now());
-            pendingActionRepository.save(action);
-            throw new IllegalStateException("Confirmation token has expired. Request approval again.");
         }
 
         action.setStatus(AdminPendingActionStatus.CONFIRMED);
@@ -639,14 +579,5 @@ public class AdminGettingStartedToolService {
             conv.setActiveGettingStartedProgramId(programId);
             conversationRepository.save(conv);
         });
-    }
-
-    private boolean containsAnyToken(String lowerText, Set<String> tokens) {
-        for (String token : tokens) {
-            if (lowerText.matches(".*\\b" + token.replace("'", "'?") + "\\b.*")) {
-                return true;
-            }
-        }
-        return false;
     }
 }

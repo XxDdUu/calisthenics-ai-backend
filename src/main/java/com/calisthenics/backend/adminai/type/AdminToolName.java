@@ -24,7 +24,10 @@ public enum AdminToolName {
     UNPUBLISH_PROGRAM("unpublishProgram", false, true, "unpublish_program"),
     CONFIGURE_AUDIENCE("configureAudience", false, false, "configure_audience"),
     GET_ACTIVE_CAMPAIGNS("getActiveCampaigns", true, false, "get_active_campaigns"),
-    GET_CAMPAIGN_ANALYTICS("getCampaignAnalytics", true, false, "get_campaign_analytics");
+    GET_CAMPAIGN_ANALYTICS("getCampaignAnalytics", true, false, "get_campaign_analytics"),
+    GRANT_PRO("grantPro", false, true, "grant_pro"),
+    REVOKE_PRO("revokePro", false, true, "revoke_pro"),
+    CHECK_PRO_STATUS("checkProStatus", true, false, "check_pro_status", "get_user_pro_status");
 
     private final String toolName;
     private final boolean readOnly;

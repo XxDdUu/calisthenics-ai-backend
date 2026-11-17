@@ -469,6 +469,7 @@ public class GeminiApiClient {
                         "GETTING_STARTED_PROGRAM_MANAGEMENT",
                         "CAMPAIGN_MANAGEMENT",
                         "CAMPAIGN_ANALYTICS",
+                        "PRO_MANAGEMENT",
                         "CONFIRMATION_REQUIRED"
                 ),
                 "description", "Primary administrative intent"
@@ -496,7 +497,10 @@ public class GeminiApiClient {
                                 "unpublishProgram",
                                 "configureAudience",
                                 "getActiveCampaigns",
-                                "getCampaignAnalytics"
+                                "getCampaignAnalytics",
+                                "grantPro",
+                                "revokePro",
+                                "checkProStatus"
                         )
                 ),
                 "description", "Ordered list of authorized admin tools to invoke before answering"
@@ -528,6 +532,14 @@ public class GeminiApiClient {
                 "enum", List.of("ALL_ATHLETES", "LAST_30_DAYS", "LAST_14_DAYS"),
                 "description", "Getting Started campaign target audience segment"
         ));
+        props.put("target_user_identifier", Map.of(
+                "type", "STRING",
+                "description", "Exact email, username/display name, or user ID of the target user for PRO entitlement actions"
+        ));
+        props.put("pro_action_reason", Map.of(
+                "type", "STRING",
+                "description", "Optional admin reason for granting or revoking PRO entitlement"
+        ));
 
         Map<String, Object> root = new LinkedHashMap<>();
         root.put("type", "OBJECT");
@@ -555,6 +567,7 @@ public class GeminiApiClient {
                         "GETTING_STARTED_PROGRAM_MANAGEMENT",
                         "CAMPAIGN_MANAGEMENT",
                         "CAMPAIGN_ANALYTICS",
+                        "PRO_MANAGEMENT",
                         "CONFIRMATION_REQUIRED"
                 ),
                 "description", "Detected administrative intent"

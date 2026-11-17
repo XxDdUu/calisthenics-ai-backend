@@ -24,6 +24,14 @@ public class AdminPendingConfirmationResponse {
     private String audienceLabel;
     private long eligibleAthleteCount;
     private String summary;
+    private Long targetUserId;
+    private String targetUserName;
+    private String targetUserEmail;
+    private String targetUserCurrentTier;
+    private String targetUserMembershipSource;
+    private Boolean targetUserPaidPro;
+    private Boolean targetUserAdminGrantedPro;
+    private String reason;
     private ZonedDateTime createdAt;
     private ZonedDateTime expiresAt;
 }

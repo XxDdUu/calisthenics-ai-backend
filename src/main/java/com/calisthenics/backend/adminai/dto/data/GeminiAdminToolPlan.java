@@ -76,4 +76,10 @@ public class GeminiAdminToolPlan {
 
     @JsonProperty("target_audience")
     private String targetAudience;
+
+    @JsonProperty("target_user_identifier")
+    private String targetUserIdentifier;
+
+    @JsonProperty("pro_action_reason")
+    private String proActionReason;
 }

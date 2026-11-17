@@ -1,5 +1,6 @@
 package com.calisthenics.backend.adminai.service;
 
+import com.calisthenics.backend.admin.dto.AdminUserResponse;
 import com.calisthenics.backend.adminai.dto.AdminChatRequest;
 import com.calisthenics.backend.adminai.dto.OperationalRecommendationPayload;
 import com.calisthenics.backend.adminai.dto.data.*;
@@ -38,6 +39,23 @@ import java.util.regex.Pattern;
 public class AdminToolRouter {
 
     private static final Pattern USER_ID_PATTERN = Pattern.compile("(?:user(?:\\s+id|\\s*#)?\\s*[:#]?\\s*)(\\d+)", Pattern.CASE_INSENSITIVE);
+    private static final Pattern PRO_EXPLICIT_USER_ID_PATTERN = Pattern.compile("(?:\\buser\\s+(?:id\\s*)?[:#]?\\s*|\\bid\\s*[:#]\\s*|#)(\\d+)\\b", Pattern.CASE_INSENSITIVE);
+    private static final Pattern EMAIL_PATTERN = Pattern.compile("([a-zA-Z0-9._%+\\-]+@[a-zA-Z0-9.\\-]+\\.[a-zA-Z]{2,})");
+    private static final Pattern PRO_PREPOSITION_TARGET_PATTERN = Pattern.compile(
+            "(?:grant|give|add|enable|activate|assign|revoke|remove|cancel|disable|strip)\\s+"
+                    + "(?:unlimited\\s+|admin[- ]?granted\\s+|admin\\s+)?pro(?:\\s+(?:access|membership|tier|plan|status))?\\s+"
+                    + "(?:to|from|for|of)\\s+(.+)",
+            Pattern.CASE_INSENSITIVE);
+    private static final Pattern PRO_SUBJECT_BEFORE_PRO_PATTERN = Pattern.compile(
+            "(?:make|set|upgrade|grant|give)\\s+(.+?)\\s+(?:to\\s+|as\\s+)?(?:a\\s+|an\\s+)?(?:unlimited\\s+|admin\\s+)?pro"
+                    + "(?:\\s+(?:member|user|athlete|account|access|membership|tier|status))?(?:$|\\s+because|\\s+due\\s+to|\\s+reason)",
+            Pattern.CASE_INSENSITIVE);
+    private static final Pattern PRO_CHECK_PATTERN = Pattern.compile(
+            "(?:check|show|get)\\s+(?:the\\s+)?pro\\s+(?:status|access|membership)?\\s*(?:for|of)\\s+(.+)|(?:does|has)\\s+(.+?)\\s+have\\s+pro\\b",
+            Pattern.CASE_INSENSITIVE);
+    private static final Pattern PRO_REASON_PATTERN = Pattern.compile(
+            "(?:\\s+(?:because|due\\s+to|with\\s+reason|reason\\s*:?)\\s+)(.+)$",
+            Pattern.CASE_INSENSITIVE);
     private static final Pattern COMPLETION_BELOW_PATTERN = Pattern.compile("(?:completion(?:\\s+rate)?\\s*(?:below|under|<|less than)\\s*)(\\d+(?:\\.\\d+)?)%?", Pattern.CASE_INSENSITIVE);
     private static final Pattern COMPLETION_ABOVE_PATTERN = Pattern.compile("(?:completion(?:\\s+rate)?\\s*(?:above|over|>|greater than|at least)\\s*)(\\d+(?:\\.\\d+)?)%?", Pattern.CASE_INSENSITIVE);
     private static final Pattern INACTIVE_DAYS_PATTERN = Pattern.compile("(?:inactive|not completed.*?workouts?|no workout).*?(?:last\\s+|for\\s+)?(\\d+)\\s*days?", Pattern.CASE_INSENSITIVE);
@@ -47,6 +65,7 @@ public class AdminToolRouter {
     private final AdminDataAccessService dataAccessService;
     private final AdminContextService adminContextService;
     private final AdminGettingStartedToolService adminGettingStartedToolService;
+    private final AdminProToolService adminProToolService;
 
     public record RoutedChatToolsResult(
             AdminAiIntent resolvedIntent,
@@ -65,7 +84,8 @@ public class AdminToolRouter {
             GettingStartedProgramPreviewResponse gettingStartedPreview,
             List<GettingStartedCampaignSummaryResponse> activeCampaigns,
             GettingStartedCampaignAnalyticsResponse campaignAnalytics,
-            AdminPendingConfirmationResponse pendingConfirmation
+            AdminPendingConfirmationResponse pendingConfirmation,
+            AdminProToolResultResponse proToolResult
     ) {}
 
     public AdminToolExecuteResponse executeSingleTool(AdminToolExecuteRequest request) {
@@ -102,6 +122,36 @@ public class AdminToolRouter {
             return AdminToolExecuteResponse.builder()
                     .execution(record)
                     .data(gsResult)
+                    .build();
+        }
+        if (adminProToolService.isProTool(toolName)) {
+            AdminProToolResultResponse proResult;
+            try {
+                proResult = adminProToolService.executeTool(admin, toolName, request);
+            } catch (IllegalArgumentException | IllegalStateException ex) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, ex.getMessage(), ex);
+            }
+            long durationMs = Math.max(0L, System.currentTimeMillis() - startMs);
+            String status = proResult.isConfirmationRequired()
+                    ? "CONFIRMATION_REQUIRED"
+                    : (proResult.isExecuted() ? "EXECUTED" : proResult.getOutcomeStatus());
+            long recordCount = proResult.getCandidates() != null
+                    ? proResult.getCandidates().size()
+                    : (proResult.getTargetUser() != null ? 1L : 0L);
+            AdminToolExecutionRecord record = AdminToolExecutionRecord.builder()
+                    .toolName(toolName.getToolName())
+                    .status(status)
+                    .parametersSummary("userId=" + request.getUserId()
+                            + ",identifier=" + request.getUserIdentifier()
+                            + ",confirmed=" + Boolean.TRUE.equals(request.getConfirmed()))
+                    .summary(proResult.getMessage())
+                    .recordCount(recordCount)
+                    .durationMs(durationMs)
+                    .executedAt(ZonedDateTime.now())
+                    .build();
+            return AdminToolExecuteResponse.builder()
+                    .execution(record)
+                    .data(proResult)
                     .build();
         }
         AdminAnalyticsRange range = request.getRange() != null ? request.getRange() : AdminAnalyticsRange.LAST_30_DAYS;
@@ -271,6 +321,52 @@ public class AdminToolRouter {
         List<GettingStartedCampaignSummaryResponse> activeCampaigns = null;
         GettingStartedCampaignAnalyticsResponse campaignAnalytics = null;
         AdminPendingConfirmationResponse pendingConfirmation = null;
+        AdminProToolResultResponse proToolResult = null;
+
+        boolean hasProTools = toolsToRun.stream().anyMatch(adminProToolService::isProTool);
+        if (hasProTools) {
+            User admin = adminAuthorizationService.requireAuthenticatedAdmin();
+            for (AdminToolName proTool : toolsToRun) {
+                if (!adminProToolService.isProTool(proTool)) {
+                    continue;
+                }
+                long t0 = System.currentTimeMillis();
+                AdminToolExecuteRequest proReq = buildProChatRequest(userPrompt, request, geminiPlan, proTool);
+                try {
+                    AdminProToolResultResponse res = adminProToolService.executeTool(admin, proTool, proReq);
+                    proToolResult = res;
+                    if (res.getPendingConfirmation() != null) {
+                        pendingConfirmation = res.getPendingConfirmation();
+                    }
+                    String status = res.isConfirmationRequired()
+                            ? "CONFIRMATION_REQUIRED"
+                            : (res.isExecuted() ? "EXECUTED" : res.getOutcomeStatus());
+                    long count = res.getCandidates() != null ? res.getCandidates().size()
+                            : (res.getTargetUser() != null ? 1L : 0L);
+                    executionRecords.add(AdminToolExecutionRecord.builder()
+                            .toolName(proTool.getToolName())
+                            .status(status)
+                            .parametersSummary("userId=" + proReq.getUserId()
+                                    + ",identifier=" + proReq.getUserIdentifier() + ",confirmed=false")
+                            .summary(res.getMessage())
+                            .recordCount(count)
+                            .durationMs(Math.max(0L, System.currentTimeMillis() - t0))
+                            .executedAt(ZonedDateTime.now())
+                            .build());
+                } catch (IllegalArgumentException | IllegalStateException ex) {
+                    missingDataNotes.add(ex.getMessage());
+                    executionRecords.add(AdminToolExecutionRecord.builder()
+                            .toolName(proTool.getToolName())
+                            .status("FAILED")
+                            .parametersSummary("userId=" + proReq.getUserId() + ",identifier=" + proReq.getUserIdentifier())
+                            .summary(ex.getMessage())
+                            .recordCount(0L)
+                            .durationMs(Math.max(0L, System.currentTimeMillis() - t0))
+                            .executedAt(ZonedDateTime.now())
+                            .build());
+                }
+            }
+        }
 
         boolean hasGettingStartedTools = toolsToRun.stream().anyMatch(adminGettingStartedToolService::isGettingStartedTool);
         if (hasGettingStartedTools) {
@@ -408,7 +504,7 @@ public class AdminToolRouter {
         String sanitizedPromptContext = formatSanitizedPromptContext(
                 timeRange, executionRecords, userStats, segmentResponse, engagementResponse, coachingResponse, inspectedUser,
                 dataRecommendations, missingDataNotes, gettingStartedProgram, gettingStartedPreview, activeCampaigns,
-                campaignAnalytics, pendingConfirmation);
+                campaignAnalytics, pendingConfirmation, proToolResult);
 
         return new RoutedChatToolsResult(
                 intent,
@@ -427,7 +523,8 @@ public class AdminToolRouter {
                 gettingStartedPreview,
                 activeCampaigns,
                 campaignAnalytics,
-                pendingConfirmation
+                pendingConfirmation,
+                proToolResult
         );
     }
 
@@ -578,6 +675,25 @@ public class AdminToolRouter {
             if (!tools.isEmpty()) {
                 return tools;
             }
+        }
+
+        if (isProManagementPrompt(lower) || tools.stream().anyMatch(adminProToolService::isProTool)) {
+            AdminToolName proTool;
+            if (lower.contains("revoke") || lower.contains("remove") || lower.contains("cancel")
+                    || lower.contains("disable") || lower.contains("downgrade") || lower.contains("strip")) {
+                proTool = AdminToolName.REVOKE_PRO;
+            } else if (lower.contains("grant") || lower.contains("make ") || lower.contains("give ")
+                    || lower.contains("upgrade") || lower.contains("enable") || lower.contains("add ")
+                    || lower.contains("assign") || lower.contains("set ")) {
+                proTool = AdminToolName.GRANT_PRO;
+            } else if (tools.contains(AdminToolName.REVOKE_PRO)) {
+                proTool = AdminToolName.REVOKE_PRO;
+            } else if (tools.contains(AdminToolName.GRANT_PRO)) {
+                proTool = AdminToolName.GRANT_PRO;
+            } else {
+                proTool = AdminToolName.CHECK_PRO_STATUS;
+            }
+            return new LinkedHashSet<>(Set.of(proTool));
         }
 
         if (request.getTargetUserId() != null || intent == AdminAiIntent.USER_DRILL_DOWN) {
@@ -785,7 +901,8 @@ public class AdminToolRouter {
             GettingStartedProgramPreviewResponse preview,
             List<GettingStartedCampaignSummaryResponse> activeCampaigns,
             GettingStartedCampaignAnalyticsResponse analytics,
-            AdminPendingConfirmationResponse pendingConfirmation
+            AdminPendingConfirmationResponse pendingConfirmation,
+            AdminProToolResultResponse proToolResult
     ) {
         StringBuilder sb = new StringBuilder();
         sb.append("\n=== EXECUTED ADMIN DATA TOOLS (TIME RANGE: ")
@@ -882,8 +999,130 @@ public class AdminToolRouter {
             sb.append("MISSING OR INCOMPLETE DATA NOTES: ").append(missingNotes).append("\n");
         }
         appendGettingStartedPromptContext(sb, program, preview, activeCampaigns, analytics, pendingConfirmation);
+        appendProPromptContext(sb, proToolResult);
         sb.append("STRICT RULES: Cite exact counts, percentages, and time range. Distinguish measured facts from AI recommendations. Never invent numbers.\n");
         return sb.toString();
+    }
+
+    private AdminToolExecuteRequest buildProChatRequest(
+            String userPrompt,
+            AdminChatRequest request,
+            GeminiAdminToolPlan plan,
+            AdminToolName tool
+    ) {
+        String workingPrompt = userPrompt != null ? userPrompt.trim() : "";
+        String extractedReason = (plan != null && !isBlank(plan.getProActionReason()))
+                ? plan.getProActionReason().trim()
+                : null;
+
+        Matcher reasonMatcher = PRO_REASON_PATTERN.matcher(workingPrompt);
+        if (reasonMatcher.find()) {
+            if (extractedReason == null) {
+                extractedReason = reasonMatcher.group(1).trim();
+            }
+            workingPrompt = workingPrompt.substring(0, reasonMatcher.start()).trim();
+        }
+
+        Long explicitUserId = request.getTargetUserId();
+        String extractedIdentifier = null;
+
+        if (explicitUserId == null) {
+            Matcher emailMatcher = EMAIL_PATTERN.matcher(workingPrompt);
+            List<String> matchedEmails = new ArrayList<>();
+            while (emailMatcher.find()) {
+                String candidateEmail = emailMatcher.group(1);
+                if (!matchedEmails.contains(candidateEmail)) {
+                    matchedEmails.add(candidateEmail);
+                }
+            }
+            if (matchedEmails.size() == 1) {
+                extractedIdentifier = matchedEmails.get(0);
+            } else {
+                Matcher prepoMatcher = PRO_PREPOSITION_TARGET_PATTERN.matcher(workingPrompt);
+                if (prepoMatcher.find()) {
+                    extractedIdentifier = prepoMatcher.group(1).trim();
+                } else {
+                    Matcher subjectMatcher = PRO_SUBJECT_BEFORE_PRO_PATTERN.matcher(workingPrompt);
+                    if (subjectMatcher.find()) {
+                        extractedIdentifier = subjectMatcher.group(1).trim();
+                    } else {
+                        Matcher checkMatcher = PRO_CHECK_PATTERN.matcher(workingPrompt);
+                        if (checkMatcher.find()) {
+                            extractedIdentifier = checkMatcher.group(1) != null
+                                    ? checkMatcher.group(1).trim()
+                                    : checkMatcher.group(2).trim();
+                        }
+                    }
+                }
+                if (extractedIdentifier != null) {
+                    Matcher explicitIdMatcher = PRO_EXPLICIT_USER_ID_PATTERN.matcher(extractedIdentifier);
+                    if (explicitIdMatcher.find()) {
+                        try {
+                            explicitUserId = Long.parseLong(explicitIdMatcher.group(1));
+                        } catch (NumberFormatException ignored) {
+                        }
+                    }
+                } else {
+                    Matcher explicitIdMatcher = PRO_EXPLICIT_USER_ID_PATTERN.matcher(workingPrompt);
+                    if (explicitIdMatcher.find()) {
+                        try {
+                            explicitUserId = Long.parseLong(explicitIdMatcher.group(1));
+                        } catch (NumberFormatException ignored) {
+                        }
+                    }
+                }
+            }
+        }
+
+        if (explicitUserId == null && isBlank(extractedIdentifier)
+                && plan != null && !isBlank(plan.getTargetUserIdentifier())) {
+            extractedIdentifier = plan.getTargetUserIdentifier().trim();
+        }
+        if (explicitUserId == null && isBlank(extractedIdentifier)
+                && plan != null && !isBlank(plan.getTargetUserQuery())) {
+            extractedIdentifier = plan.getTargetUserQuery().trim();
+        }
+        if (explicitUserId == null && plan != null && plan.getTargetUserId() != null) {
+            explicitUserId = plan.getTargetUserId();
+        }
+
+        // Privilege-changing PRO actions NEVER auto-execute on single NL turn without confirmation token
+        return AdminToolExecuteRequest.builder()
+                .toolName(tool.getToolName())
+                .conversationId(request.getConversationId())
+                .userId(explicitUserId)
+                .userIdentifier(extractedIdentifier)
+                .reason(extractedReason)
+                .confirmed(false)
+                .confirmationToken(null)
+                .build();
+    }
+
+    private void appendProPromptContext(StringBuilder sb, AdminProToolResultResponse proResult) {
+        if (proResult == null) {
+            return;
+        }
+        sb.append("PRO MANAGEMENT TOOL RESULT: action=").append(proResult.getAction())
+                .append(", outcome=").append(proResult.getOutcomeStatus())
+                .append(", confirmationRequired=").append(proResult.isConfirmationRequired())
+                .append(", executed=").append(proResult.isExecuted());
+        if (proResult.getTargetUser() != null) {
+            AdminUserResponse u = proResult.getTargetUser();
+            sb.append(", targetUser=#").append(u.id()).append(" ").append(u.fullName())
+                    .append(" (").append(AdminDataAccessService.maskEmail(u.email())).append(")")
+                    .append(", tier=").append(u.membershipTier())
+                    .append(", source=").append(u.membershipSource())
+                    .append(", paidPro=").append(u.paidPro())
+                    .append(", adminGrantedPro=").append(u.adminGrantedPro());
+        }
+        if (proResult.getCandidates() != null && !proResult.getCandidates().isEmpty()) {
+            sb.append(", ambiguousCandidates=")
+                    .append(proResult.getCandidates().stream()
+                            .map(c -> "#" + c.id() + " " + c.fullName()
+                                    + " (" + AdminDataAccessService.maskEmail(c.email()) + ")")
+                            .toList());
+        }
+        sb.append("\n");
     }
 
     private AdminToolExecuteRequest buildGettingStartedChatRequest(
@@ -1035,5 +1274,30 @@ public class AdminToolRouter {
                 || lower.contains("make") || lower.contains("set") || lower.contains("sets")
                 || lower.contains("reps") || lower.contains("rest") || lower.contains("duration")
                 || lower.contains("instruction")));
+    }
+
+    public static boolean isProManagementPrompt(String lower) {
+        if (lower == null || lower.isBlank() || isGettingStartedOrCampaignPrompt(lower)) {
+            return false;
+        }
+        if (!lower.matches(".*\\bpro\\b.*")) {
+            return false;
+        }
+        return lower.contains("grant")
+                || lower.contains("revoke")
+                || lower.contains("remove")
+                || lower.contains("make ")
+                || lower.contains("give ")
+                || lower.contains("upgrade ")
+                || lower.contains("downgrade ")
+                || lower.contains("enable ")
+                || lower.contains("disable ")
+                || lower.contains("strip ")
+                || lower.contains("pro status")
+                || lower.contains("pro access")
+                || lower.contains("pro member")
+                || lower.contains("pro membership")
+                || lower.contains("unlimited pro")
+                || lower.contains("have pro");
     }
 }

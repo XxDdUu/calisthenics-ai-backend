@@ -10,6 +10,7 @@ import com.calisthenics.backend.adminai.entity.AdminAiMessage;
 import com.calisthenics.backend.adminai.entity.AdminAiPendingAction;
 import com.calisthenics.backend.adminai.entity.AdminAiRecommendation;
 import com.calisthenics.backend.adminai.repository.AdminAiAuditLogRepository;
+import com.calisthenics.backend.adminai.repository.AdminAiPendingActionRepository;
 import com.calisthenics.backend.adminai.repository.AdminAiRecommendationRepository;
 import com.calisthenics.backend.adminai.type.*;
 import com.calisthenics.backend.aiworkout.gemini.GeminiApiClient;
@@ -50,8 +51,11 @@ public class AdminAIService {
     private final AdminExerciseService adminExerciseService;
     private final AdminAiRecommendationRepository recommendationRepository;
     private final AdminAiAuditLogRepository auditLogRepository;
+    private final AdminAiPendingActionRepository pendingActionRepository;
     private final AdminToolRouter adminToolRouter;
     private final AdminGettingStartedToolService adminGettingStartedToolService;
+    private final AdminProToolService adminProToolService;
+    private final AdminPendingConfirmationSupport confirmationSupport;
     private final AdminAuthorizationService adminAuthorizationService;
     private final GeminiApiClient geminiApiClient;
     private final ObjectMapper objectMapper;
@@ -68,19 +72,23 @@ public class AdminAIService {
         AdminAiConversation conversation = conversationService.resolveOrCreateConversation(adminUserId, request.getConversationId());
         AdminAiMessage savedUserMsg = conversationService.saveMessage(conversation, "user", userPrompt, null, null);
 
-        Optional<AdminAiPendingAction> activePending = adminGettingStartedToolService
+        Optional<AdminAiPendingAction> activePending = confirmationSupport
                 .findActivePendingConfirmation(admin.getId(), conversation.getId());
         if (activePending.isPresent()) {
-            boolean confirmed = adminGettingStartedToolService.isExplicitConfirmationMessage(userPrompt);
-            boolean cancelled = !confirmed && adminGettingStartedToolService.isExplicitCancellationMessage(userPrompt);
+            boolean confirmed = confirmationSupport.isExplicitConfirmationMessage(userPrompt);
+            boolean cancelled = !confirmed && confirmationSupport.isExplicitCancellationMessage(userPrompt);
             if (confirmed || cancelled) {
-                AdminConfirmationDecisionResponse decision = adminGettingStartedToolService.resolveConfirmationDecision(
-                        admin,
-                        activePending.get().getConfirmationToken(),
-                        confirmed,
-                        conversation.getId()
-                );
-                AdminAiIntent resolvedIntent = AdminAiIntent.CAMPAIGN_MANAGEMENT;
+                AdminPendingActionType pendingType = activePending.get().getActionType();
+                boolean isProPending = pendingType == AdminPendingActionType.GRANT_PRO
+                        || pendingType == AdminPendingActionType.REVOKE_PRO;
+                AdminConfirmationDecisionResponse decision = isProPending
+                        ? adminProToolService.resolveConfirmationDecision(
+                                admin, activePending.get().getConfirmationToken(), confirmed, conversation.getId())
+                        : adminGettingStartedToolService.resolveConfirmationDecision(
+                                admin, activePending.get().getConfirmationToken(), confirmed, conversation.getId());
+                AdminAiIntent resolvedIntent = isProPending
+                        ? AdminAiIntent.PRO_MANAGEMENT
+                        : AdminAiIntent.CAMPAIGN_MANAGEMENT;
                 List<AdminToolExecutionRecord> tools = decision.getExecution() != null
                         ? List.of(decision.getExecution())
                         : Collections.emptyList();
@@ -97,6 +105,7 @@ public class AdminAIService {
                         .executedTools(tools)
                         .gettingStartedProgram(decision.getGettingStartedProgram())
                         .activeCampaigns(decision.getActiveCampaigns())
+                        .updatedProUser(decision.getUpdatedUser())
                         .pendingConfirmation(null)
                         .suggestedFollowUps(buildSuggestedFollowUps(resolvedIntent, null))
                         .build();
@@ -160,10 +169,12 @@ public class AdminAIService {
         String fullSystemPrompt = baseSystemPrompt + "\n" + routedTools.sanitizedToolContextForPrompt();
 
         GeminiAdminAgentOutput geminiOutput = null;
-        try {
-            geminiOutput = geminiApiClient.callAdminAgent(fullSystemPrompt, geminiContents).orElse(null);
-        } catch (Exception ex) {
-            log.warn("Admin AI Gemini call failed, falling back to deterministic analytical engine: {}", ex.getMessage());
+        if (routedTools.pendingConfirmation() == null && routedTools.proToolResult() == null) {
+            try {
+                geminiOutput = geminiApiClient.callAdminAgent(fullSystemPrompt, geminiContents).orElse(null);
+            } catch (Exception ex) {
+                log.warn("Admin AI Gemini call failed, falling back to deterministic analytical engine: {}", ex.getMessage());
+            }
         }
 
         AdminAiIntent intent = resolveIntentAfterTools(userPrompt, geminiOutput, toolPlan, routedRequest, routedTools);
@@ -172,21 +183,21 @@ public class AdminAIService {
         }
 
         List<AdminRecommendationResponse> generatedRecommendations = new ArrayList<>();
-        boolean isGettingStartedIntent = isGettingStartedOrCampaignIntent(intent);
-        boolean wantsGlobalRecs = !isGettingStartedIntent && ((geminiOutput != null && Boolean.TRUE.equals(geminiOutput.getGenerateRecommendations()))
+        boolean skipGlobalRecs = isGettingStartedOrCampaignIntent(intent) || intent == AdminAiIntent.PRO_MANAGEMENT;
+        boolean wantsGlobalRecs = !skipGlobalRecs && ((geminiOutput != null && Boolean.TRUE.equals(geminiOutput.getGenerateRecommendations()))
                 || (userPrompt.toLowerCase().contains("recommend")
                 && !userPrompt.toLowerCase().contains("what exercises")
                 && !userPrompt.toLowerCase().contains("workout program")));
 
-        if (!isGettingStartedIntent && (intent == AdminAiIntent.EXERCISE_RECOMMENDATION
+        if (!skipGlobalRecs && (intent == AdminAiIntent.EXERCISE_RECOMMENDATION
                 || (geminiOutput != null && Boolean.TRUE.equals(geminiOutput.getGenerateExerciseRecommendations())))) {
             generatedRecommendations.addAll(createExerciseRecommendations(admin, conversation, detectedSkill, detectedLevel));
-        } else if (!isGettingStartedIntent && (intent == AdminAiIntent.WORKOUT_PROGRAM_RECOMMENDATION
+        } else if (!skipGlobalRecs && (intent == AdminAiIntent.WORKOUT_PROGRAM_RECOMMENDATION
                 || (geminiOutput != null && Boolean.TRUE.equals(geminiOutput.getGenerateWorkoutProgram())))) {
             String levelStr = detectedLevel != null ? detectedLevel.name() : (geminiOutput != null ? geminiOutput.getTargetLevel() : null);
             String focus = detectedSkill != null ? detectedSkill : userPrompt;
             generatedRecommendations.addAll(createWorkoutProgramRecommendations(admin, conversation, focus, levelStr));
-        } else if (!isGettingStartedIntent && (intent == AdminAiIntent.OPERATIONAL_INSIGHTS
+        } else if (!skipGlobalRecs && (intent == AdminAiIntent.OPERATIONAL_INSIGHTS
                 || (geminiOutput != null && Boolean.TRUE.equals(geminiOutput.getGenerateOperationalInsights()))
                 || wantsGlobalRecs)) {
             List<AdminContextService.OperationalInsightCandidate> combinedInsights = !routedTools.dataRecommendations().isEmpty()
@@ -195,8 +206,9 @@ public class AdminAIService {
             generatedRecommendations.addAll(createOperationalRecommendations(admin, conversation, combinedInsights));
         }
 
-        boolean requireDeterministicConfirmationReply = routedTools.pendingConfirmation() != null;
-        String replyContent = (!requireDeterministicConfirmationReply
+        boolean requireDeterministicReply = routedTools.pendingConfirmation() != null
+                || routedTools.proToolResult() != null;
+        String replyContent = (!requireDeterministicReply
                 && geminiOutput != null
                 && geminiOutput.getReply() != null
                 && !geminiOutput.getReply().isBlank())
@@ -240,6 +252,12 @@ public class AdminAIService {
                 .activeCampaigns(routedTools.activeCampaigns())
                 .campaignAnalytics(routedTools.campaignAnalytics())
                 .pendingConfirmation(routedTools.pendingConfirmation())
+                .updatedProUser(routedTools.proToolResult() != null && routedTools.proToolResult().isExecuted()
+                        ? routedTools.proToolResult().getTargetUser()
+                        : null)
+                .proCandidates(routedTools.proToolResult() != null
+                        ? routedTools.proToolResult().getCandidates()
+                        : null)
                 .missingDataNotes(routedTools.missingDataNotes())
                 .suggestedFollowUps(followUps)
                 .build();
@@ -255,12 +273,25 @@ public class AdminAIService {
         adminAuthorizationService.requireAuthenticatedAdmin();
         boolean approved = request == null || request.getApproved() == null || Boolean.TRUE.equals(request.getApproved());
         Long convHint = request != null ? request.getConversationId() : null;
-        AdminConfirmationDecisionResponse decision = adminGettingStartedToolService.resolveConfirmationDecision(
-                admin, confirmationToken, approved, convHint);
+
+        AdminPendingActionType actionType = pendingActionRepository
+                .findByConfirmationTokenAndAdminUserId(confirmationToken, admin.getId())
+                .map(AdminAiPendingAction::getActionType)
+                .orElse(AdminPendingActionType.PUBLISH_PROGRAM);
+
+        boolean isProPending = actionType == AdminPendingActionType.GRANT_PRO
+                || actionType == AdminPendingActionType.REVOKE_PRO;
+        AdminConfirmationDecisionResponse decision = isProPending
+                ? adminProToolService.resolveConfirmationDecision(admin, confirmationToken, approved, convHint)
+                : adminGettingStartedToolService.resolveConfirmationDecision(admin, confirmationToken, approved, convHint);
+
+        AdminAiIntent decisionIntent = isProPending
+                ? AdminAiIntent.PRO_MANAGEMENT
+                : AdminAiIntent.CAMPAIGN_MANAGEMENT;
         if (decision.getConversationId() != null) {
             conversationService.findOwnedConversation(adminUserId, decision.getConversationId())
                     .ifPresent(conv -> conversationService.saveMessage(
-                            conv, "assistant", decision.getReply(), AdminAiIntent.CAMPAIGN_MANAGEMENT.name(), null));
+                            conv, "assistant", decision.getReply(), decisionIntent.name(), null));
         }
         return decision;
     }
@@ -738,6 +769,9 @@ public class AdminAIService {
                 - configureAudience (set target_audience to ALL_ATHLETES, LAST_30_DAYS, or LAST_14_DAYS)
                 - getActiveCampaigns (list currently published Getting Started campaigns)
                 - getCampaignAnalytics (retrieve eligible athlete count, modal impressions, dismissals, detail views, enrollments, Day 1/2/3 & overall completion rates)
+                - grantPro (prepare a confirmation request before granting unlimited admin PRO access to target_user_identifier [email, username, or user ID])
+                - revokePro (prepare a confirmation request before revoking admin-granted PRO access from target_user_identifier while preserving paid subscriptions)
+                - checkProStatus (inspect a user's current effective tier, paid subscription, and admin-granted PRO status)
                 Never fabricate data. Never request raw user passwords or private message text.
                 """;
     }
@@ -770,6 +804,10 @@ public class AdminAIService {
                 return AdminAiIntent.CAMPAIGN_MANAGEMENT;
             }
             return AdminAiIntent.GETTING_STARTED_PROGRAM_MANAGEMENT;
+        }
+
+        if (AdminToolRouter.isProManagementPrompt(lower)) {
+            return AdminAiIntent.PRO_MANAGEMENT;
         }
 
         if (lower.contains("what exercises")
@@ -1190,19 +1228,30 @@ public class AdminAIService {
             }
             case CONFIRMATION_REQUIRED -> {
                 AdminPendingConfirmationResponse pending = routedTools.pendingConfirmation();
-                sb.append("### Confirmation Required Before Campaign Change\n\n");
-                if (pending != null) {
-                    sb.append(pending.getSummary()).append("\n\n");
-                    sb.append("- **Action**: ").append(pending.getActionType()).append("\n");
-                    sb.append("- **Program**: ").append(pending.getProgramTitle())
-                            .append(" (ID ").append(pending.getProgramId()).append(")\n");
-                    sb.append("- **Target Audience**: ").append(pending.getAudienceLabel())
-                            .append(" (`").append(pending.getTargetAudience()).append("`)\n");
-                    sb.append("- **Estimated Eligible Athletes**: **").append(pending.getEligibleAthleteCount()).append("**\n");
-                    sb.append("- **Confirmation Token**: `").append(pending.getConfirmationToken()).append("`\n");
-                    sb.append("- **Status**: Pending Admin confirmation — campaign has NOT been changed yet.\n");
+                if (pending != null && (pending.getActionType() == AdminPendingActionType.GRANT_PRO
+                        || pending.getActionType() == AdminPendingActionType.REVOKE_PRO)) {
+                    if (routedTools.proToolResult() != null && routedTools.proToolResult().getMessage() != null) {
+                        sb.append(routedTools.proToolResult().getMessage()).append("\n");
+                    } else {
+                        sb.append("### Confirmation Required Before PRO Change\n\n")
+                                .append(pending.getSummary()).append("\n");
+                    }
+                } else {
+                    sb.append("### Confirmation Required Before Campaign Change\n\n");
+                    if (pending != null) {
+                        sb.append(pending.getSummary()).append("\n\n");
+                        sb.append("- **Action**: ").append(pending.getActionType()).append("\n");
+                        sb.append("- **Program**: ").append(pending.getProgramTitle())
+                                .append(" (ID ").append(pending.getProgramId()).append(")\n");
+                        sb.append("- **Target Audience**: ").append(pending.getAudienceLabel())
+                                .append(" (`").append(pending.getTargetAudience()).append("`)\n");
+                        sb.append("- **Estimated Eligible Athletes**: **").append(pending.getEligibleAthleteCount()).append("**\n");
+                        sb.append("- **Confirmation Token**: `").append(pending.getConfirmationToken()).append("`\n");
+                        sb.append("- **Status**: Pending Admin confirmation — campaign has NOT been changed yet.\n");
+                    }
                 }
             }
+            case PRO_MANAGEMENT -> appendProManagementSummary(sb, routedTools);
             case GETTING_STARTED_PROGRAM_MANAGEMENT -> appendGettingStartedProgramSummary(sb, routedTools);
             case CAMPAIGN_MANAGEMENT -> appendCampaignManagementSummary(sb, routedTools);
             case CAMPAIGN_ANALYTICS -> appendCampaignAnalyticsSummary(sb, routedTools);
@@ -1264,6 +1313,11 @@ public class AdminAIService {
                     "Analyze user training trends",
                     "Which areas of the platform need improvement?"
             );
+            case PRO_MANAGEMENT -> List.of(
+                    "Grant PRO to user@example.com",
+                    "Revoke PRO from user@example.com",
+                    "Check PRO status for user@example.com"
+            );
             case GETTING_STARTED_PROGRAM_MANAGEMENT -> List.of(
                     "Make Day 1 focused on pushing movements.",
                     "Preview the Getting Started program and check eligible audience size.",
@@ -1316,6 +1370,9 @@ public class AdminAIService {
         if (routedTools != null) {
             if (routedTools.pendingConfirmation() != null) {
                 return AdminAiIntent.CONFIRMATION_REQUIRED;
+            }
+            if (routedTools.proToolResult() != null) {
+                return AdminAiIntent.PRO_MANAGEMENT;
             }
             if (routedTools.campaignAnalytics() != null) {
                 return AdminAiIntent.CAMPAIGN_ANALYTICS;
@@ -1429,6 +1486,17 @@ public class AdminAIService {
         sb.append("- **Overall Completion Rate**: ").append(a.getOverallCompletionRate()).append("% (").append(a.getCompletedEnrollments()).append(" completed)\n");
     }
 
+    private void appendProManagementSummary(StringBuilder sb, AdminToolRouter.RoutedChatToolsResult routedTools) {
+        AdminProToolResultResponse pro = routedTools.proToolResult();
+        if (pro != null && pro.getMessage() != null && !pro.getMessage().isBlank()) {
+            sb.append(pro.getMessage()).append("\n");
+            return;
+        }
+        sb.append("### Admin PRO Access Management\n\n")
+                .append("Specify an action and target user by **email**, **username**, or **user ID** ")
+                .append("(e.g. `Grant PRO to user@example.com` or `Revoke PRO from user123`).\n");
+    }
+
     private String generateConversationTitle(String userPrompt, AdminAiIntent intent) {
         String clean = userPrompt.replaceAll("[^a-zA-Z0-9\\s-]", "").trim();
         if (clean.isBlank()) {
@@ -1446,6 +1514,7 @@ public class AdminAIService {
                 case GETTING_STARTED_PROGRAM_MANAGEMENT -> "Getting Started – 3 Days";
                 case CAMPAIGN_MANAGEMENT, CONFIRMATION_REQUIRED -> "Getting Started Campaign";
                 case CAMPAIGN_ANALYTICS -> "Getting Started Analytics";
+                case PRO_MANAGEMENT -> "PRO Entitlement Management";
                 default -> "Admin AI Advisory";
             };
         }

@@ -39,4 +39,8 @@ public class AdminToolExecuteRequest {
     private List<GettingStartedExerciseOperationRequest> operations;
     private Boolean confirmed;
     private String confirmationToken;
+
+    // PRO entitlement management fields
+    private String userIdentifier;
+    private String reason;
 }

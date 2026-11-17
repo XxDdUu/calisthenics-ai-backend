@@ -1,5 +1,6 @@
 package com.calisthenics.backend.adminai.dto;
 
+import com.calisthenics.backend.admin.dto.AdminUserResponse;
 import com.calisthenics.backend.adminai.dto.data.AdminCoachClientStatisticsResponse;
 import com.calisthenics.backend.adminai.dto.data.AdminGlobalUserStatisticsResponse;
 import com.calisthenics.backend.adminai.dto.data.AdminGlobalUserSummaryDto;
@@ -46,6 +47,8 @@ public class AdminChatResponse {
     private List<GettingStartedCampaignSummaryResponse> activeCampaigns;
     private GettingStartedCampaignAnalyticsResponse campaignAnalytics;
     private AdminPendingConfirmationResponse pendingConfirmation;
+    private AdminUserResponse updatedProUser;
+    private List<AdminUserResponse> proCandidates;
     private List<String> missingDataNotes;
     private List<String> suggestedFollowUps;
 }

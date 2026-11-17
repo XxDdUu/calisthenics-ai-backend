@@ -1,5 +1,6 @@
 package com.calisthenics.backend.adminai.dto.data;
 
+import com.calisthenics.backend.admin.dto.AdminUserResponse;
 import com.calisthenics.backend.adminai.type.AdminPendingActionStatus;
 import com.calisthenics.backend.adminai.type.AdminPendingActionType;
 import com.calisthenics.backend.gettingstarted.dto.GettingStartedCampaignSummaryResponse;
@@ -24,4 +25,5 @@ public class AdminConfirmationDecisionResponse {
     private AdminToolExecutionRecord execution;
     private GettingStartedProgramResponse gettingStartedProgram;
     private List<GettingStartedCampaignSummaryResponse> activeCampaigns;
+    private AdminUserResponse updatedUser;
 }

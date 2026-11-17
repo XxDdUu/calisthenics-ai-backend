@@ -45,9 +45,15 @@ public class AdminAiPendingAction {
     @Column(name = "action_type", nullable = false, length = 40)
     private AdminPendingActionType actionType;
 
-    @ManyToOne(fetch = FetchType.LAZY, optional = false)
-    @JoinColumn(name = "program_id", nullable = false)
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "program_id")
     private GettingStartedProgram program;
+
+    @Column(name = "target_user_id")
+    private Long targetUserId;
+
+    @Column(name = "action_reason", columnDefinition = "TEXT")
+    private String actionReason;
 
     @Enumerated(EnumType.STRING)
     @Column(name = "target_audience", length = 30)
