@@ -5,6 +5,7 @@ import com.calisthenics.backend.admin.dto.AdminExerciseResponse;
 import com.calisthenics.backend.admin.dto.CreateAdminExerciseRequest;
 import com.calisthenics.backend.adminai.dto.ExerciseRecommendationPayload;
 import com.calisthenics.backend.adminai.dto.data.ExerciseDraftBatchResultResponse;
+import com.calisthenics.backend.adminai.dto.data.ExerciseDraftCandidateDto;
 import com.calisthenics.backend.adminai.entity.AdminAiConversation;
 import com.calisthenics.backend.adminai.entity.AdminAiRecommendation;
 import com.calisthenics.backend.adminai.repository.AdminAiConversationRepository;
@@ -25,10 +26,10 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.time.ZonedDateTime;
 import java.util.*;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -36,13 +37,13 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class ExerciseRecommendationService {
 
-    private static final Pattern COUNT_PATTERN = Pattern.compile("\\b(\\d+)\\b");
     private static final String DRAFT_BATCH_PREFIX = "AI_DRAFT_BATCH:";
 
     private final ExerciseRepository exerciseRepository;
     private final AdminExerciseService adminExerciseService;
     private final AdminAiRecommendationRepository recommendationRepository;
     private final AdminAiConversationRepository conversationRepository;
+    private final ExerciseDraftValidationService validationService;
     private final ObjectMapper objectMapper;
 
     private static final List<ExerciseRecommendationPayload> CANONICAL_PROGRESSION_LIBRARY = List.of(
@@ -665,6 +666,37 @@ public class ExerciseRecommendationService {
                     .build()
     );
 
+    private static final Map<String, ExerciseRecommendationPayload> EXPLICIT_EXERCISE_TEMPLATES = Map.ofEntries(
+            Map.entry("boxpistolsquat", ExerciseRecommendationPayload.builder()
+                    .name("Box Pistol Squat")
+                    .code("BOX_PISTOL_SQUAT")
+                    .category(ExerciseCategory.LEGS)
+                    .difficulty(DifficultyLevel.INTERMEDIATE)
+                    .targetSkill("Single-Leg Strength")
+                    .progressionLevel("Step 2 - Box-Controlled Pistol Progression")
+                    .prerequisites("12 Bulgarian Split Squats per leg, 20 Bodyweight Squats")
+                    .targetMuscles("Quadriceps, Glutes, Hamstrings, Hip Stabilizers, Core")
+                    .equipment("Plyo Box or Bench")
+                    .description("Controlled single-leg pistol squat lowering the hips to a box or bench before driving smoothly back up to full standing lockout.")
+                    .instructions("Stand in front of a sturdy knee-height box, extend one leg straight forward, sit hips back and down under a 2-second eccentric until glutes lightly tap the box without relaxing, and press through the planted heel to stand.")
+                    .whyAdd("Bridges split squats and full floor pistol squats by standardizing depth and bottom-position control.")
+                    .build()),
+            Map.entry("nordichamstringcurlnegative", ExerciseRecommendationPayload.builder()
+                    .name("Nordic Hamstring Curl (Negative)")
+                    .code("NORDIC_HAMSTRING_CURL_NEGATIVE")
+                    .category(ExerciseCategory.LEGS)
+                    .difficulty(DifficultyLevel.ADVANCED)
+                    .targetSkill("Posterior Chain Strength")
+                    .progressionLevel("Eccentric Knee Flexion Progression")
+                    .prerequisites("12 Single-Leg Glute Bridges, 15 Sliding Leg Curls")
+                    .targetMuscles("Hamstrings, Glutes, Gastrocnemius, Core")
+                    .equipment("Partner, Strap, or Anchored Bar")
+                    .description("High-tension eccentric Nordic hamstring curl focusing on a maximally slow, controlled lowering phase with neutral hips.")
+                    .instructions("Kneel upright on a mat with ankles anchored securely, brace abs and squeeze glutes to keep hips straight, lower torso forward toward the floor over a 4-to-5 second negative using hamstring tension, catch softly with hands, and press lightly back to start.")
+                    .whyAdd("Builds extreme eccentric hamstring resilience and posterior-chain strength before full concentric Nordic curls.")
+                    .build())
+    );
+
     public List<String> getSupportedSkillFamilies() {
         return List.of("Planche", "Front Lever", "Back Lever", "Handstand", "Muscle-up", "Human Flag");
     }
@@ -686,10 +718,12 @@ public class ExerciseRecommendationService {
                     if (targetSkillFilter == null || targetSkillFilter.isBlank()) {
                         return true;
                     }
-                    String filterLower = targetSkillFilter.trim().toLowerCase();
-                    return candidate.getTargetSkill().toLowerCase().contains(filterLower)
-                            || candidate.getName().toLowerCase().contains(filterLower)
-                            || candidate.getCategory().name().toLowerCase().contains(filterLower);
+                    String filterLower = targetSkillFilter.trim().toLowerCase(Locale.US);
+                    ExerciseCategory categoryHint = ExerciseDraftValidationService.detectCategoryFromText(filterLower);
+                    return (candidate.getTargetSkill() != null && candidate.getTargetSkill().toLowerCase(Locale.US).contains(filterLower))
+                            || candidate.getName().toLowerCase(Locale.US).contains(filterLower)
+                            || candidate.getCategory().name().toLowerCase(Locale.US).contains(filterLower)
+                            || (categoryHint != null && candidate.getCategory() == categoryHint);
                 })
                 .filter(candidate -> difficultyFilter == null || candidate.getDifficulty() == difficultyFilter)
                 .toList();
@@ -752,15 +786,59 @@ public class ExerciseRecommendationService {
             DifficultyLevel difficultyFilter,
             Integer requestedCount
     ) {
-        int targetCount = resolveRequestedCount(userPrompt, requestedCount);
-        ExerciseCategory targetCategory = explicitCategory != null
-                ? explicitCategory
-                : detectCategoryFromText(userPrompt, skillFilter);
+        return createExerciseDrafts(
+                admin,
+                conversationId,
+                userPrompt,
+                null,
+                explicitCategory,
+                skillFilter,
+                difficultyFilter,
+                requestedCount,
+                null
+        );
+    }
+
+    @Transactional
+    public ExerciseDraftBatchResultResponse createExerciseDrafts(
+            User admin,
+            Long conversationId,
+            String userPrompt,
+            String recentRecommendationContext,
+            ExerciseCategory explicitCategory,
+            String skillFilter,
+            DifficultyLevel difficultyFilter,
+            Integer requestedCount,
+            List<ExerciseDraftCandidateDto> providedCandidates
+    ) {
+        ExerciseDraftValidationService.ExerciseDraftRequestContract contract =
+                validationService.parseRequestContract(
+                        userPrompt,
+                        recentRecommendationContext,
+                        explicitCategory,
+                        skillFilter,
+                        difficultyFilter,
+                        requestedCount
+                );
+
+        ExerciseCategory targetCategory = contract.requiredCategory();
         String categoryLabel = targetCategory != null
                 ? targetCategory.name()
-                : (skillFilter != null && !skillFilter.isBlank() ? skillFilter.trim() : "GENERAL");
-        String signature = buildDraftBatchSignature(userPrompt, targetCategory, difficultyFilter, targetCount);
+                : (skillFilter != null && !skillFilter.isBlank() ? skillFilter.trim() : "UNSPECIFIED");
+        int targetCount = contract.expectedCount();
 
+        if (!contract.hasExplicitExercises()
+                && targetCategory == null
+                && (skillFilter == null || skillFilter.isBlank())
+                && (providedCandidates == null || providedCandidates.isEmpty())) {
+            return validationFailure(
+                    categoryLabel,
+                    targetCount,
+                    List.of("Missing target exercise category or explicit exercise names in the request.")
+            );
+        }
+
+        String signature = buildDraftBatchSignature(userPrompt, contract);
         AdminAiConversation conversation = conversationId != null
                 ? conversationRepository.findById(conversationId).orElse(null)
                 : null;
@@ -781,75 +859,125 @@ public class ExerciseRecommendationService {
         }
 
         List<Exercise> existingCatalog = exerciseRepository.findAll();
-        Set<String> existingNames = existingCatalog.stream()
-                .map(e -> normalizeIdentifier(e.getName()))
-                .collect(Collectors.toSet());
-        Set<String> existingCodes = existingCatalog.stream()
-                .map(e -> normalizeIdentifier(e.getCode()))
-                .collect(Collectors.toSet());
-
-        List<ExerciseRecommendationPayload> matchingPool = CANONICAL_PROGRESSION_LIBRARY.stream()
-                .filter(c -> !existingNames.contains(normalizeIdentifier(c.getName()))
-                        && !existingCodes.contains(normalizeIdentifier(c.getCode())))
-                .filter(c -> matchesCategoryOrSkill(c, targetCategory, skillFilter))
-                .toList();
-
-        List<ExerciseRecommendationPayload> selected = new ArrayList<>();
-        if (difficultyFilter != null) {
-            matchingPool.stream()
-                    .filter(c -> c.getDifficulty() == difficultyFilter)
-                    .limit(targetCount)
-                    .forEach(selected::add);
-        }
-        for (ExerciseRecommendationPayload candidate : matchingPool) {
-            if (selected.size() >= targetCount) {
-                break;
-            }
-            if (selected.stream().noneMatch(s -> normalizeIdentifier(s.getName())
-                    .equals(normalizeIdentifier(candidate.getName())))) {
-                selected.add(candidate);
+        Map<String, Exercise> existingByNormName = new LinkedHashMap<>();
+        Set<String> existingCodes = new HashSet<>();
+        for (Exercise existing : existingCatalog) {
+            existingByNormName.putIfAbsent(ExerciseDraftValidationService.normalizeExactName(existing.getName()), existing);
+            if (existing.getCode() != null) {
+                existingCodes.add(existing.getCode().trim().toUpperCase(Locale.US));
             }
         }
 
-        if (selected.isEmpty()) {
-            List<AdminExerciseResponse> existingCategoryDrafts = existingCatalog.stream()
-                    .filter(e -> e.getStatus() == ExerciseStatus.DRAFT && e.getOrigin() == ExerciseOrigin.AI_RECOMMENDED)
-                    .filter(e -> targetCategory == null || e.getCategory() == targetCategory)
-                    .sorted(Comparator.comparing(Exercise::getId, Comparator.nullsLast(Comparator.reverseOrder())))
-                    .limit(targetCount)
-                    .map(e -> adminExerciseService.getExercise(e.getId()))
+        List<ExerciseRecommendationPayload> validatedPayloads;
+
+        if (providedCandidates != null && !providedCandidates.isEmpty()) {
+            // Strictly validate AI-supplied or tool-supplied exercise drafts BEFORE any DB write
+            ExerciseDraftValidationService.ValidationOutcome outcome =
+                    validationService.validateRawCandidates(contract, providedCandidates);
+            if (!outcome.valid()) {
+                return validationFailure(categoryLabel, targetCount, outcome.errors());
+            }
+            validatedPayloads = outcome.validatedPayloads();
+        } else if (contract.hasExplicitExercises()) {
+            // Prioritize exact requested exercise specifications over semantic/canonical substitution
+            List<ExerciseRecommendationPayload> resolvedExplicit = new ArrayList<>();
+            for (ExerciseDraftValidationService.RequestedExerciseSpec spec : contract.explicitExercises()) {
+                resolvedExplicit.add(resolveExplicitExercisePayload(spec, targetCategory));
+            }
+            ExerciseDraftValidationService.ValidationOutcome outcome =
+                    validationService.validatePayloads(contract, resolvedExplicit);
+            if (!outcome.valid()) {
+                return validationFailure(categoryLabel, targetCount, outcome.errors());
+            }
+            validatedPayloads = outcome.validatedPayloads();
+        } else {
+            // Canonical recommendation pool strictly filtered by validated category and uniform difficulty
+            List<ExerciseRecommendationPayload> matchingPool = CANONICAL_PROGRESSION_LIBRARY.stream()
+                    .filter(c -> !existingByNormName.containsKey(ExerciseDraftValidationService.normalizeExactName(c.getName()))
+                            && !existingCodes.contains(ExerciseDraftValidationService.normalizeSlug(c.getCode())))
+                    .filter(c -> matchesCategoryOrSkill(c, targetCategory, skillFilter))
+                    .filter(c -> contract.requiredDifficulty() == null || c.getDifficulty() == contract.requiredDifficulty())
                     .toList();
-            if (!existingCategoryDrafts.isEmpty()) {
+
+            List<ExerciseRecommendationPayload> selected = matchingPool.stream()
+                    .limit(targetCount)
+                    .toList();
+
+            if (selected.isEmpty()) {
+                List<AdminExerciseResponse> existingCategoryDrafts = existingCatalog.stream()
+                        .filter(e -> e.getStatus() == ExerciseStatus.DRAFT && e.getOrigin() == ExerciseOrigin.AI_RECOMMENDED)
+                        .filter(e -> targetCategory == null || e.getCategory() == targetCategory)
+                        .sorted(Comparator.comparing(Exercise::getId, Comparator.nullsLast(Comparator.reverseOrder())))
+                        .limit(targetCount)
+                        .map(e -> adminExerciseService.getExercise(e.getId()))
+                        .toList();
+                if (!existingCategoryDrafts.isEmpty()) {
+                    return ExerciseDraftBatchResultResponse.builder()
+                            .success(true)
+                            .category(categoryLabel)
+                            .requestedCount(targetCount)
+                            .createdCount(0)
+                            .createdExercises(List.of())
+                            .existingDrafts(existingCategoryDrafts)
+                            .message("All matching canonical " + categoryLabel
+                                    + " exercises already exist in the catalog, including "
+                                    + existingCategoryDrafts.size() + " AI-recommended draft(s).")
+                            .build();
+                }
                 return ExerciseDraftBatchResultResponse.builder()
-                        .success(true)
+                        .success(false)
+                        .errorMessage("No new unique " + categoryLabel
+                                + " exercises remain to add without duplicating existing catalog entries.")
                         .category(categoryLabel)
                         .requestedCount(targetCount)
                         .createdCount(0)
-                        .createdExercises(List.of())
-                        .existingDrafts(existingCategoryDrafts)
-                        .message("All matching canonical " + categoryLabel
-                                + " exercises already exist in the catalog, including "
-                                + existingCategoryDrafts.size() + " AI-recommended draft(s).")
                         .build();
             }
+
+            ExerciseDraftValidationService.ValidationOutcome outcome =
+                    validationService.validatePayloads(contract, selected);
+            if (!outcome.valid()) {
+                return validationFailure(categoryLabel, targetCount, outcome.errors());
+            }
+            validatedPayloads = outcome.validatedPayloads();
+        }
+
+        // Separate any already-existing catalog items from newly requested ones without creating duplicates
+        List<AdminExerciseResponse> alreadyExisting = new ArrayList<>();
+        List<ExerciseRecommendationPayload> toPersist = new ArrayList<>();
+        for (ExerciseRecommendationPayload candidate : validatedPayloads) {
+            Exercise existingMatch = existingByNormName.get(
+                    ExerciseDraftValidationService.normalizeExactName(candidate.getName()));
+            if (existingMatch != null) {
+                alreadyExisting.add(adminExerciseService.getExercise(existingMatch.getId()));
+            } else {
+                toPersist.add(candidate);
+            }
+        }
+
+        if (toPersist.isEmpty() && !alreadyExisting.isEmpty()) {
             return ExerciseDraftBatchResultResponse.builder()
-                    .success(false)
-                    .errorMessage("No new unique " + categoryLabel
-                            + " exercises remain to add without duplicating existing catalog entries.")
+                    .success(true)
                     .category(categoryLabel)
                     .requestedCount(targetCount)
                     .createdCount(0)
+                    .createdExercises(List.of())
+                    .existingDrafts(alreadyExisting)
+                    .message("Requested exercise(s) already exist in the catalog (" + alreadyExisting.size()
+                            + " existing entry/entries returned without creating duplicates).")
                     .build();
         }
 
         List<AdminExerciseResponse> createdExercises = new ArrayList<>();
         try {
-            for (ExerciseRecommendationPayload payload : selected) {
+            Set<String> reservedCodes = new HashSet<>(existingCodes);
+            for (ExerciseRecommendationPayload payload : toPersist) {
+                String uniqueCode = ensureUniqueCode(payload.getCode(), reservedCodes);
                 CreateAdminExerciseRequest createReq = new CreateAdminExerciseRequest(
                         payload.getName().trim(),
-                        payload.getCode(),
-                        payload.getCategory() != null ? payload.getCategory() : ExerciseCategory.SKILL,
-                        payload.getDifficulty() != null ? payload.getDifficulty() : DifficultyLevel.INTERMEDIATE,
+                        uniqueCode,
+                        payload.getCategory(),
+                        payload.getDifficulty(),
                         payload.getDescription(),
                         payload.getTargetMuscles(),
                         payload.getInstructions(),
@@ -865,8 +993,13 @@ public class ExerciseRecommendationService {
                 if (saved == null || saved.id() == null || !exerciseRepository.existsById(saved.id())) {
                     throw new IllegalStateException("Persistence verification failed for exercise: " + payload.getName());
                 }
+                if (saved.status() != ExerciseStatus.DRAFT
+                        || saved.origin() != ExerciseOrigin.AI_RECOMMENDED
+                        || saved.category() != payload.getCategory()
+                        || saved.difficulty() != payload.getDifficulty()) {
+                    throw new IllegalStateException("Persisted record mismatch for exercise: " + payload.getName());
+                }
                 createdExercises.add(saved);
-
                 saveRecommendationTrace(admin, conversation, payload, saved.id(), signature);
             }
         } catch (Exception ex) {
@@ -876,8 +1009,9 @@ public class ExerciseRecommendationService {
                     .errorMessage("Failed to save AI exercise drafts to database: " + ex.getMessage())
                     .category(categoryLabel)
                     .requestedCount(targetCount)
-                    .createdCount(createdExercises.size())
-                    .createdExercises(createdExercises)
+                    .createdCount(0)
+                    .createdExercises(List.of())
+                    .existingDrafts(alreadyExisting)
                     .build();
         }
 
@@ -888,9 +1022,148 @@ public class ExerciseRecommendationService {
                 .requestedCount(targetCount)
                 .createdCount(createdExercises.size())
                 .createdExercises(createdExercises)
-                .existingDrafts(List.of())
+                .existingDrafts(alreadyExisting)
                 .message("Saved " + createdExercises.size() + " AI-recommended exercise draft(s) in " + categoryLabel + ".")
                 .build();
+    }
+
+    private ExerciseDraftBatchResultResponse validationFailure(
+            String categoryLabel,
+            int requestedCount,
+            List<String> errors
+    ) {
+        String joined = String.join("; ", errors);
+        log.warn("Rejected AI exercise draft creation batch before persistence [category={}]: {}", categoryLabel, joined);
+        return ExerciseDraftBatchResultResponse.builder()
+                .success(false)
+                .validationFailed(true)
+                .validationErrors(errors)
+                .errorMessage("Validation failed — no exercises were saved: " + joined)
+                .category(categoryLabel)
+                .requestedCount(requestedCount)
+                .createdCount(0)
+                .createdExercises(List.of())
+                .build();
+    }
+
+    private ExerciseRecommendationPayload resolveExplicitExercisePayload(
+            ExerciseDraftValidationService.RequestedExerciseSpec spec,
+            ExerciseCategory fallbackCategory
+    ) {
+        String cleanName = spec.name().trim();
+        String exactNorm = ExerciseDraftValidationService.normalizeExactName(cleanName);
+        ExerciseCategory resolvedCat = spec.category() != null
+                ? spec.category()
+                : (fallbackCategory != null ? fallbackCategory : ExerciseDraftValidationService.detectCategoryFromText(cleanName));
+        DifficultyLevel resolvedDiff = spec.difficulty() != null
+                ? spec.difficulty()
+                : DifficultyLevel.INTERMEDIATE;
+
+        // 1. Exact normalized match in canonical library (never substitutes a different exercise name)
+        Optional<ExerciseRecommendationPayload> exactCanonical = CANONICAL_PROGRESSION_LIBRARY.stream()
+                .filter(c -> ExerciseDraftValidationService.normalizeExactName(c.getName()).equals(exactNorm))
+                .findFirst();
+        if (exactCanonical.isPresent()) {
+            ExerciseRecommendationPayload base = exactCanonical.get();
+            return ExerciseRecommendationPayload.builder()
+                    .name(cleanName)
+                    .code(base.getCode())
+                    .category(resolvedCat != null ? resolvedCat : base.getCategory())
+                    .difficulty(resolvedDiff)
+                    .targetSkill(base.getTargetSkill())
+                    .progressionLevel(base.getProgressionLevel())
+                    .prerequisites(base.getPrerequisites())
+                    .targetMuscles(base.getTargetMuscles())
+                    .equipment(base.getEquipment())
+                    .description(base.getDescription())
+                    .instructions(base.getInstructions())
+                    .whyAdd(base.getWhyAdd())
+                    .build();
+        }
+
+        // 2. Explicit progression template (e.g. Box Pistol Squat, Nordic Hamstring Curl (Negative))
+        ExerciseRecommendationPayload template = EXPLICIT_EXERCISE_TEMPLATES.get(exactNorm);
+        if (template != null) {
+            return ExerciseRecommendationPayload.builder()
+                    .name(cleanName)
+                    .code(template.getCode())
+                    .category(resolvedCat != null ? resolvedCat : template.getCategory())
+                    .difficulty(resolvedDiff)
+                    .targetSkill(template.getTargetSkill())
+                    .progressionLevel(template.getProgressionLevel())
+                    .prerequisites(template.getPrerequisites())
+                    .targetMuscles(template.getTargetMuscles())
+                    .equipment(template.getEquipment())
+                    .description(template.getDescription())
+                    .instructions(template.getInstructions())
+                    .whyAdd(template.getWhyAdd())
+                    .build();
+        }
+
+        // 3. Synthesize rich biomechanical metadata for custom/explicit exercise requested by Admin
+        return synthesizeExplicitExercisePayload(cleanName, resolvedCat, resolvedDiff);
+    }
+
+    private ExerciseRecommendationPayload synthesizeExplicitExercisePayload(
+            String name,
+            ExerciseCategory category,
+            DifficultyLevel difficulty
+    ) {
+        String slug = ExerciseDraftValidationService.normalizeSlug(name);
+        ExerciseCategory safeCategory = category != null ? category : ExerciseCategory.SKILL;
+        String muscles = switch (safeCategory) {
+            case LEGS -> "Quadriceps, Glutes, Hamstrings, Calves, Core";
+            case PUSH -> "Pectorals, Anterior Deltoids, Triceps, Serratus Anterior, Core";
+            case PULL -> "Latissimus Dorsi, Rhomboids, Biceps, Posterior Deltoids, Forearms";
+            case CORE -> "Rectus Abdominis, Transverse Abdominis, Obliques, Hip Flexors";
+            case ISOMETRIC -> "Primary Joint Stabilizers, Scapular Stabilizers, Core";
+            case SKILL -> "Shoulders, Core, Scapular Stabilizers, Full-Body Tension";
+        };
+        String equipment = switch (safeCategory) {
+            case LEGS -> (name.toLowerCase(Locale.US).contains("box") || name.toLowerCase(Locale.US).contains("step"))
+                    ? "Plyo Box or Bench"
+                    : (name.toLowerCase(Locale.US).contains("nordic") ? "Partner, Strap, or Anchored Bar" : "Bodyweight / Floor");
+            case PULL -> "Pull-Up Bar or Gymnastic Rings";
+            case PUSH -> "Floor or Parallettes";
+            case CORE -> "Floor or Pull-Up Bar";
+            case ISOMETRIC, SKILL -> "Floor, Parallettes, or Pull-Up Bar";
+        };
+        String description = String.format("%s %s calisthenics movement targeting %s.",
+                difficulty.name().charAt(0) + difficulty.name().substring(1).toLowerCase(Locale.US),
+                safeCategory.name(),
+                muscles);
+        String instructions = String.format("Warm up relevant joints thoroughly. Perform %s with strict alignment, controlled tempo, full range of motion, and braced core stability throughout every set.",
+                name);
+
+        return ExerciseRecommendationPayload.builder()
+                .name(name)
+                .code(slug)
+                .category(safeCategory)
+                .difficulty(difficulty)
+                .targetSkill(safeCategory.name() + " Development")
+                .targetMuscles(muscles)
+                .equipment(equipment)
+                .description(description)
+                .instructions(instructions)
+                .whyAdd("Added directly from validated Admin AI draft specification.")
+                .build();
+    }
+
+    private String ensureUniqueCode(String baseCode, Set<String> reservedCodes) {
+        String clean = ExerciseDraftValidationService.normalizeSlug(baseCode);
+        if (clean.isBlank()) {
+            clean = "AI_EXERCISE";
+        }
+        String candidate = clean;
+        int suffix = 2;
+        while (reservedCodes.contains(candidate) || exerciseRepository.existsByCode(candidate)) {
+            String suffixStr = "_" + suffix++;
+            int maxBaseLen = Math.max(1, 50 - suffixStr.length());
+            String trimmedBase = clean.length() > maxBaseLen ? clean.substring(0, maxBaseLen).replaceAll("_+$", "") : clean;
+            candidate = trimmedBase + suffixStr;
+        }
+        reservedCodes.add(candidate);
+        return candidate;
     }
 
     private List<AdminExerciseResponse> findExistingRetryBatchDrafts(
@@ -971,78 +1244,49 @@ public class ExerciseRecommendationService {
                     || candidate.getName().toLowerCase(Locale.US).contains(filterLower)
                     || candidate.getCategory().name().toLowerCase(Locale.US).contains(filterLower);
         }
-        return true;
+        return false;
     }
 
     public static ExerciseCategory detectCategoryFromText(String prompt, String skillFilter) {
-        String combined = ((prompt != null ? prompt : "") + " " + (skillFilter != null ? skillFilter : ""))
-                .toLowerCase(Locale.US);
-        if (combined.contains("leg") || combined.contains("squat") || combined.contains("lower body")
-                || combined.contains("quad") || combined.contains("hamstring") || combined.contains("calf")
-                || combined.contains("glute") || combined.contains("chân") || combined.contains("đùi")) {
-            return ExerciseCategory.LEGS;
+        ExerciseCategory fromPrompt = ExerciseDraftValidationService.detectCategoryFromText(prompt);
+        if (fromPrompt != null) {
+            return fromPrompt;
         }
-        if (combined.contains("push") || combined.contains("chest") || combined.contains("tricep")
-                || combined.contains("shoulder") || combined.contains("dip") || combined.contains("đẩy")
-                || combined.contains("ngực")) {
-            return ExerciseCategory.PUSH;
-        }
-        if (combined.contains("pull") || combined.contains("back") || combined.contains("bicep")
-                || combined.contains("row") || combined.contains("chin") || combined.contains("kéo")
-                || combined.contains("lưng")) {
-            return ExerciseCategory.PULL;
-        }
-        if (combined.contains("core") || combined.contains(" abs") || combined.contains("abdominal")
-                || combined.contains("plank") || combined.contains("hollow") || combined.contains("bụng")) {
-            return ExerciseCategory.CORE;
-        }
-        if (combined.contains("isometric") || combined.contains("hold") || combined.contains("tĩnh")) {
-            return ExerciseCategory.ISOMETRIC;
-        }
-        if (combined.contains("skill") || combined.contains("planche") || combined.contains("lever")
-                || combined.contains("handstand") || combined.contains("flag") || combined.contains("muscle-up")) {
-            return ExerciseCategory.SKILL;
-        }
-        return null;
+        return ExerciseDraftValidationService.detectCategoryFromText(skillFilter);
     }
 
     public static int resolveRequestedCount(String prompt, Integer explicitCount) {
-        if (explicitCount != null && explicitCount > 0) {
-            return Math.min(10, explicitCount);
-        }
-        if (prompt == null || prompt.isBlank()) {
-            return 3;
-        }
-        String lower = prompt.toLowerCase(Locale.US);
-        Matcher m = COUNT_PATTERN.matcher(lower);
-        if (m.find()) {
-            try {
-                int parsed = Integer.parseInt(m.group(1));
-                if (parsed >= 1 && parsed <= 10) {
-                    return parsed;
-                }
-            } catch (NumberFormatException ignored) {
-            }
-        }
-        if (lower.contains(" three ") || lower.contains(" 3 ") || lower.contains(" ba ")) return 3;
-        if (lower.contains(" two ") || lower.contains(" 2 ") || lower.contains(" hai ")) return 2;
-        if (lower.contains(" four ") || lower.contains(" 4 ") || lower.contains(" bốn ")) return 4;
-        if (lower.contains(" five ") || lower.contains(" 5 ") || lower.contains(" năm ")) return 5;
-        if (lower.contains(" one ") || lower.contains(" a new ") || lower.contains(" một ")) return 1;
-        return 3;
+        return ExerciseDraftValidationService.resolveRequestedCount(prompt, explicitCount);
     }
 
     private String buildDraftBatchSignature(
             String userPrompt,
-            ExerciseCategory category,
-            DifficultyLevel difficulty,
-            int count
+            ExerciseDraftValidationService.ExerciseDraftRequestContract contract
     ) {
         String normPrompt = userPrompt == null ? "" : userPrompt.trim().toLowerCase(Locale.US).replaceAll("\\s+", " ");
-        return (category != null ? category.name() : "ANY")
-                + "|" + (difficulty != null ? difficulty.name() : "ANY")
-                + "|" + count
-                + "|" + Integer.toHexString(normPrompt.hashCode());
+        String explicitKey = contract.explicitExercises().stream()
+                .map(s -> ExerciseDraftValidationService.normalizeExactName(s.name())
+                        + ":" + (s.category() != null ? s.category().name() : "")
+                        + ":" + (s.difficulty() != null ? s.difficulty().name() : ""))
+                .collect(Collectors.joining(","));
+        return (contract.requiredCategory() != null ? contract.requiredCategory().name() : "ANY")
+                + "|" + (contract.requiredDifficulty() != null ? contract.requiredDifficulty().name() : "ANY")
+                + "|" + contract.expectedCount()
+                + "|" + shortSha256(normPrompt + "|" + explicitKey);
+    }
+
+    private String shortSha256(String value) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] digest = md.digest(value.getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < 8; i++) {
+                sb.append(String.format("%02x", digest[i]));
+            }
+            return sb.toString();
+        } catch (Exception ex) {
+            return Integer.toHexString(value.hashCode());
+        }
     }
 
     public static String normalizeIdentifier(String input) {

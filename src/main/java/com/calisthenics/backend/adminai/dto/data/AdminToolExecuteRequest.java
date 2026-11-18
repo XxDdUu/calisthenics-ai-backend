@@ -50,4 +50,5 @@ public class AdminToolExecuteRequest {
     private Integer requestedCount;
     private ExerciseCategory exerciseCategory;
     private DifficultyLevel difficultyLevel;
+    private List<ExerciseDraftCandidateDto> exerciseDrafts;
 }

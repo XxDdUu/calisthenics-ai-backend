@@ -6,6 +6,8 @@ import com.calisthenics.backend.adminai.dto.OperationalRecommendationPayload;
 import com.calisthenics.backend.adminai.dto.data.*;
 import com.calisthenics.backend.adminai.dto.data.AdminPlatformEngagementResponse.ExerciseUsageItem;
 import com.calisthenics.backend.adminai.dto.data.AdminPlatformEngagementResponse.SkillImproverItem;
+import com.calisthenics.backend.adminai.entity.AdminAiMessage;
+import com.calisthenics.backend.adminai.repository.AdminAiMessageRepository;
 import com.calisthenics.backend.adminai.type.AdminAiIntent;
 import com.calisthenics.backend.adminai.type.AdminAnalyticsRange;
 import com.calisthenics.backend.adminai.type.AdminRecommendationPriority;
@@ -69,6 +71,8 @@ public class AdminToolRouter {
     private final AdminGettingStartedToolService adminGettingStartedToolService;
     private final AdminProToolService adminProToolService;
     private final ExerciseRecommendationService exerciseRecommendationService;
+    private final ExerciseDraftValidationService exerciseDraftValidationService;
+    private final AdminAiMessageRepository adminAiMessageRepository;
 
     public record RoutedChatToolsResult(
             AdminAiIntent resolvedIntent,
@@ -263,10 +267,12 @@ public class AdminToolRouter {
                         admin,
                         request.getConversationId(),
                         request.getInstruction(),
+                        null,
                         request.getExerciseCategory(),
                         request.getSkillKeyword(),
                         request.getDifficultyLevel(),
-                        request.getRequestedCount()
+                        request.getRequestedCount(),
+                        request.getExerciseDrafts()
                 );
                 if (!res.isSuccess()) {
                     throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, res.getErrorMessage());
@@ -316,9 +322,18 @@ public class AdminToolRouter {
             } catch (IllegalArgumentException ignored) {
             }
         }
-        String effectiveSkill = (geminiPlan != null && !isBlank(geminiPlan.getSkillKeyword()))
-                ? geminiPlan.getSkillKeyword().trim()
-                : skillKeyword;
+        ExerciseCategory explicitPromptCategory = ExerciseDraftValidationService.detectCategoryFromText(userPrompt);
+        boolean hasExplicitExercisesInPrompt = !exerciseDraftValidationService.extractRequestedExercises(userPrompt).isEmpty();
+        // Never allow stale geminiPlan.skillKeyword from prior conversation turns to override current category/exercises
+        String effectiveSkill;
+        if (!isBlank(skillKeyword)) {
+            effectiveSkill = skillKeyword.trim();
+        } else if (explicitPromptCategory == null && !hasExplicitExercisesInPrompt
+                && geminiPlan != null && !isBlank(geminiPlan.getSkillKeyword())) {
+            effectiveSkill = geminiPlan.getSkillKeyword().trim();
+        } else {
+            effectiveSkill = null;
+        }
         boolean includeEmail = Boolean.TRUE.equals(request.getIncludeEmail())
                 || (geminiPlan != null && Boolean.TRUE.equals(geminiPlan.getIncludeEmail()));
 
@@ -510,22 +525,34 @@ public class AdminToolRouter {
             long t0 = System.currentTimeMillis();
             User admin = adminAuthorizationService.requireAuthenticatedAdmin();
             DifficultyLevel diff = null;
-            if (geminiPlan != null && !isBlank(geminiPlan.getExperienceLevel())) {
+            if (!hasExplicitExercisesInPrompt && geminiPlan != null && !isBlank(geminiPlan.getExperienceLevel())) {
                 try {
                     diff = DifficultyLevel.valueOf(geminiPlan.getExperienceLevel().trim().toUpperCase(Locale.US));
                 } catch (IllegalArgumentException ignored) {
                 }
             }
-            ExerciseCategory inferredCategory = ExerciseRecommendationService.detectCategoryFromText(userPrompt, effectiveSkill);
-            int requestedCount = ExerciseRecommendationService.resolveRequestedCount(userPrompt, null);
+            ExerciseCategory geminiPlanCategory = parseGeminiExerciseCategory(geminiPlan);
+            ExerciseCategory inferredCategory = explicitPromptCategory != null
+                    ? explicitPromptCategory
+                    : (geminiPlanCategory != null
+                            ? geminiPlanCategory
+                            : ExerciseDraftValidationService.detectCategoryFromText(effectiveSkill));
+            Integer requestedCount = geminiPlan != null && geminiPlan.getRequestedCount() != null
+                    ? geminiPlan.getRequestedCount()
+                    : ExerciseRecommendationService.resolveRequestedCount(userPrompt, null);
+            String recentRecContext = !hasExplicitExercisesInPrompt
+                    ? findImmediatePriorRecommendationContent(request.getConversationId())
+                    : null;
             exerciseDraftResult = exerciseRecommendationService.createExerciseDrafts(
                     admin,
                     request.getConversationId(),
                     userPrompt,
+                    recentRecContext,
                     inferredCategory,
                     effectiveSkill,
                     diff,
-                    requestedCount
+                    requestedCount,
+                    geminiPlan != null ? geminiPlan.getExerciseDrafts() : null
             );
             String toolStatus = exerciseDraftResult.isSuccess() ? "EXECUTED" : "FAILED";
             String toolSummary = exerciseDraftResult.isSuccess()
@@ -759,7 +786,9 @@ public class AdminToolRouter {
             return new LinkedHashSet<>(Set.of(proTool));
         }
 
-        if (isExerciseDraftCreationPrompt(lower) || intent == AdminAiIntent.EXERCISE_DRAFT_CREATION) {
+        if (isExerciseDraftCreationPrompt(lower)
+                || intent == AdminAiIntent.EXERCISE_DRAFT_CREATION
+                || isExerciseDraftCreationFollowUp(lower, request.getConversationId())) {
             return new LinkedHashSet<>(Set.of(AdminToolName.CREATE_EXERCISE_DRAFTS));
         }
 
@@ -1382,15 +1411,72 @@ public class AdminToolRouter {
                 || lower.contains("have pro");
     }
 
+    private ExerciseCategory parseGeminiExerciseCategory(GeminiAdminToolPlan plan) {
+        if (plan == null || isBlank(plan.getExerciseCategory())) {
+            return null;
+        }
+        return ExerciseDraftValidationService.parseCategoryEnum(plan.getExerciseCategory());
+    }
+
+    private String findImmediatePriorRecommendationContent(Long conversationId) {
+        if (conversationId == null) {
+            return null;
+        }
+        List<AdminAiMessage> recent = adminAiMessageRepository.findTop20ByConversationIdOrderByIdDesc(conversationId);
+        for (AdminAiMessage msg : recent) {
+            if ("assistant".equalsIgnoreCase(msg.getRole())) {
+                if ("EXERCISE_DRAFT_CREATION".equalsIgnoreCase(msg.getIntent())) {
+                    // Already-executed draft creations are not pending recommendations to re-add on vague follow-ups
+                    return null;
+                }
+                if ("EXERCISE_RECOMMENDATION".equalsIgnoreCase(msg.getIntent())) {
+                    return msg.getContent();
+                }
+                // Advisory/other reply: only match if it looks like an explicit numbered recommendation list
+                String content = msg.getContent() != null ? msg.getContent() : "";
+                if (!content.startsWith("### Added ")
+                        && !content.startsWith("### ❌")
+                        && !exerciseDraftValidationService.extractRequestedExercises(content).isEmpty()) {
+                    return content;
+                }
+                // Stop at the most recent assistant message so older unrelated turns cannot leak stale recommendations
+                return null;
+            }
+        }
+        return null;
+    }
+
+    private boolean isExerciseDraftCreationFollowUp(String lower, Long conversationId) {
+        if (lower == null || lower.isBlank() || conversationId == null
+                || isGettingStartedOrCampaignPrompt(lower) || isProManagementPrompt(lower)) {
+            return false;
+        }
+        boolean hasCreateVerb = lower.contains("add") || lower.contains("create")
+                || lower.contains("save") || lower.contains("thêm") || lower.contains("lưu");
+        boolean hasAnaphoricRef = lower.matches("(?s).*\\b(these|those|them|draft|suggested|recommended)\\b.*");
+        boolean mentionsOtherTopic = lower.contains("program") || lower.contains("campaign") || lower.contains("user");
+        if (!hasCreateVerb || !hasAnaphoricRef || mentionsOtherTopic) {
+            return false;
+        }
+        return findImmediatePriorRecommendationContent(conversationId) != null;
+    }
+
     public static boolean isExerciseDraftCreationPrompt(String lower) {
         if (lower == null || lower.isBlank()
                 || isGettingStartedOrCampaignPrompt(lower)
                 || isProManagementPrompt(lower)) {
             return false;
         }
-        if (lower.contains("what exercise") || lower.contains("which exercise")
+        boolean hasExplicitListOrDirectDraftDirective = lower.matches("(?s).*\\b1[.)]\\s+.*")
+                || lower.contains("add these")
+                || lower.contains("add those")
+                || lower.contains("to draft")
+                || lower.contains("to the draft")
+                || lower.matches("(?s).*\\b(add|create|save)\\s+\\d+\\s+.*");
+        if (!hasExplicitListOrDirectDraftDirective
+                && (lower.contains("what exercise") || lower.contains("which exercise")
                 || lower.contains("missing exercise") || lower.contains("missing progression")
-                || lower.contains("recommend exercises") || lower.contains("suggest exercises")) {
+                || lower.contains("recommend exercises") || lower.contains("suggest exercises"))) {
             return false;
         }
         boolean mentionsExercise = lower.contains("exercise") || lower.contains("bài tập");

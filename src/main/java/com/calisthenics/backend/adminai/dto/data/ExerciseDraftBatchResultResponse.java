@@ -15,10 +15,13 @@ import java.util.List;
 @AllArgsConstructor
 public class ExerciseDraftBatchResultResponse {
     private boolean success;
+    private boolean validationFailed;
     private String errorMessage;
     private String category;
     private int requestedCount;
     private int createdCount;
+    @Builder.Default
+    private List<String> validationErrors = new ArrayList<>();
     @Builder.Default
     private List<AdminExerciseResponse> createdExercises = new ArrayList<>();
     @Builder.Default

@@ -16,6 +16,7 @@ import com.calisthenics.backend.adminai.type.*;
 import com.calisthenics.backend.aiworkout.gemini.GeminiApiClient;
 import com.calisthenics.backend.aiworkout.gemini.dto.GeminiRequestDto;
 import com.calisthenics.backend.exercise.DifficultyLevel;
+import com.calisthenics.backend.exercise.ExerciseCategory;
 import com.calisthenics.backend.gettingstarted.dto.GettingStartedCampaignAnalyticsResponse;
 import com.calisthenics.backend.gettingstarted.dto.GettingStartedCampaignSummaryResponse;
 import com.calisthenics.backend.gettingstarted.dto.GettingStartedDayResponse;
@@ -55,6 +56,7 @@ public class AdminAIService {
     private final AdminToolRouter adminToolRouter;
     private final AdminGettingStartedToolService adminGettingStartedToolService;
     private final AdminProToolService adminProToolService;
+    private final ExerciseDraftValidationService exerciseDraftValidationService;
     private final AdminPendingConfirmationSupport confirmationSupport;
     private final AdminAuthorizationService adminAuthorizationService;
     private final GeminiApiClient geminiApiClient;
@@ -124,6 +126,7 @@ public class AdminAIService {
 
         AdminAnalyticsRange effectiveRange = resolveRangeFromPrompt(userPrompt, request.getRange());
         String detectedSkill = detectSkillFromPrompt(userPrompt);
+        ExerciseCategory detectedCategory = ExerciseDraftValidationService.detectCategoryFromText(userPrompt);
         DifficultyLevel detectedLevel = detectDifficultyFromPrompt(userPrompt);
 
         AdminContextService.AdminFullContext context = contextService.buildContext(
@@ -165,6 +168,39 @@ public class AdminAIService {
                 toolPlan
         );
 
+        // If AI-supplied exercise_drafts failed validation, allow one corrective AI regeneration retry against the exact user spec
+        if (routedTools.exerciseDraftResult() != null
+                && !routedTools.exerciseDraftResult().isSuccess()
+                && routedTools.exerciseDraftResult().isValidationFailed()
+                && toolPlan != null
+                && toolPlan.getExerciseDrafts() != null
+                && !toolPlan.getExerciseDrafts().isEmpty()) {
+            try {
+                String correctionPrompt = buildExerciseDraftCorrectionPrompt(
+                        userPrompt,
+                        routedTools.exerciseDraftResult(),
+                        toolPlan.getExerciseDrafts()
+                );
+                GeminiAdminToolPlan correctedPlan = geminiApiClient.planAdminTools(correctionPrompt, geminiContents).orElse(null);
+                if (correctedPlan != null
+                        && correctedPlan.getExerciseDrafts() != null
+                        && !correctedPlan.getExerciseDrafts().isEmpty()) {
+                    routedTools = adminToolRouter.routeAndExecuteForChat(
+                            userPrompt,
+                            routedRequest,
+                            AdminAiIntent.EXERCISE_DRAFT_CREATION,
+                            effectiveRange,
+                            request.getStartDate(),
+                            request.getEndDate(),
+                            detectedSkill,
+                            correctedPlan
+                    );
+                }
+            } catch (Exception ex) {
+                log.warn("Corrective AI exercise regeneration failed: {}", ex.getMessage());
+            }
+        }
+
         String baseSystemPrompt = contextService.buildAdminSystemPrompt(context);
         String fullSystemPrompt = baseSystemPrompt + "\n" + routedTools.sanitizedToolContextForPrompt();
 
@@ -180,9 +216,17 @@ public class AdminAIService {
         }
 
         AdminAiIntent intent = resolveIntentAfterTools(userPrompt, geminiOutput, toolPlan, routedRequest, routedTools);
-        if (geminiOutput != null && geminiOutput.getTargetSkill() != null && !geminiOutput.getTargetSkill().isBlank()) {
+        boolean hasPromptCategoryOrList = detectedCategory != null
+                || !exerciseDraftValidationService.extractRequestedExercises(userPrompt).isEmpty();
+        if (!hasPromptCategoryOrList
+                && geminiOutput != null
+                && geminiOutput.getTargetSkill() != null
+                && !geminiOutput.getTargetSkill().isBlank()) {
             detectedSkill = geminiOutput.getTargetSkill().trim();
         }
+        String recommendationFilter = detectedSkill != null
+                ? detectedSkill
+                : (detectedCategory != null ? detectedCategory.name() : null);
 
         List<AdminRecommendationResponse> generatedRecommendations = new ArrayList<>();
         boolean skipGlobalRecs = isGettingStartedOrCampaignIntent(intent)
@@ -190,12 +234,12 @@ public class AdminAIService {
                 || intent == AdminAiIntent.EXERCISE_DRAFT_CREATION;
         boolean wantsGlobalRecs = !skipGlobalRecs && ((geminiOutput != null && Boolean.TRUE.equals(geminiOutput.getGenerateRecommendations()))
                 || (userPrompt.toLowerCase().contains("recommend")
-                && !userPrompt.toLowerCase().contains("what exercises")
+                && !userPrompt.toLowerCase().contains("exercise")
                 && !userPrompt.toLowerCase().contains("workout program")));
 
         if (!skipGlobalRecs && (intent == AdminAiIntent.EXERCISE_RECOMMENDATION
                 || (geminiOutput != null && Boolean.TRUE.equals(geminiOutput.getGenerateExerciseRecommendations())))) {
-            generatedRecommendations.addAll(createExerciseRecommendations(admin, conversation, detectedSkill, detectedLevel));
+            generatedRecommendations.addAll(createExerciseRecommendations(admin, conversation, recommendationFilter, detectedLevel));
         } else if (!skipGlobalRecs && (intent == AdminAiIntent.WORKOUT_PROGRAM_RECOMMENDATION
                 || (geminiOutput != null && Boolean.TRUE.equals(geminiOutput.getGenerateWorkoutProgram())))) {
             String levelStr = detectedLevel != null ? detectedLevel.name() : (geminiOutput != null ? geminiOutput.getTargetLevel() : null);
@@ -213,13 +257,14 @@ public class AdminAIService {
         boolean requireDeterministicReply = routedTools.pendingConfirmation() != null
                 || routedTools.proToolResult() != null
                 || routedTools.exerciseDraftResult() != null
+                || intent == AdminAiIntent.EXERCISE_RECOMMENDATION
                 || (geminiOutput != null && claimsUnsubstantiatedExerciseCreation(geminiOutput.getReply(), routedTools));
         String replyContent = (!requireDeterministicReply
                 && geminiOutput != null
                 && geminiOutput.getReply() != null
                 && !geminiOutput.getReply().isBlank())
                 ? geminiOutput.getReply()
-                : buildDataGroundedReply(intent, userPrompt, detectedSkill, context, generatedRecommendations, routedTools);
+                : buildDataGroundedReply(intent, userPrompt, recommendationFilter, context, generatedRecommendations, routedTools);
 
         List<String> followUps = (geminiOutput != null && geminiOutput.getSuggestedFollowUps() != null && !geminiOutput.getSuggestedFollowUps().isEmpty())
                 ? geminiOutput.getSuggestedFollowUps()
@@ -784,9 +829,22 @@ public class AdminAIService {
                 - grantPro (prepare a confirmation request before granting unlimited admin PRO access to target_user_identifier [email, username, or user ID])
                 - revokePro (prepare a confirmation request before revoking admin-granted PRO access from target_user_identifier while preserving paid subscriptions)
                 - checkProStatus (inspect a user's current effective tier, paid subscription, and admin-granted PRO status)
-                - create_exercise_drafts (persist new AI-recommended exercises directly in the exercises catalog with DRAFT status and AI_RECOMMENDED origin when admin asks to add/create exercises)
+                - create_exercise_drafts (persist new AI-recommended exercises directly in the exercises catalog with DRAFT status and AI_RECOMMENDED origin when admin asks to add/create exercises; MUST set exercise_category matching the latest user prompt and populate exercise_drafts with the EXACT requested exercise names, categories, difficulties, descriptions, instructions, target_muscles, and equipment. NEVER substitute unrelated skills like Front Lever or reuse stale exercises/skill_keyword from earlier turns)
                 Never fabricate data. Never request raw user passwords or private message text.
                 """;
+    }
+
+    private String buildExerciseDraftCorrectionPrompt(
+            String userPrompt,
+            ExerciseDraftBatchResultResponse failedResult,
+            List<ExerciseDraftCandidateDto> rejectedDrafts
+    ) {
+        return buildToolPlannerSystemPrompt() + "\n\n"
+                + "CORRECTION REQUIRED — YOUR PREVIOUS EXERCISE DRAFTS WERE REJECTED BEFORE PERSISTENCE:\n"
+                + "- Latest user request: " + userPrompt + "\n"
+                + "- Validation failure reason: " + failedResult.getErrorMessage() + "\n"
+                + "- Rejected names: " + rejectedDrafts.stream().map(ExerciseDraftCandidateDto::getName).toList() + "\n"
+                + "Regenerate create_exercise_drafts using ONLY the exact requested exercise names, categories, and difficulty levels.\n";
     }
 
     private AdminAiIntent resolveIntent(
@@ -832,7 +890,9 @@ public class AdminAIService {
                 || lower.contains("missing exercise")
                 || lower.contains("missing progression")
                 || lower.contains("progression")
-                || (detectSkillFromPrompt(userPrompt) != null && (lower.contains("exercise") || lower.contains("library") || lower.contains("add")))) {
+                || ((lower.contains("recommend") || lower.contains("suggest")) && lower.contains("exercise"))
+                || ((detectSkillFromPrompt(userPrompt) != null || ExerciseDraftValidationService.detectCategoryFromText(userPrompt) != null)
+                        && (lower.contains("exercise") || lower.contains("library") || lower.contains("add")))) {
             return AdminAiIntent.EXERCISE_RECOMMENDATION;
         }
         if (lower.contains("workout program")
@@ -1533,8 +1593,8 @@ public class AdminAIService {
             sb.append("### ❌ Failed to Save Exercise Drafts\n\n")
                     .append(res.getErrorMessage() != null
                             ? res.getErrorMessage()
-                            : "Persistence failed before exercises could be saved.")
-                    .append("\n");
+                            : "Validation or persistence failed before exercises could be saved.")
+                    .append("\n\nNo exercises were added to the database.\n");
             return;
         }
         if (res.getCreatedExercises() != null && !res.getCreatedExercises().isEmpty()) {
@@ -1547,6 +1607,15 @@ public class AdminAIService {
                         .append(ex.category()).append(" · ").append(ex.difficulty())
                         .append(" · Status: `").append(ex.status()).append("` · Origin: `")
                         .append(ex.origin()).append("`\n");
+            }
+            if (res.getExistingDrafts() != null && !res.getExistingDrafts().isEmpty()) {
+                sb.append("\nAlready existing catalog entry/entries preserved without duplicates:\n");
+                for (AdminExerciseResponse existing : res.getExistingDrafts()) {
+                    sb.append("- **").append(existing.name()).append("** (`").append(existing.code())
+                            .append("`, ID #").append(existing.id()).append(") — ")
+                            .append(existing.category()).append(" · ").append(existing.difficulty())
+                            .append(" · Status: `").append(existing.status()).append("`\n");
+                }
             }
             sb.append("\nAll newly created exercises are saved as **Draft** in **Admin > Exercises > Draft** ")
                     .append("and remain hidden from regular users until published by an Admin.\n");
@@ -1581,7 +1650,7 @@ public class AdminAIService {
             return false;
         }
         String lower = reply.toLowerCase(Locale.US);
-        return lower.matches("(?s).*\\b(i've added|i have added|added \\d+ .*exercise|saved .* to the draft|created \\d+ .*exercise).*");
+        return lower.matches("(?s).*\\b(i've added|i have added|added \\d+ .*exercise|added the .*exercise|added these .*exercise|saved .* to (?:the )?draft|created \\d+ .*exercise).*");
     }
 
     private String generateConversationTitle(String userPrompt, AdminAiIntent intent) {

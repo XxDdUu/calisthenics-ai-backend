@@ -14,5 +14,7 @@ public interface AdminAiMessageRepository extends JpaRepository<AdminAiMessage, 
 
     List<AdminAiMessage> findTop20ByConversationIdOrderByCreatedAtDesc(Long conversationId);
 
+    List<AdminAiMessage> findTop20ByConversationIdOrderByIdDesc(Long conversationId);
+
     Optional<AdminAiMessage> findTopByConversationIdOrderByCreatedAtDesc(Long conversationId);
 }

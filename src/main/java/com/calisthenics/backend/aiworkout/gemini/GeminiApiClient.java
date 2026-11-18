@@ -541,7 +541,7 @@ public class GeminiApiClient {
         ));
         props.put("target_user_id", Map.of("type", "INTEGER", "description", "Target numeric user ID if inspecting a specific user"));
         props.put("target_user_query", Map.of("type", "STRING", "description", "Target user full name or search query if inspecting a specific user"));
-        props.put("skill_keyword", Map.of("type", "STRING", "description", "Skill keyword such as Planche, Front Lever, Handstand, Muscle-up"));
+        props.put("skill_keyword", Map.of("type", "STRING", "description", "Current message's calisthenics skill keyword only if explicitly requested in the latest turn (do not reuse stale skills from prior turns)"));
         props.put("experience_level", Map.of("type", "STRING", "description", "Experience level filter such as BEGINNER, INTERMEDIATE, ADVANCED, ELITE"));
         props.put("fitness_goal", Map.of("type", "STRING", "description", "Fitness goal filter keyword"));
         props.put("activity_status", Map.of("type", "STRING", "enum", List.of("ACTIVE", "AT_RISK", "INACTIVE"), "description", "User workout activity status filter"));
@@ -573,6 +573,35 @@ public class GeminiApiClient {
         props.put("pro_action_reason", Map.of(
                 "type", "STRING",
                 "description", "Optional admin reason for granting or revoking PRO entitlement"
+        ));
+        props.put("exercise_category", Map.of(
+                "type", "STRING",
+                "enum", List.of("PUSH", "PULL", "CORE", "LEGS", "SKILL", "ISOMETRIC"),
+                "description", "Requested exercise category from the latest admin prompt when creating or recommending exercises"
+        ));
+        props.put("requested_count", Map.of(
+                "type", "INTEGER",
+                "description", "Number of exercises explicitly requested in the latest admin prompt"
+        ));
+
+        Map<String, Object> draftItemProps = new LinkedHashMap<>();
+        draftItemProps.put("name", Map.of("type", "STRING", "description", "Exact requested or recommended exercise name"));
+        draftItemProps.put("code", Map.of("type", "STRING", "description", "Uppercase underscore identifier slug, max 50 chars"));
+        draftItemProps.put("category", Map.of("type", "STRING", "enum", List.of("PUSH", "PULL", "CORE", "LEGS", "SKILL", "ISOMETRIC"), "description", "Strict movement category matching the user request"));
+        draftItemProps.put("difficulty", Map.of("type", "STRING", "enum", List.of("BEGINNER", "INTERMEDIATE", "ADVANCED", "ELITE"), "description", "Difficulty level matching the user request"));
+        draftItemProps.put("description", Map.of("type", "STRING", "description", "Concise technical summary of the exercise"));
+        draftItemProps.put("instructions", Map.of("type", "STRING", "description", "Clear step-by-step execution instructions"));
+        draftItemProps.put("target_muscles", Map.of("type", "STRING", "description", "Primary and secondary target muscle groups"));
+        draftItemProps.put("equipment", Map.of("type", "STRING", "description", "Required equipment such as Floor, Box, Bench, Pull-Up Bar, Partner"));
+        draftItemProps.put("target_skill", Map.of("type", "STRING", "description", "Associated training focus or skill"));
+        Map<String, Object> draftItemSchema = new LinkedHashMap<>();
+        draftItemSchema.put("type", "OBJECT");
+        draftItemSchema.put("properties", draftItemProps);
+        draftItemSchema.put("required", List.of("name", "code", "category", "difficulty", "description", "instructions", "target_muscles", "equipment"));
+        props.put("exercise_drafts", Map.of(
+                "type", "ARRAY",
+                "items", draftItemSchema,
+                "description", "Exact exercise draft specifications matching the latest user prompt when create_exercise_drafts is invoked"
         ));
 
         Map<String, Object> root = new LinkedHashMap<>();

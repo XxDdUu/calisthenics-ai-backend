@@ -82,4 +82,13 @@ public class GeminiAdminToolPlan {
 
     @JsonProperty("pro_action_reason")
     private String proActionReason;
+
+    @JsonProperty("exercise_category")
+    private String exerciseCategory;
+
+    @JsonProperty("requested_count")
+    private Integer requestedCount;
+
+    @JsonProperty("exercise_drafts")
+    private List<ExerciseDraftCandidateDto> exerciseDrafts;
 }

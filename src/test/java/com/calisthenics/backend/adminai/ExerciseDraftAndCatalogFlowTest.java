@@ -2,6 +2,9 @@ package com.calisthenics.backend.adminai;
 
 import com.calisthenics.backend.adminai.dto.AdminChatRequest;
 import com.calisthenics.backend.adminai.dto.AdminChatResponse;
+import com.calisthenics.backend.adminai.dto.data.AdminToolExecuteRequest;
+import com.calisthenics.backend.adminai.dto.data.ExerciseDraftCandidateDto;
+import com.calisthenics.backend.adminai.dto.data.GeminiAdminToolPlan;
 import com.calisthenics.backend.aiworkout.gemini.GeminiApiClient;
 import com.calisthenics.backend.exercise.DifficultyLevel;
 import com.calisthenics.backend.exercise.Exercise;
@@ -348,5 +351,281 @@ class ExerciseDraftAndCatalogFlowTest {
         AdminChatResponse chatResp = objectMapper.readValue(res.getResponse().getContentAsString(), AdminChatResponse.class);
         assertThat(chatResp.getAssistantMessage().getContent()).contains("Failed to Save Exercise Drafts");
         assertThat(chatResp.getAssistantMessage().getContent()).doesNotContain("Added 3 Exercise");
+    }
+
+    @Test
+    @DisplayName("Explicit 3 leg exercises create exact DB records even if prior conversation discussed Front Lever or stale skill_keyword is returned")
+    void explicitThreeLegExercisesCreateExactRecordsIgnoringStaleFrontLeverContext() throws Exception {
+        // Turn 1: Prior Front Lever recommendation turn in the SAME conversation
+        AdminChatRequest frontLeverTurn = AdminChatRequest.builder()
+                .message("What exercises should we add for Front Lever?")
+                .build();
+        MvcResult turn1Res = mockMvc.perform(post("/api/v1/admin/ai/chat")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(frontLeverTurn)))
+                .andExpect(status().isOk())
+                .andReturn();
+        Long conversationId = objectMapper.readValue(
+                turn1Res.getResponse().getContentAsString(), AdminChatResponse.class).getConversationId();
+
+        // Simulate stale Gemini tool planner returning skill_keyword="Front Lever" on Turn 2 (without mismatched drafts)
+        GeminiAdminToolPlan staleSkillPlan = new GeminiAdminToolPlan();
+        staleSkillPlan.setIntent("EXERCISE_DRAFT_CREATION");
+        staleSkillPlan.setTools(List.of("create_exercise_drafts"));
+        staleSkillPlan.setSkillKeyword("Front Lever");
+        staleSkillPlan.setExperienceLevel("BEGINNER");
+        when(geminiApiClient.planAdminTools(anyString(), anyList())).thenReturn(Optional.of(staleSkillPlan));
+
+        // Turn 2: Explicit request matching exact bug reproduction prompt
+        String explicitLegPrompt = """
+                Give me more recommended exercises of legs. Add these 3 exercises:
+                1. Box Pistol Squat — LEGS — INTERMEDIATE
+                2. Nordic Hamstring Curl (Negative) — LEGS — ADVANCED
+                3. Cossack Squat — LEGS — INTERMEDIATE""";
+
+        MvcResult turn2Res = mockMvc.perform(post("/api/v1/admin/ai/chat")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(AdminChatRequest.builder()
+                                .conversationId(conversationId)
+                                .message(explicitLegPrompt)
+                                .build())))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.intent").value("EXERCISE_DRAFT_CREATION"))
+                .andExpect(jsonPath("$.exerciseDraftResult.success").value(true))
+                .andExpect(jsonPath("$.createdExercises.length()").value(3))
+                .andReturn();
+
+        AdminChatResponse resp = objectMapper.readValue(turn2Res.getResponse().getContentAsString(), AdminChatResponse.class);
+        assertThat(resp.getCreatedExercises()).extracting(e -> e.name()).containsExactly(
+                "Box Pistol Squat",
+                "Nordic Hamstring Curl (Negative)",
+                "Cossack Squat"
+        );
+        assertThat(resp.getCreatedExercises()).allSatisfy(ex -> {
+            assertThat(ex.id()).isNotNull();
+            assertThat(ex.category()).isEqualTo(ExerciseCategory.LEGS);
+            assertThat(ex.status()).isEqualTo(ExerciseStatus.DRAFT);
+            assertThat(ex.origin()).isEqualTo(ExerciseOrigin.AI_RECOMMENDED);
+            assertThat(ex.active()).isFalse();
+            assertThat(ex.description()).isNotBlank();
+            assertThat(ex.instructions()).isNotBlank();
+            assertThat(ex.targetMuscles()).isNotBlank();
+            assertThat(ex.equipment()).isNotBlank();
+        });
+        assertThat(resp.getCreatedExercises().get(0).difficulty()).isEqualTo(DifficultyLevel.INTERMEDIATE);
+        assertThat(resp.getCreatedExercises().get(1).difficulty()).isEqualTo(DifficultyLevel.ADVANCED);
+        assertThat(resp.getCreatedExercises().get(2).difficulty()).isEqualTo(DifficultyLevel.INTERMEDIATE);
+
+        // Verify actual DB state matches exact requested names, categories, difficulties, statuses, and NEVER Front Lever
+        List<Exercise> allExercises = exerciseRepository.findAll();
+        assertThat(allExercises).hasSize(4); // Push-Up + exact 3 leg drafts
+        assertThat(allExercises).noneMatch(e ->
+                e.getName().contains("Front Lever") || e.getName().contains("German Hang"));
+
+        // Verify AI response cites actual persisted names, DB IDs, categories, difficulties, and DRAFT status
+        String reply = resp.getAssistantMessage().getContent();
+        assertThat(reply)
+                .contains("Box Pistol Squat")
+                .contains("Nordic Hamstring Curl (Negative)")
+                .contains("Cossack Squat")
+                .contains("ID #" + resp.getCreatedExercises().get(0).id())
+                .contains("ID #" + resp.getCreatedExercises().get(1).id())
+                .contains("ID #" + resp.getCreatedExercises().get(2).id())
+                .contains("LEGS")
+                .contains("ADVANCED")
+                .contains("INTERMEDIATE")
+                .contains("DRAFT");
+
+        // Verify Admin > Exercises > Draft lists all 3, and regular user catalog still hides them
+        mockMvc.perform(get("/api/v1/admin/exercises")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .param("status", "DRAFT")
+                        .param("origin", "AI_RECOMMENDED"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.content.length()").value(3));
+        mockMvc.perform(get("/api/v1/exercises")
+                        .header("Authorization", "Bearer " + userToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(1));
+    }
+
+    @Test
+    @DisplayName("Validation rejects AI Front Lever substitution and creates ZERO wrong records; corrective regeneration succeeds with exact leg exercises")
+    void validationBlocksFrontLeverSubstitutionAndSupportsValidatedToolArguments() throws Exception {
+        String explicitLegPrompt = """
+                Give me more recommended exercises of legs. Add these 3 exercises:
+                1. Box Pistol Squat — LEGS — INTERMEDIATE
+                2. Nordic Hamstring Curl (Negative) — LEGS — ADVANCED
+                3. Cossack Squat — LEGS — INTERMEDIATE""";
+
+        GeminiAdminToolPlan badFrontLeverPlan = new GeminiAdminToolPlan();
+        badFrontLeverPlan.setIntent("EXERCISE_DRAFT_CREATION");
+        badFrontLeverPlan.setTools(List.of("create_exercise_drafts"));
+        badFrontLeverPlan.setExerciseCategory("SKILL");
+        badFrontLeverPlan.setExerciseDrafts(List.of(
+                ExerciseDraftCandidateDto.builder()
+                        .name("Straddle Front Lever").code("STRADDLE_FRONT_LEVER")
+                        .category("SKILL").difficulty("ADVANCED")
+                        .description("Horizontal straddle hold").instructions("Hold flat")
+                        .targetMuscles("Lats").equipment("Pull-Up Bar").build(),
+                ExerciseDraftCandidateDto.builder()
+                        .name("Front Lever Raises").code("FRONT_LEVER_RAISES")
+                        .category("PULL").difficulty("INTERMEDIATE")
+                        .description("Straight arm pulls").instructions("Pull horizontal")
+                        .targetMuscles("Lats").equipment("Pull-Up Bar").build(),
+                ExerciseDraftCandidateDto.builder()
+                        .name("German Hang").code("GERMAN_HANG")
+                        .category("ISOMETRIC").difficulty("BEGINNER")
+                        .description("Shoulder extension hang").instructions("Rotate back")
+                        .targetMuscles("Anterior Delts").equipment("Rings").build()
+        ));
+
+        // Scenario A: Even after corrective retry, AI keeps returning Front Lever -> MUST reject cleanly and insert ZERO rows!
+        when(geminiApiClient.planAdminTools(anyString(), anyList())).thenReturn(Optional.of(badFrontLeverPlan));
+
+        MvcResult failRes = mockMvc.perform(post("/api/v1/admin/ai/chat")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(AdminChatRequest.builder()
+                                .message(explicitLegPrompt)
+                                .build())))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.exerciseDraftResult.success").value(false))
+                .andExpect(jsonPath("$.exerciseDraftResult.validationFailed").value(true))
+                .andExpect(jsonPath("$.createdExercises.length()").value(0))
+                .andReturn();
+
+        AdminChatResponse failBody = objectMapper.readValue(failRes.getResponse().getContentAsString(), AdminChatResponse.class);
+        assertThat(failBody.getAssistantMessage().getContent())
+                .contains("Failed to Save Exercise Drafts")
+                .contains("Validation failed")
+                .doesNotContain("Added 3 Exercise");
+        assertThat(exerciseRepository.findAll()).hasSize(1); // Only initial Push-Up; ZERO Front Lever rows created!
+
+        // Direct tool execution with mismatched Front Lever arguments also rejected cleanly (422, zero DB writes)
+        AdminToolExecuteRequest badToolReq = AdminToolExecuteRequest.builder()
+                .toolName("create_exercise_drafts")
+                .instruction(explicitLegPrompt)
+                .exerciseCategory(ExerciseCategory.LEGS)
+                .requestedCount(3)
+                .exerciseDrafts(badFrontLeverPlan.getExerciseDrafts())
+                .build();
+        mockMvc.perform(post("/api/v1/admin/ai/tools/execute")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(badToolReq)))
+                .andExpect(status().isUnprocessableEntity());
+        assertThat(exerciseRepository.findAll()).hasSize(1);
+
+        // Scenario B: First AI plan substitutes Front Lever; corrective regeneration returns exact requested leg drafts
+        GeminiAdminToolPlan validLegPlan = new GeminiAdminToolPlan();
+        validLegPlan.setIntent("EXERCISE_DRAFT_CREATION");
+        validLegPlan.setTools(List.of("create_exercise_drafts"));
+        validLegPlan.setExerciseCategory("LEGS");
+        validLegPlan.setRequestedCount(3);
+        validLegPlan.setExerciseDrafts(List.of(
+                ExerciseDraftCandidateDto.builder()
+                        .name("Box Pistol Squat").code("BOX_PISTOL_SQUAT")
+                        .category("LEGS").difficulty("INTERMEDIATE")
+                        .description("Box-assisted pistol squat").instructions("Touch box gently and stand")
+                        .targetMuscles("Quadriceps, Glutes").equipment("Plyo Box").build(),
+                ExerciseDraftCandidateDto.builder()
+                        .name("Nordic Hamstring Curl (Negative)").code("NORDIC_HAMSTRING_CURL_NEGATIVE")
+                        .category("LEGS").difficulty("ADVANCED")
+                        .description("Slow eccentric Nordic lowering").instructions("Lower slowly for 4-5s")
+                        .targetMuscles("Hamstrings, Glutes").equipment("Anchored Strap").build(),
+                ExerciseDraftCandidateDto.builder()
+                        .name("Cossack Squat").code("COSSACK_SQUAT")
+                        .category("LEGS").difficulty("INTERMEDIATE")
+                        .description("Lateral deep single-leg squat").instructions("Shift weight side to side")
+                        .targetMuscles("Quadriceps, Adductors").equipment("Floor").build()
+        ));
+
+        when(geminiApiClient.planAdminTools(anyString(), anyList()))
+                .thenReturn(Optional.of(badFrontLeverPlan))
+                .thenReturn(Optional.of(validLegPlan));
+
+        MvcResult recoveredRes = mockMvc.perform(post("/api/v1/admin/ai/chat")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(AdminChatRequest.builder()
+                                .message(explicitLegPrompt)
+                                .build())))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.exerciseDraftResult.success").value(true))
+                .andExpect(jsonPath("$.createdExercises.length()").value(3))
+                .andReturn();
+
+        AdminChatResponse recovered = objectMapper.readValue(
+                recoveredRes.getResponse().getContentAsString(), AdminChatResponse.class);
+        assertThat(recovered.getCreatedExercises()).extracting(e -> e.name()).containsExactly(
+                "Box Pistol Squat", "Nordic Hamstring Curl (Negative)", "Cossack Squat"
+        );
+        // Verify persisted DB record fields match validated tool arguments cleanly
+        Exercise savedNordic = exerciseRepository.findByNameIgnoreCase("Nordic Hamstring Curl (Negative)").orElseThrow();
+        assertThat(savedNordic.getCategory()).isEqualTo(ExerciseCategory.LEGS);
+        assertThat(savedNordic.getDifficulty()).isEqualTo(DifficultyLevel.ADVANCED);
+        assertThat(savedNordic.getDescription()).isEqualTo("Slow eccentric Nordic lowering");
+        assertThat(savedNordic.getEquipment()).isEqualTo("Anchored Strap");
+        assertThat(savedNordic.getStatus()).isEqualTo(ExerciseStatus.DRAFT);
+        assertThat(savedNordic.getOrigin()).isEqualTo(ExerciseOrigin.AI_RECOMMENDED);
+    }
+
+    @Test
+    @DisplayName("Recommendations + follow-ups: category recommendations work and topic-switching follow-ups do not reuse stale exercise lists")
+    void categoryRecommendationsAndFollowUpIsolation() throws Exception {
+        // 1. Conversational leg recommendation query returns LEGS recommendations without creating exercises yet
+        MvcResult recRes = mockMvc.perform(post("/api/v1/admin/ai/chat")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(AdminChatRequest.builder()
+                                .message("Give me more recommended exercises of legs")
+                                .build())))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.intent").value("EXERCISE_RECOMMENDATION"))
+                .andReturn();
+
+        AdminChatResponse recBody = objectMapper.readValue(recRes.getResponse().getContentAsString(), AdminChatResponse.class);
+        assertThat(recBody.getRecommendations()).isNotEmpty();
+        assertThat(recBody.getRecommendations()).allSatisfy(r ->
+                assertThat(r.getExerciseDetails().getCategory()).isEqualTo(ExerciseCategory.LEGS));
+        assertThat(exerciseRepository.findAll()).hasSize(1);
+
+        // 2. Switching topic in the same conversation to CORE must add CORE exercises, NEVER stale LEGS exercises
+        MvcResult coreRes = mockMvc.perform(post("/api/v1/admin/ai/chat")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(AdminChatRequest.builder()
+                                .conversationId(recBody.getConversationId())
+                                .message("Add 2 core exercises to draft")
+                                .build())))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.intent").value("EXERCISE_DRAFT_CREATION"))
+                .andExpect(jsonPath("$.createdExercises.length()").value(2))
+                .andReturn();
+
+        AdminChatResponse coreBody = objectMapper.readValue(coreRes.getResponse().getContentAsString(), AdminChatResponse.class);
+        assertThat(coreBody.getCreatedExercises()).allSatisfy(ex ->
+                assertThat(ex.category()).isEqualTo(ExerciseCategory.CORE));
+
+        // 3. Ambiguous "Add these 3 exercises" AFTER a non-recommendation turn rejects cleanly instead of pulling stale Front Lever exercises
+        MvcResult ambiguousRes = mockMvc.perform(post("/api/v1/admin/ai/chat")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(AdminChatRequest.builder()
+                                .conversationId(recBody.getConversationId())
+                                .message("Add these 3 exercises")
+                                .build())))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.exerciseDraftResult.success").value(false))
+                .andExpect(jsonPath("$.createdExercises.length()").value(0))
+                .andReturn();
+
+        AdminChatResponse ambiguousBody = objectMapper.readValue(
+                ambiguousRes.getResponse().getContentAsString(), AdminChatResponse.class);
+        assertThat(ambiguousBody.getAssistantMessage().getContent()).contains("Failed to Save Exercise Drafts");
+        assertThat(exerciseRepository.findAll()).noneMatch(e -> e.getName().contains("Front Lever"));
     }
 }
