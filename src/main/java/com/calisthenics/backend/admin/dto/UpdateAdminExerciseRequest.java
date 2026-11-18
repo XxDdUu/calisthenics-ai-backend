@@ -4,6 +4,7 @@ import com.calisthenics.backend.exercise.DifficultyLevel;
 import com.calisthenics.backend.exercise.ExerciseCategory;
 import com.calisthenics.backend.exercise.ExerciseOrigin;
 import com.calisthenics.backend.exercise.ExerciseStatus;
+import com.calisthenics.backend.exercise.ExerciseTrainingType;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
@@ -49,7 +50,27 @@ public record UpdateAdminExerciseRequest(
 
         ExerciseStatus status,
 
-        ExerciseOrigin origin
+        ExerciseOrigin origin,
+
+        ExerciseTrainingType trainingType,
+
+        String secondaryMuscles,
+
+        String exerciseType,
+
+        Integer recommendedSets,
+
+        String recommendedReps,
+
+        Integer recommendedRestSeconds,
+
+        String commonMistakes,
+
+        String safetyConsiderations,
+
+        String progressionNotes,
+
+        String aliases
 ) {
     public UpdateAdminExerciseRequest(
             String name,
@@ -66,21 +87,9 @@ public record UpdateAdminExerciseRequest(
             List<ExerciseMediaItemRequest> mediaItems
     ) {
         this(
-                name,
-                code,
-                category,
-                difficulty,
-                description,
-                targetMuscles,
-                instructions,
-                imageUrl,
-                videoUrl,
-                equipment,
-                active,
-                mediaItems,
-                null,
-                null,
-                null
+                name, code, category, difficulty, description, targetMuscles, instructions,
+                imageUrl, videoUrl, equipment, active, mediaItems, null, null, null,
+                null, null, null, null, null, null, null, null, null, null
         );
     }
 
@@ -100,21 +109,33 @@ public record UpdateAdminExerciseRequest(
             Boolean replaceMediaItems
     ) {
         this(
-                name,
-                code,
-                category,
-                difficulty,
-                description,
-                targetMuscles,
-                instructions,
-                imageUrl,
-                videoUrl,
-                equipment,
-                active,
-                mediaItems,
-                replaceMediaItems,
-                null,
-                null
+                name, code, category, difficulty, description, targetMuscles, instructions,
+                imageUrl, videoUrl, equipment, active, mediaItems, replaceMediaItems, null, null,
+                null, null, null, null, null, null, null, null, null, null
+        );
+    }
+
+    public UpdateAdminExerciseRequest(
+            String name,
+            String code,
+            ExerciseCategory category,
+            DifficultyLevel difficulty,
+            String description,
+            String targetMuscles,
+            String instructions,
+            String imageUrl,
+            String videoUrl,
+            String equipment,
+            Boolean active,
+            List<ExerciseMediaItemRequest> mediaItems,
+            Boolean replaceMediaItems,
+            ExerciseStatus status,
+            ExerciseOrigin origin
+    ) {
+        this(
+                name, code, category, difficulty, description, targetMuscles, instructions,
+                imageUrl, videoUrl, equipment, active, mediaItems, replaceMediaItems, status, origin,
+                null, null, null, null, null, null, null, null, null, null
         );
     }
 }

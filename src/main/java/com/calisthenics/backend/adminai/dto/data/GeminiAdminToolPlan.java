@@ -86,6 +86,15 @@ public class GeminiAdminToolPlan {
     @JsonProperty("exercise_category")
     private String exerciseCategory;
 
+    @JsonProperty("training_type")
+    private String trainingType;
+
+    @JsonProperty("bulk_categories")
+    private List<String> bulkCategories;
+
+    @JsonProperty("bulk_focus")
+    private String bulkFocus;
+
     @JsonProperty("requested_count")
     private Integer requestedCount;
 

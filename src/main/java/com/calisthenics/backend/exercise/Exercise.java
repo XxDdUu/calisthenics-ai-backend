@@ -66,6 +66,38 @@ public class Exercise {
     @Builder.Default
     private ExerciseOrigin origin = ExerciseOrigin.MANUAL;
 
+    @Enumerated(EnumType.STRING)
+    @Column(name = "training_type", nullable = false, length = 32)
+    @Builder.Default
+    private ExerciseTrainingType trainingType = ExerciseTrainingType.CALISTHENICS;
+
+    @Column(name = "secondary_muscles", columnDefinition = "TEXT")
+    private String secondaryMuscles;
+
+    @Column(name = "exercise_type", length = 32)
+    private String exerciseType;
+
+    @Column(name = "recommended_sets")
+    private Integer recommendedSets;
+
+    @Column(name = "recommended_reps", length = 64)
+    private String recommendedReps;
+
+    @Column(name = "recommended_rest_seconds")
+    private Integer recommendedRestSeconds;
+
+    @Column(name = "common_mistakes", columnDefinition = "TEXT")
+    private String commonMistakes;
+
+    @Column(name = "safety_considerations", columnDefinition = "TEXT")
+    private String safetyConsiderations;
+
+    @Column(name = "progression_notes", columnDefinition = "TEXT")
+    private String progressionNotes;
+
+    @Column(name = "aliases", columnDefinition = "TEXT")
+    private String aliases;
+
     @OneToMany(mappedBy = "exercise", cascade = CascadeType.ALL, orphanRemoval = true)
     @OrderBy("displayOrder ASC, id ASC")
     @Builder.Default
@@ -81,6 +113,10 @@ public class Exercise {
 
     public ExerciseOrigin getOrigin() {
         return origin != null ? origin : ExerciseOrigin.MANUAL;
+    }
+
+    public ExerciseTrainingType getTrainingType() {
+        return trainingType != null ? trainingType : ExerciseTrainingType.CALISTHENICS;
     }
 
     public void setActive(boolean active) {
@@ -100,6 +136,9 @@ public class Exercise {
     protected void syncLifecycleFields() {
         if (origin == null) {
             origin = ExerciseOrigin.MANUAL;
+        }
+        if (trainingType == null) {
+            trainingType = ExerciseTrainingType.CALISTHENICS;
         }
         if (status == null) {
             status = active ? ExerciseStatus.PUBLISHED : ExerciseStatus.DRAFT;

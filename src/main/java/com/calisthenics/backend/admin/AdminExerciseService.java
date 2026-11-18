@@ -18,6 +18,7 @@ import com.calisthenics.backend.exercise.ExerciseCategory;
 import com.calisthenics.backend.exercise.ExerciseOrigin;
 import com.calisthenics.backend.exercise.ExerciseRepository;
 import com.calisthenics.backend.exercise.ExerciseStatus;
+import com.calisthenics.backend.exercise.ExerciseTrainingType;
 import com.calisthenics.backend.workout.WorkoutSessionExerciseRepository;
 import com.calisthenics.backend.workoutplan.repository.WorkoutPlanExerciseRepository;
 import jakarta.persistence.criteria.Predicate;
@@ -78,9 +79,26 @@ public class AdminExerciseService {
             String sortBy,
             String sortDirection
     ) {
+        return getExercises(page, size, search, category, difficulty, active, status, origin, null, sortBy, sortDirection);
+    }
+
+    @Transactional(readOnly = true)
+    public AdminPageResponse<AdminExerciseResponse> getExercises(
+            int page,
+            int size,
+            String search,
+            ExerciseCategory category,
+            DifficultyLevel difficulty,
+            Boolean active,
+            ExerciseStatus status,
+            ExerciseOrigin origin,
+            ExerciseTrainingType trainingType,
+            String sortBy,
+            String sortDirection
+    ) {
         Sort sort = resolveSort(sortBy, sortDirection);
         Pageable pageable = PageRequest.of(Math.max(0, page), Math.min(MAX_PAGE_SIZE, Math.max(1, size)), sort);
-        Specification<Exercise> spec = exerciseSpecification(search, category, difficulty, active, status, origin);
+        Specification<Exercise> spec = exerciseSpecification(search, category, difficulty, active, status, origin, trainingType);
 
         Page<Exercise> exercisePage = exerciseRepository.findAll(spec, pageable);
 
@@ -141,6 +159,16 @@ public class AdminExerciseService {
                 .active(resolvedActive)
                 .status(resolvedStatus)
                 .origin(resolvedOrigin)
+                .trainingType(request.trainingType() != null ? request.trainingType() : ExerciseTrainingType.CALISTHENICS)
+                .secondaryMuscles(request.secondaryMuscles())
+                .exerciseType(request.exerciseType())
+                .recommendedSets(request.recommendedSets())
+                .recommendedReps(request.recommendedReps())
+                .recommendedRestSeconds(request.recommendedRestSeconds())
+                .commonMistakes(request.commonMistakes())
+                .safetyConsiderations(request.safetyConsiderations())
+                .progressionNotes(request.progressionNotes())
+                .aliases(request.aliases())
                 .build();
 
         normalizeMediaItems(exercise, request.imageUrl(), request.videoUrl(), request.mediaItems(), true);
@@ -191,6 +219,18 @@ public class AdminExerciseService {
         if (request.origin() != null) {
             exercise.setOrigin(request.origin());
         }
+        if (request.trainingType() != null) {
+            exercise.setTrainingType(request.trainingType());
+        }
+        if (request.secondaryMuscles() != null) exercise.setSecondaryMuscles(request.secondaryMuscles());
+        if (request.exerciseType() != null) exercise.setExerciseType(request.exerciseType());
+        if (request.recommendedSets() != null) exercise.setRecommendedSets(request.recommendedSets());
+        if (request.recommendedReps() != null) exercise.setRecommendedReps(request.recommendedReps());
+        if (request.recommendedRestSeconds() != null) exercise.setRecommendedRestSeconds(request.recommendedRestSeconds());
+        if (request.commonMistakes() != null) exercise.setCommonMistakes(request.commonMistakes());
+        if (request.safetyConsiderations() != null) exercise.setSafetyConsiderations(request.safetyConsiderations());
+        if (request.progressionNotes() != null) exercise.setProgressionNotes(request.progressionNotes());
+        if (request.aliases() != null) exercise.setAliases(request.aliases());
 
         Exercise updated = exerciseRepository.save(exercise);
         return mapToAdminResponse(updated);
@@ -284,7 +324,17 @@ public class AdminExerciseService {
                 planRefs,
                 sessionRefs,
                 canDelete,
-                ExerciseMediaMapper.toResponses(exercise)
+                ExerciseMediaMapper.toResponses(exercise),
+                exercise.getTrainingType(),
+                exercise.getSecondaryMuscles(),
+                exercise.getExerciseType(),
+                exercise.getRecommendedSets(),
+                exercise.getRecommendedReps(),
+                exercise.getRecommendedRestSeconds(),
+                exercise.getCommonMistakes(),
+                exercise.getSafetyConsiderations(),
+                exercise.getProgressionNotes(),
+                exercise.getAliases()
         );
     }
 
@@ -404,7 +454,8 @@ public class AdminExerciseService {
             DifficultyLevel difficulty,
             Boolean active,
             ExerciseStatus status,
-            ExerciseOrigin origin
+            ExerciseOrigin origin,
+            ExerciseTrainingType trainingType
     ) {
         return (root, query, cb) -> {
             List<Predicate> predicates = new ArrayList<>();
@@ -414,7 +465,8 @@ public class AdminExerciseService {
                 Predicate nameMatch = cb.like(cb.lower(root.get("name")), pattern);
                 Predicate codeMatch = cb.like(cb.lower(root.get("code")), pattern);
                 Predicate muscleMatch = cb.like(cb.lower(root.get("targetMuscles")), pattern);
-                predicates.add(cb.or(nameMatch, codeMatch, muscleMatch));
+                Predicate aliasMatch = cb.like(cb.lower(cb.coalesce(root.get("aliases"), "")), pattern);
+                predicates.add(cb.or(nameMatch, codeMatch, muscleMatch, aliasMatch));
             }
 
             if (category != null) {
@@ -435,6 +487,10 @@ public class AdminExerciseService {
 
             if (origin != null) {
                 predicates.add(cb.equal(root.get("origin"), origin));
+            }
+
+            if (trainingType != null) {
+                predicates.add(cb.equal(root.get("trainingType"), trainingType));
             }
 
             return cb.and(predicates.toArray(new Predicate[0]));

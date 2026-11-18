@@ -5,11 +5,13 @@ import com.calisthenics.backend.admin.dto.AdminExerciseResponse;
 import com.calisthenics.backend.adminai.dto.*;
 import com.calisthenics.backend.adminai.dto.data.*;
 import com.calisthenics.backend.adminai.entity.AdminAiAuditLog;
+import com.calisthenics.backend.adminai.entity.AdminAiChatIdempotency;
 import com.calisthenics.backend.adminai.entity.AdminAiConversation;
 import com.calisthenics.backend.adminai.entity.AdminAiMessage;
 import com.calisthenics.backend.adminai.entity.AdminAiPendingAction;
 import com.calisthenics.backend.adminai.entity.AdminAiRecommendation;
 import com.calisthenics.backend.adminai.repository.AdminAiAuditLogRepository;
+import com.calisthenics.backend.adminai.repository.AdminAiChatIdempotencyRepository;
 import com.calisthenics.backend.adminai.repository.AdminAiPendingActionRepository;
 import com.calisthenics.backend.adminai.repository.AdminAiRecommendationRepository;
 import com.calisthenics.backend.adminai.type.*;
@@ -29,13 +31,20 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.time.ZonedDateTime;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -53,22 +62,189 @@ public class AdminAIService {
     private final AdminAiRecommendationRepository recommendationRepository;
     private final AdminAiAuditLogRepository auditLogRepository;
     private final AdminAiPendingActionRepository pendingActionRepository;
+    private final AdminAiChatIdempotencyRepository idempotencyRepository;
     private final AdminToolRouter adminToolRouter;
     private final AdminGettingStartedToolService adminGettingStartedToolService;
     private final AdminProToolService adminProToolService;
     private final ExerciseDraftValidationService exerciseDraftValidationService;
+    private final BulkExerciseGenerationService bulkExerciseGenerationService;
     private final AdminPendingConfirmationSupport confirmationSupport;
     private final AdminAuthorizationService adminAuthorizationService;
     private final GeminiApiClient geminiApiClient;
     private final ObjectMapper objectMapper;
+    private final PlatformTransactionManager transactionManager;
 
-    @Transactional
+    private final ConcurrentHashMap<String, CompletableFuture<AdminChatResponse>> inFlightIdempotentChats =
+            new ConcurrentHashMap<>();
+
     public AdminChatResponse chat(Long adminUserId, AdminChatRequest request) {
         User admin = conversationService.requireAdminUser(adminUserId);
         adminAuthorizationService.requireAuthenticatedAdmin();
         if (request == null || request.getMessage() == null || request.getMessage().isBlank()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Message cannot be blank");
         }
+
+        String cleanKey = (request.getIdempotencyKey() != null && !request.getIdempotencyKey().isBlank())
+                ? request.getIdempotencyKey().trim()
+                : null;
+        if (cleanKey != null) {
+            Optional<AdminChatResponse> cached = findCachedIdempotentResponse(adminUserId, cleanKey);
+            if (cached.isPresent()) {
+                log.info("Admin AI chat replayed idempotent response: adminId={}, conversationId={}",
+                        adminUserId, cached.get().getConversationId());
+                return cached.get();
+            }
+
+            String lockKey = adminUserId + ":" + cleanKey;
+            CompletableFuture<AdminChatResponse> myFuture = new CompletableFuture<>();
+            CompletableFuture<AdminChatResponse> existingFuture = inFlightIdempotentChats.putIfAbsent(lockKey, myFuture);
+            if (existingFuture != null) {
+                Optional<AdminChatResponse> raceCached = findCachedIdempotentResponse(adminUserId, cleanKey);
+                if (raceCached.isPresent()) {
+                    return raceCached.get();
+                }
+                try {
+                    return existingFuture.get(110, TimeUnit.SECONDS);
+                } catch (Exception ex) {
+                    Optional<AdminChatResponse> postWaitCached = findCachedIdempotentResponse(adminUserId, cleanKey);
+                    if (postWaitCached.isPresent()) {
+                        return postWaitCached.get();
+                    }
+                    throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
+                            "Previous identical request failed or timed out; please retry.", ex);
+                }
+            }
+
+            try {
+                AdminChatResponse result = dispatchChat(adminUserId, admin, request, cleanKey);
+                myFuture.complete(result);
+                return result;
+            } catch (Throwable t) {
+                myFuture.completeExceptionally(t);
+                throw t;
+            } finally {
+                inFlightIdempotentChats.remove(lockKey, myFuture);
+            }
+        }
+
+        return dispatchChat(adminUserId, admin, request, null);
+    }
+
+    private AdminChatResponse dispatchChat(
+            Long adminUserId,
+            User admin,
+            AdminChatRequest request,
+            String cleanIdempotencyKey
+    ) {
+        String lowerPrompt = request.getMessage().trim().toLowerCase(Locale.US);
+        if (BulkExerciseGenerationService.isBulkExerciseGenerationPrompt(lowerPrompt)) {
+            return executeBulkGenerationChatPath(adminUserId, admin, request, cleanIdempotencyKey);
+        }
+
+        TransactionTemplate txTemplate = new TransactionTemplate(transactionManager);
+        return txTemplate.execute(status -> executeStandardChatInternal(adminUserId, request, cleanIdempotencyKey));
+    }
+
+    private AdminChatResponse executeBulkGenerationChatPath(
+            Long adminUserId,
+            User admin,
+            AdminChatRequest request,
+            String cleanIdempotencyKey
+    ) {
+        TransactionTemplate requiresNewTx = new TransactionTemplate(transactionManager);
+        requiresNewTx.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+
+        String userPrompt = request.getMessage().trim();
+        Map<String, Object> convMeta = requiresNewTx.execute(status -> {
+            AdminAiConversation conversation = conversationService.resolveOrCreateConversation(adminUserId, request.getConversationId());
+            AdminAiMessage savedUserMsg = conversationService.saveMessage(conversation, "user", userPrompt, null, null);
+            conversationService.updateTitleIfDefault(conversation, generateConversationTitle(userPrompt, AdminAiIntent.BULK_EXERCISE_GENERATION));
+            Map<String, Object> map = new HashMap<>();
+            map.put("conversationId", conversation.getId());
+            map.put("conversationTitle", conversation.getTitle());
+            map.put("userMessage", conversationService.mapToMessageResponse(savedUserMsg));
+            return map;
+        });
+
+        Long conversationId = (Long) convMeta.get("conversationId");
+        String conversationTitle = (String) convMeta.get("conversationTitle");
+        AdminMessageResponse userMessageResp = (AdminMessageResponse) convMeta.get("userMessage");
+
+        long t0 = System.currentTimeMillis();
+        BulkExerciseGenerationRequest bulkReq = BulkExerciseGenerationRequest.builder()
+                .prompt(userPrompt)
+                .conversationId(conversationId)
+                .idempotencyKey(cleanIdempotencyKey != null ? "bulk-" + cleanIdempotencyKey : null)
+                .build();
+        BulkExerciseGenerationJobResponse jobResp = bulkExerciseGenerationService.launchAndAwaitIfFast(admin, bulkReq, 6000L);
+
+        AdminMessageResponse assistantResp = requiresNewTx.execute(status -> {
+            BulkExerciseGenerationJobResponse latest = (jobResp.isSummaryPosted() || "COMPLETED".equals(jobResp.getStatus()))
+                    ? jobResp
+                    : bulkExerciseGenerationService.getJob(admin, jobResp.getId());
+            if (latest.isSummaryPosted()) {
+                List<AdminMessageResponse> msgs = conversationService.getConversationMessages(adminUserId, conversationId);
+                for (int i = msgs.size() - 1; i >= 0; i--) {
+                    AdminMessageResponse m = msgs.get(i);
+                    if ("assistant".equalsIgnoreCase(m.getRole())) {
+                        return m;
+                    }
+                }
+            }
+            AdminAiConversation conv = conversationService.findOwnedConversation(adminUserId, conversationId)
+                    .orElseGet(() -> conversationService.resolveOrCreateConversation(adminUserId, conversationId));
+            String interimText = String.format(
+                    "### Bulk Exercise Generation Started (`%s`)\n\n"
+                            + "- **Status**: `%s` (%d%%)\n"
+                            + "- **Progress**: %d / %d saved to Draft (%d duplicates skipped)\n\n"
+                            + "Processing continues in background batches of %d; the complete numbered summary will appear here once finished.",
+                    latest.getJobUid(), latest.getStatus(), latest.getProgressPercent(),
+                    latest.getSavedCount(), latest.getRequestedQuantity(), latest.getDuplicateCount(),
+                    latest.getBatchSize()
+            );
+            AdminAiMessage savedAssistant = conversationService.saveMessage(
+                    conv, "assistant", interimText, AdminAiIntent.BULK_EXERCISE_GENERATION.name(), null);
+            return conversationService.mapToMessageResponse(savedAssistant);
+        });
+
+        BulkExerciseGenerationJobResponse latestJob = (jobResp.isSummaryPosted() || "COMPLETED".equals(jobResp.getStatus()))
+                ? jobResp
+                : bulkExerciseGenerationService.getJob(admin, jobResp.getId());
+        AdminToolExecutionRecord execRecord = AdminToolExecutionRecord.builder()
+                .toolName(AdminToolName.BULK_GENERATE_EXERCISES.getToolName())
+                .status("EXECUTED")
+                .parametersSummary("qty=" + latestJob.getRequestedQuantity() + ",type=" + latestJob.getTrainingTypeFilter())
+                .summary(latestJob.getStatusMessage())
+                .recordCount((long) latestJob.getSavedCount())
+                .durationMs(Math.max(0L, System.currentTimeMillis() - t0))
+                .executedAt(ZonedDateTime.now())
+                .build();
+
+        AdminChatResponse response = AdminChatResponse.builder()
+                .conversationId(conversationId)
+                .conversationTitle(conversationTitle)
+                .userMessage(userMessageResp)
+                .assistantMessage(assistantResp)
+                .intent(AdminAiIntent.BULK_EXERCISE_GENERATION.name())
+                .recommendations(Collections.emptyList())
+                .executedTools(List.of(execRecord))
+                .bulkGenerationJob(latestJob)
+                .suggestedFollowUps(buildSuggestedFollowUps(AdminAiIntent.BULK_EXERCISE_GENERATION, null))
+                .build();
+
+        if (cleanIdempotencyKey != null) {
+            requiresNewTx.executeWithoutResult(status -> persistIdempotencyRecord(admin, cleanIdempotencyKey, response));
+        }
+        return response;
+    }
+
+    protected AdminChatResponse executeStandardChatInternal(
+            Long adminUserId,
+            AdminChatRequest request,
+            String cleanIdempotencyKey
+    ) {
+        User admin = conversationService.requireAdminUser(adminUserId);
+        adminAuthorizationService.requireAuthenticatedAdmin();
 
         String userPrompt = request.getMessage().trim();
         AdminAiConversation conversation = conversationService.resolveOrCreateConversation(adminUserId, request.getConversationId());
@@ -285,7 +461,7 @@ public class AdminAIService {
                 ? routedTools.exerciseDraftResult().getCreatedExercises()
                 : null;
 
-        return AdminChatResponse.builder()
+        return returnAndCacheIdempotency(admin, cleanIdempotencyKey, AdminChatResponse.builder()
                 .conversationId(conversation.getId())
                 .conversationTitle(conversation.getTitle())
                 .userMessage(conversationService.mapToMessageResponse(savedUserMsg))
@@ -315,9 +491,63 @@ public class AdminAIService {
                         : null)
                 .createdExercises(createdDrafts)
                 .exerciseDraftResult(routedTools.exerciseDraftResult())
+                .bulkGenerationJob(routedTools.bulkGenerationJob())
                 .missingDataNotes(routedTools.missingDataNotes())
                 .suggestedFollowUps(followUps)
-                .build();
+                .build());
+    }
+
+    private AdminChatResponse returnAndCacheIdempotency(
+            User admin,
+            String cleanIdempotencyKey,
+            AdminChatResponse response
+    ) {
+        if (cleanIdempotencyKey != null) {
+            persistIdempotencyRecord(admin, cleanIdempotencyKey, response);
+        }
+        return response;
+    }
+
+    private Optional<AdminChatResponse> findCachedIdempotentResponse(Long adminUserId, String cleanKey) {
+        return idempotencyRepository.findByAdminUserIdAndIdempotencyKey(adminUserId, cleanKey)
+                .flatMap(entry -> {
+                    try {
+                        AdminChatResponse parsed = objectMapper.readValue(entry.getResponseJson(), AdminChatResponse.class);
+                        if (parsed.getBulkGenerationJob() != null && parsed.getBulkGenerationJob().getId() != null) {
+                            conversationService.requireAdminUser(adminUserId);
+                            User admin = conversationService.requireAdminUser(adminUserId);
+                            BulkExerciseGenerationJobResponse freshJob =
+                                    bulkExerciseGenerationService.getJob(admin, parsed.getBulkGenerationJob().getId());
+                            parsed.setBulkGenerationJob(freshJob);
+                        }
+                        return Optional.of(parsed);
+                    } catch (Exception ex) {
+                        log.warn("Failed to deserialize cached idempotent response: {}", ex.getMessage());
+                        return Optional.empty();
+                    }
+                });
+    }
+
+    private void persistIdempotencyRecord(User admin, String cleanKey, AdminChatResponse response) {
+        if (admin == null || cleanKey == null || cleanKey.isBlank() || response == null) {
+            return;
+        }
+        try {
+            if (idempotencyRepository.findByAdminUserIdAndIdempotencyKey(admin.getId(), cleanKey).isPresent()) {
+                return;
+            }
+            String json = objectMapper.writeValueAsString(response);
+            idempotencyRepository.save(AdminAiChatIdempotency.builder()
+                    .adminUser(admin)
+                    .idempotencyKey(cleanKey)
+                    .conversationId(response.getConversationId())
+                    .responseJson(json)
+                    .build());
+        } catch (DataIntegrityViolationException ignored) {
+            // Concurrent request already committed identical key
+        } catch (Exception ex) {
+            log.warn("Unable to save idempotency record cleanly: {}", ex.getMessage());
+        }
     }
 
     @Transactional
@@ -881,6 +1111,10 @@ public class AdminAIService {
             return AdminAiIntent.PRO_MANAGEMENT;
         }
 
+        if (BulkExerciseGenerationService.isBulkExerciseGenerationPrompt(lower)) {
+            return AdminAiIntent.BULK_EXERCISE_GENERATION;
+        }
+
         if (AdminToolRouter.isExerciseDraftCreationPrompt(lower)) {
             return AdminAiIntent.EXERCISE_DRAFT_CREATION;
         }
@@ -1246,6 +1480,13 @@ public class AdminAIService {
                 }
             }
             case EXERCISE_DRAFT_CREATION -> appendExerciseDraftCreationSummary(sb, routedTools);
+            case BULK_EXERCISE_GENERATION -> {
+                if (routedTools.bulkGenerationJob() != null) {
+                    sb.append(bulkExerciseGenerationService.buildCompleteUntruncatedJobSummary(routedTools.bulkGenerationJob().getId()));
+                } else {
+                    sb.append("Bulk exercise generation job queued.\n");
+                }
+            }
             case EXERCISE_RECOMMENDATION -> {
                 String skillLabel = detectedSkill != null ? detectedSkill : "Calisthenics Skill & Strength";
                 sb.append("### 💡 Exercise Recommendations for ").append(skillLabel).append("\n\n");
@@ -1386,6 +1627,11 @@ public class AdminAIService {
                     "Add 2 more core exercises to draft",
                     "What exercises should we add to improve our Planche training library?"
             );
+            case BULK_EXERCISE_GENERATION -> List.of(
+                    "Generate 100 leg exercises for both calisthenics and gym",
+                    "Generate 200 gym exercises",
+                    "Expand the entire exercise catalog with 150 unique exercises"
+            );
             case EXERCISE_RECOMMENDATION -> List.of(
                     "What exercises should we add for Front Lever and Back Lever?",
                     "Add 3 leg exercises to draft",
@@ -1451,6 +1697,9 @@ public class AdminAIService {
             AdminToolRouter.RoutedChatToolsResult routedTools
     ) {
         if (routedTools != null) {
+            if (routedTools.bulkGenerationJob() != null) {
+                return AdminAiIntent.BULK_EXERCISE_GENERATION;
+            }
             if (routedTools.exerciseDraftResult() != null) {
                 return AdminAiIntent.EXERCISE_DRAFT_CREATION;
             }
@@ -1661,6 +1910,7 @@ public class AdminAIService {
                 case USER_TRAINING_ANALYTICS -> "Training & User Analytics";
                 case EXERCISE_RECOMMENDATION -> "Exercise Library Recommendations";
                 case EXERCISE_DRAFT_CREATION -> "Exercise Drafts Added";
+                case BULK_EXERCISE_GENERATION -> "Bulk Exercise Catalog Generation";
                 case WORKOUT_PROGRAM_RECOMMENDATION -> "Draft Workout Programs";
                 case OPERATIONAL_INSIGHTS -> "Operational Improvements";
                 case USER_STATISTICS_AND_SEARCH -> "Global User Statistics";

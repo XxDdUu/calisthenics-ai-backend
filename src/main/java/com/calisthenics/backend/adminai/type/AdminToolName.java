@@ -18,6 +18,7 @@ public enum AdminToolName {
     ANALYZE_USER_SEGMENTS("analyze_user_segments", true, false),
     GENERATE_ADMIN_RECOMMENDATIONS("generate_admin_recommendations", false, false),
     CREATE_EXERCISE_DRAFTS("create_exercise_drafts", false, false, "add_exercise_drafts", "create_exercises", "add_exercises"),
+    BULK_GENERATE_EXERCISES("bulk_generate_exercises", false, false, "generate_bulk_exercises", "bulk_create_exercises", "bulk_exercise_generation"),
     CREATE_PROGRAM("createProgram", false, false, "create_program"),
     UPDATE_PROGRAM("updateProgram", false, false, "update_program"),
     PREVIEW_PROGRAM("previewProgram", true, false, "preview_program"),

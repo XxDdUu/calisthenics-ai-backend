@@ -2,6 +2,7 @@ package com.calisthenics.backend.aiworkout.gemini;
 
 import com.calisthenics.backend.adminai.dto.GeminiAdminAgentOutput;
 import com.calisthenics.backend.adminai.dto.data.GeminiAdminToolPlan;
+import com.calisthenics.backend.adminai.dto.data.GeminiBulkExerciseBatchOutput;
 import com.calisthenics.backend.aichat.dto.GeminiAssistantOutput;
 import com.calisthenics.backend.aiworkout.gemini.dto.GeminiRequestDto;
 import com.calisthenics.backend.aiworkout.gemini.dto.GeminiResponseDto;
@@ -14,12 +15,14 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.web.client.RestTemplateBuilder;
 import org.springframework.http.*;
+import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.HttpStatusCodeException;
 import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.server.ResponseStatusException;
 
+import java.net.http.HttpClient;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZonedDateTime;
@@ -34,6 +37,8 @@ public class GeminiApiClient {
 
     private final AppProperties appProperties;
     private final ObjectMapper objectMapper;
+    private volatile RestTemplate pooledRestTemplate;
+    private volatile int pooledTimeoutSeconds = -1;
 
     public record GeminiCallResult(
             GeminiStructuredWorkoutPlan plan,
@@ -148,10 +153,28 @@ public class GeminiApiClient {
     }
 
     protected RestTemplate createRestTemplate() {
-        return new RestTemplateBuilder()
-                .setConnectTimeout(Duration.ofSeconds(10))
-                .setReadTimeout(Duration.ofSeconds(appProperties.getGemini().getTimeoutSeconds()))
-                .build();
+        int timeoutSec = Math.max(10, appProperties.getGemini().getTimeoutSeconds());
+        RestTemplate existing = pooledRestTemplate;
+        if (existing != null && pooledTimeoutSeconds == timeoutSec) {
+            return existing;
+        }
+        synchronized (this) {
+            if (pooledRestTemplate != null && pooledTimeoutSeconds == timeoutSec) {
+                return pooledRestTemplate;
+            }
+            HttpClient httpClient = HttpClient.newBuilder()
+                    .connectTimeout(Duration.ofSeconds(10))
+                    .version(HttpClient.Version.HTTP_2)
+                    .build();
+            JdkClientHttpRequestFactory requestFactory = new JdkClientHttpRequestFactory(httpClient);
+            requestFactory.setReadTimeout(Duration.ofSeconds(timeoutSec));
+            RestTemplate built = new RestTemplateBuilder()
+                    .requestFactory(() -> requestFactory)
+                    .build();
+            pooledRestTemplate = built;
+            pooledTimeoutSeconds = timeoutSec;
+            return built;
+        }
     }
 
     protected void sleepBeforeRetry(long delayMs) throws InterruptedException {
@@ -491,6 +514,7 @@ public class GeminiApiClient {
                         "USER_TRAINING_ANALYTICS",
                         "EXERCISE_RECOMMENDATION",
                         "EXERCISE_DRAFT_CREATION",
+                        "BULK_EXERCISE_GENERATION",
                         "WORKOUT_PROGRAM_RECOMMENDATION",
                         "OPERATIONAL_INSIGHTS",
                         "GENERAL_ADMIN_ADVISORY",
@@ -524,6 +548,7 @@ public class GeminiApiClient {
                                 "analyze_user_segments",
                                 "generate_admin_recommendations",
                                 "create_exercise_drafts",
+                                "bulk_generate_exercises",
                                 "createProgram",
                                 "updateProgram",
                                 "previewProgram",
@@ -574,10 +599,29 @@ public class GeminiApiClient {
                 "type", "STRING",
                 "description", "Optional admin reason for granting or revoking PRO entitlement"
         ));
+        List<String> allCategories = List.of(
+                "PUSH", "PULL", "CORE", "LEGS", "SKILL", "ISOMETRIC",
+                "FLEXIBILITY", "MOBILITY", "CHEST", "BACK", "SHOULDERS",
+                "BICEPS", "TRICEPS", "GLUTES", "FULL_BODY", "CARDIO"
+        );
         props.put("exercise_category", Map.of(
                 "type", "STRING",
-                "enum", List.of("PUSH", "PULL", "CORE", "LEGS", "SKILL", "ISOMETRIC"),
+                "enum", allCategories,
                 "description", "Requested exercise category from the latest admin prompt when creating or recommending exercises"
+        ));
+        props.put("training_type", Map.of(
+                "type", "STRING",
+                "enum", List.of("CALISTHENICS", "GYM", "BOTH"),
+                "description", "Training discipline requested for bulk or single exercise generation"
+        ));
+        props.put("bulk_categories", Map.of(
+                "type", "ARRAY",
+                "items", Map.of("type", "STRING", "enum", allCategories),
+                "description", "Target categories for bulk exercise generation"
+        ));
+        props.put("bulk_focus", Map.of(
+                "type", "STRING",
+                "description", "Specific anatomical or training focus for bulk generation"
         ));
         props.put("requested_count", Map.of(
                 "type", "INTEGER",
@@ -587,7 +631,7 @@ public class GeminiApiClient {
         Map<String, Object> draftItemProps = new LinkedHashMap<>();
         draftItemProps.put("name", Map.of("type", "STRING", "description", "Exact requested or recommended exercise name"));
         draftItemProps.put("code", Map.of("type", "STRING", "description", "Uppercase underscore identifier slug, max 50 chars"));
-        draftItemProps.put("category", Map.of("type", "STRING", "enum", List.of("PUSH", "PULL", "CORE", "LEGS", "SKILL", "ISOMETRIC"), "description", "Strict movement category matching the user request"));
+        draftItemProps.put("category", Map.of("type", "STRING", "enum", allCategories, "description", "Strict movement category matching the user request"));
         draftItemProps.put("difficulty", Map.of("type", "STRING", "enum", List.of("BEGINNER", "INTERMEDIATE", "ADVANCED", "ELITE"), "description", "Difficulty level matching the user request"));
         draftItemProps.put("description", Map.of("type", "STRING", "description", "Concise technical summary of the exercise"));
         draftItemProps.put("instructions", Map.of("type", "STRING", "description", "Clear step-by-step execution instructions"));
@@ -620,6 +664,7 @@ public class GeminiApiClient {
                         "USER_TRAINING_ANALYTICS",
                         "EXERCISE_RECOMMENDATION",
                         "EXERCISE_DRAFT_CREATION",
+                        "BULK_EXERCISE_GENERATION",
                         "WORKOUT_PROGRAM_RECOMMENDATION",
                         "OPERATIONAL_INSIGHTS",
                         "GENERAL_ADMIN_ADVISORY",
@@ -692,6 +737,64 @@ public class GeminiApiClient {
         rootSchema.put("properties", rootProperties);
         rootSchema.put("required", List.of("overall_assessment", "strengths", "weaknesses", "recommendations", "next_session_focus"));
         return rootSchema;
+    }
+
+    public boolean isConfigured() {
+        String apiKey = appProperties.getGemini().getApiKey();
+        return apiKey != null && !apiKey.isBlank() && !apiKey.startsWith("placeholder");
+    }
+
+    public Optional<GeminiBulkExerciseBatchOutput> generateBulkExerciseBatch(
+            String systemPrompt,
+            String userPrompt
+    ) {
+        return callGeminiStructured(
+                systemPrompt,
+                userPrompt,
+                buildBulkExerciseBatchSchema(),
+                GeminiBulkExerciseBatchOutput.class
+        ).result().map(GeminiStructuredRawResult::payload);
+    }
+
+    public static Map<String, Object> buildBulkExerciseBatchSchema() {
+        Map<String, Object> itemProps = new LinkedHashMap<>();
+        itemProps.put("name", Map.of("type", "STRING"));
+        itemProps.put("category", Map.of("type", "STRING", "enum", List.of(
+                "PUSH", "PULL", "CORE", "LEGS", "SKILL", "ISOMETRIC",
+                "FLEXIBILITY", "MOBILITY", "CHEST", "BACK", "SHOULDERS",
+                "BICEPS", "TRICEPS", "GLUTES", "FULL_BODY", "CARDIO"
+        )));
+        itemProps.put("training_type", Map.of("type", "STRING", "enum", List.of("CALISTHENICS", "GYM", "BOTH")));
+        itemProps.put("difficulty", Map.of("type", "STRING", "enum", List.of("BEGINNER", "INTERMEDIATE", "ADVANCED", "ELITE")));
+        itemProps.put("exercise_type", Map.of("type", "STRING"));
+        itemProps.put("target_muscles", Map.of("type", "STRING"));
+        itemProps.put("secondary_muscles", Map.of("type", "STRING"));
+        itemProps.put("equipment", Map.of("type", "STRING"));
+        itemProps.put("recommended_sets", Map.of("type", "INTEGER"));
+        itemProps.put("recommended_reps", Map.of("type", "STRING"));
+        itemProps.put("recommended_rest_seconds", Map.of("type", "INTEGER"));
+        itemProps.put("description", Map.of("type", "STRING"));
+        itemProps.put("instructions", Map.of("type", "STRING"));
+        itemProps.put("common_mistakes", Map.of("type", "STRING"));
+        itemProps.put("safety_considerations", Map.of("type", "STRING"));
+        itemProps.put("progression_notes", Map.of("type", "STRING"));
+        itemProps.put("aliases", Map.of("type", "STRING"));
+
+        Map<String, Object> itemSchema = new LinkedHashMap<>();
+        itemSchema.put("type", "OBJECT");
+        itemSchema.put("properties", itemProps);
+        itemSchema.put("required", List.of(
+                "name", "category", "training_type", "difficulty",
+                "target_muscles", "equipment", "description", "instructions"
+        ));
+
+        Map<String, Object> root = new LinkedHashMap<>();
+        root.put("type", "OBJECT");
+        root.put("properties", Map.of(
+                "exercises", Map.of("type", "ARRAY", "items", itemSchema)
+        ));
+        root.put("required", List.of("exercises"));
+        return root;
     }
 
     public static Map<String, Object> buildResponseSchema() {

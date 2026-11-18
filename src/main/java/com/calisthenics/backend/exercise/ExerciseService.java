@@ -85,6 +85,15 @@ public class ExerciseService {
                 .status(exercise.getStatus())
                 .origin(exercise.getOrigin())
                 .mediaItems(ExerciseMediaMapper.toResponses(exercise))
+                .trainingType(exercise.getTrainingType())
+                .secondaryMuscles(exercise.getSecondaryMuscles())
+                .exerciseType(exercise.getExerciseType())
+                .recommendedSets(exercise.getRecommendedSets())
+                .recommendedReps(exercise.getRecommendedReps())
+                .recommendedRestSeconds(exercise.getRecommendedRestSeconds())
+                .commonMistakes(exercise.getCommonMistakes())
+                .safetyConsiderations(exercise.getSafetyConsiderations())
+                .progressionNotes(exercise.getProgressionNotes())
                 .build();
     }
 }

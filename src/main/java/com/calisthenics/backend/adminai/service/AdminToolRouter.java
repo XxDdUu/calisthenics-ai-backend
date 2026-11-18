@@ -72,6 +72,7 @@ public class AdminToolRouter {
     private final AdminProToolService adminProToolService;
     private final ExerciseRecommendationService exerciseRecommendationService;
     private final ExerciseDraftValidationService exerciseDraftValidationService;
+    private final BulkExerciseGenerationService bulkExerciseGenerationService;
     private final AdminAiMessageRepository adminAiMessageRepository;
 
     public record RoutedChatToolsResult(
@@ -93,7 +94,8 @@ public class AdminToolRouter {
             GettingStartedCampaignAnalyticsResponse campaignAnalytics,
             AdminPendingConfirmationResponse pendingConfirmation,
             AdminProToolResultResponse proToolResult,
-            ExerciseDraftBatchResultResponse exerciseDraftResult
+            ExerciseDraftBatchResultResponse exerciseDraftResult,
+            BulkExerciseGenerationJobResponse bulkGenerationJob
     ) {}
 
     public AdminToolExecuteResponse executeSingleTool(AdminToolExecuteRequest request) {
@@ -281,6 +283,21 @@ public class AdminToolRouter {
                 recordCount = res.getCreatedCount();
                 summary = res.getMessage();
             }
+            case BULK_GENERATE_EXERCISES -> {
+                BulkExerciseGenerationRequest bulkReq = BulkExerciseGenerationRequest.builder()
+                        .prompt(request.getInstruction())
+                        .quantity(request.getQuantity() != null ? request.getQuantity() : request.getRequestedCount())
+                        .trainingType(request.getTrainingType())
+                        .categories(request.getCategories())
+                        .focus(request.getFocus() != null ? request.getFocus() : request.getSkillKeyword())
+                        .batchSize(request.getBatchSize())
+                        .conversationId(request.getConversationId())
+                        .build();
+                BulkExerciseGenerationJobResponse res = bulkExerciseGenerationService.launchAndAwaitIfFast(admin, bulkReq, 6000L);
+                data = res;
+                recordCount = res.getSavedCount();
+                summary = res.getStatusMessage();
+            }
             default -> throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Unsupported admin tool");
         }
 
@@ -359,6 +376,7 @@ public class AdminToolRouter {
         AdminPendingConfirmationResponse pendingConfirmation = null;
         AdminProToolResultResponse proToolResult = null;
         ExerciseDraftBatchResultResponse exerciseDraftResult = null;
+        BulkExerciseGenerationJobResponse bulkGenerationJob = null;
 
         boolean hasProTools = toolsToRun.stream().anyMatch(adminProToolService::isProTool);
         if (hasProTools) {
@@ -573,6 +591,24 @@ public class AdminToolRouter {
                     .build());
         }
 
+        if (toolsToRun.contains(AdminToolName.BULK_GENERATE_EXERCISES)) {
+            long t0 = System.currentTimeMillis();
+            User admin = adminAuthorizationService.requireAuthenticatedAdmin();
+            BulkExerciseGenerationRequest bulkReq = BulkExerciseGenerationRequest.builder()
+                    .prompt(userPrompt)
+                    .quantity(geminiPlan != null ? geminiPlan.getRequestedCount() : null)
+                    .conversationId(request.getConversationId())
+                    .build();
+            bulkGenerationJob = bulkExerciseGenerationService.launchAndAwaitIfFast(admin, bulkReq, 6000L);
+            executionRecords.add(record(
+                    AdminToolName.BULK_GENERATE_EXERCISES,
+                    "qty=" + bulkGenerationJob.getRequestedQuantity() + ",type=" + bulkGenerationJob.getTrainingTypeFilter(),
+                    bulkGenerationJob.getStatusMessage(),
+                    bulkGenerationJob.getSavedCount(),
+                    t0
+            ));
+        }
+
         if (toolsToRun.contains(AdminToolName.GENERATE_ADMIN_RECOMMENDATIONS)) {
             long t0 = System.currentTimeMillis();
             if (userStats == null) {
@@ -614,7 +650,8 @@ public class AdminToolRouter {
                 campaignAnalytics,
                 pendingConfirmation,
                 proToolResult,
-                exerciseDraftResult
+                exerciseDraftResult,
+                bulkGenerationJob
         );
     }
 
@@ -784,6 +821,12 @@ public class AdminToolRouter {
                 proTool = AdminToolName.CHECK_PRO_STATUS;
             }
             return new LinkedHashSet<>(Set.of(proTool));
+        }
+
+        if (BulkExerciseGenerationService.isBulkExerciseGenerationPrompt(lower)
+                || intent == AdminAiIntent.BULK_EXERCISE_GENERATION
+                || tools.contains(AdminToolName.BULK_GENERATE_EXERCISES)) {
+            return new LinkedHashSet<>(Set.of(AdminToolName.BULK_GENERATE_EXERCISES));
         }
 
         if (isExerciseDraftCreationPrompt(lower)

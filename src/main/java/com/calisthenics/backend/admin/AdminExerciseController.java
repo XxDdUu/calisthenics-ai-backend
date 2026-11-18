@@ -12,6 +12,7 @@ import com.calisthenics.backend.exercise.DifficultyLevel;
 import com.calisthenics.backend.exercise.ExerciseCategory;
 import com.calisthenics.backend.exercise.ExerciseOrigin;
 import com.calisthenics.backend.exercise.ExerciseStatus;
+import com.calisthenics.backend.exercise.ExerciseTrainingType;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
@@ -43,15 +44,16 @@ public class AdminExerciseController {
             @RequestParam(required = false) Boolean active,
             @RequestParam(required = false) ExerciseStatus status,
             @RequestParam(required = false) ExerciseOrigin origin,
+            @RequestParam(required = false) ExerciseTrainingType trainingType,
             @RequestParam(defaultValue = "name") String sortBy,
             @RequestParam(defaultValue = "ASC") String sortDirection
     ) {
-        if (status == null && origin == null) {
+        if (status == null && origin == null && trainingType == null) {
             return ResponseEntity.ok(adminExerciseService.getExercises(
                     page, size, search, category, difficulty, active, sortBy, sortDirection));
         }
         return ResponseEntity.ok(adminExerciseService.getExercises(
-                page, size, search, category, difficulty, active, status, origin, sortBy, sortDirection));
+                page, size, search, category, difficulty, active, status, origin, trainingType, sortBy, sortDirection));
     }
 
     @GetMapping("/stats")

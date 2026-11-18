@@ -4,6 +4,7 @@ import com.calisthenics.backend.exercise.DifficultyLevel;
 import com.calisthenics.backend.exercise.ExerciseCategory;
 import com.calisthenics.backend.exercise.ExerciseOrigin;
 import com.calisthenics.backend.exercise.ExerciseStatus;
+import com.calisthenics.backend.exercise.ExerciseTrainingType;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
@@ -47,7 +48,27 @@ public record CreateAdminExerciseRequest(
 
         ExerciseStatus status,
 
-        ExerciseOrigin origin
+        ExerciseOrigin origin,
+
+        ExerciseTrainingType trainingType,
+
+        String secondaryMuscles,
+
+        String exerciseType,
+
+        Integer recommendedSets,
+
+        String recommendedReps,
+
+        Integer recommendedRestSeconds,
+
+        String commonMistakes,
+
+        String safetyConsiderations,
+
+        String progressionNotes,
+
+        String aliases
 ) {
     public CreateAdminExerciseRequest(
             String name,
@@ -64,20 +85,32 @@ public record CreateAdminExerciseRequest(
             List<ExerciseMediaItemRequest> mediaItems
     ) {
         this(
-                name,
-                code,
-                category,
-                difficulty,
-                description,
-                targetMuscles,
-                instructions,
-                imageUrl,
-                videoUrl,
-                equipment,
-                active,
-                mediaItems,
-                null,
-                null
+                name, code, category, difficulty, description, targetMuscles, instructions,
+                imageUrl, videoUrl, equipment, active, mediaItems, null, null,
+                null, null, null, null, null, null, null, null, null, null
+        );
+    }
+
+    public CreateAdminExerciseRequest(
+            String name,
+            String code,
+            ExerciseCategory category,
+            DifficultyLevel difficulty,
+            String description,
+            String targetMuscles,
+            String instructions,
+            String imageUrl,
+            String videoUrl,
+            String equipment,
+            Boolean active,
+            List<ExerciseMediaItemRequest> mediaItems,
+            ExerciseStatus status,
+            ExerciseOrigin origin
+    ) {
+        this(
+                name, code, category, difficulty, description, targetMuscles, instructions,
+                imageUrl, videoUrl, equipment, active, mediaItems, status, origin,
+                null, null, null, null, null, null, null, null, null, null
         );
     }
 }

@@ -3,6 +3,7 @@ package com.calisthenics.backend.adminai.dto.data;
 import com.calisthenics.backend.adminai.type.AdminAnalyticsRange;
 import com.calisthenics.backend.exercise.DifficultyLevel;
 import com.calisthenics.backend.exercise.ExerciseCategory;
+import com.calisthenics.backend.exercise.ExerciseTrainingType;
 import com.calisthenics.backend.gettingstarted.dto.AdminGettingStartedProgramRequest;
 import com.calisthenics.backend.gettingstarted.dto.GettingStartedExerciseOperationRequest;
 import lombok.AllArgsConstructor;
@@ -46,9 +47,14 @@ public class AdminToolExecuteRequest {
     private String userIdentifier;
     private String reason;
 
-    // Exercise draft creation fields
+    // Exercise draft creation & bulk generation fields
     private Integer requestedCount;
     private ExerciseCategory exerciseCategory;
     private DifficultyLevel difficultyLevel;
     private List<ExerciseDraftCandidateDto> exerciseDrafts;
+    private Integer quantity;
+    private ExerciseTrainingType trainingType;
+    private List<ExerciseCategory> categories;
+    private String focus;
+    private Integer batchSize;
 }

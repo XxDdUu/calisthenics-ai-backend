@@ -20,6 +20,7 @@ import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -33,6 +34,7 @@ import org.springframework.web.server.ResponseStatusException;
 import java.time.LocalDate;
 import java.util.List;
 
+@Slf4j
 @RestController
 @RequestMapping({"/api/v1/admin/ai", "/api/admin/ai"})
 @RequiredArgsConstructor
@@ -53,10 +55,25 @@ public class AdminAiController {
     @Operation(summary = "Send a prompt to the Admin AI Agent and receive grounded insights & recommendations")
     public ResponseEntity<AdminChatResponse> chat(
             @AuthenticationPrincipal UserPrincipal currentAdmin,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKeyHeader,
+            @RequestHeader(value = "X-Request-ID", required = false) String requestIdHeader,
             @Valid @RequestBody AdminChatRequest request
     ) {
+        long startNs = System.nanoTime();
         Long adminId = resolveAdminUserId(currentAdmin);
-        return ResponseEntity.ok(adminAIService.chat(adminId, request));
+        if ((request.getIdempotencyKey() == null || request.getIdempotencyKey().isBlank())) {
+            String fallbackKey = (idempotencyKeyHeader != null && !idempotencyKeyHeader.isBlank())
+                    ? idempotencyKeyHeader.trim()
+                    : (requestIdHeader != null && !requestIdHeader.isBlank() ? requestIdHeader.trim() : null);
+            request.setIdempotencyKey(fallbackKey);
+        }
+        log.info("Admin AI chat request received: adminId={}, conversationId={}, hasIdempotencyKey={}",
+                adminId, request.getConversationId(), request.getIdempotencyKey() != null && !request.getIdempotencyKey().isBlank());
+        AdminChatResponse response = adminAIService.chat(adminId, request);
+        long elapsedMs = (System.nanoTime() - startNs) / 1_000_000L;
+        log.info("Admin AI chat request completed: adminId={}, conversationId={}, intent={}, elapsedMs={}",
+                adminId, response.getConversationId(), response.getIntent(), elapsedMs);
+        return ResponseEntity.ok(response);
     }
 
     @GetMapping("/conversations")

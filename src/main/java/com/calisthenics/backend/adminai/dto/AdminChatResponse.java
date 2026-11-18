@@ -11,6 +11,7 @@ import com.calisthenics.backend.adminai.dto.data.AdminTimeRangeMetadata;
 import com.calisthenics.backend.adminai.dto.data.AdminToolExecutionRecord;
 import com.calisthenics.backend.adminai.dto.data.AdminUserDetailDossierResponse;
 import com.calisthenics.backend.adminai.dto.data.AdminUserSegmentsResponse;
+import com.calisthenics.backend.adminai.dto.data.BulkExerciseGenerationJobResponse;
 import com.calisthenics.backend.adminai.dto.data.ExerciseDraftBatchResultResponse;
 import com.calisthenics.backend.gettingstarted.dto.GettingStartedCampaignAnalyticsResponse;
 import com.calisthenics.backend.gettingstarted.dto.GettingStartedCampaignSummaryResponse;
@@ -53,6 +54,7 @@ public class AdminChatResponse {
     private List<AdminUserResponse> proCandidates;
     private List<AdminExerciseResponse> createdExercises;
     private ExerciseDraftBatchResultResponse exerciseDraftResult;
+    private BulkExerciseGenerationJobResponse bulkGenerationJob;
     private List<String> missingDataNotes;
     private List<String> suggestedFollowUps;
 }

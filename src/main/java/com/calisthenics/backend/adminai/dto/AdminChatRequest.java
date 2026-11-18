@@ -22,4 +22,5 @@ public class AdminChatRequest {
     private LocalDate endDate;
     private Long targetUserId;
     private Boolean includeEmail;
+    private String idempotencyKey;
 }

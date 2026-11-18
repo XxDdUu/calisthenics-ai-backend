@@ -67,6 +67,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 class GettingStartedEnrollmentLifecycleIntegrationTest {
 
     private static final List<String> TABLES_IN_DELETE_ORDER = List.of(
+            "bulk_exercise_generation_items",
+            "bulk_exercise_generation_jobs",
+            "admin_ai_chat_idempotency",
             "shared_personal_records",
             "personal_records",
             "workout_logs",

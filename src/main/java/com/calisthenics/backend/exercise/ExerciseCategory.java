@@ -6,5 +6,15 @@ public enum ExerciseCategory {
     CORE,
     LEGS,
     SKILL,
-    ISOMETRIC
+    ISOMETRIC,
+    FLEXIBILITY,
+    MOBILITY,
+    CHEST,
+    BACK,
+    SHOULDERS,
+    BICEPS,
+    TRICEPS,
+    GLUTES,
+    FULL_BODY,
+    CARDIO
 }

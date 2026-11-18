@@ -1113,20 +1113,35 @@ public class ExerciseRecommendationService {
         ExerciseCategory safeCategory = category != null ? category : ExerciseCategory.SKILL;
         String muscles = switch (safeCategory) {
             case LEGS -> "Quadriceps, Glutes, Hamstrings, Calves, Core";
-            case PUSH -> "Pectorals, Anterior Deltoids, Triceps, Serratus Anterior, Core";
-            case PULL -> "Latissimus Dorsi, Rhomboids, Biceps, Posterior Deltoids, Forearms";
+            case GLUTES -> "Gluteus Maximus, Gluteus Medius, Hamstrings, Core";
+            case PUSH, CHEST -> "Pectorals, Anterior Deltoids, Triceps, Serratus Anterior, Core";
+            case PULL, BACK -> "Latissimus Dorsi, Rhomboids, Trapezius, Biceps, Posterior Deltoids, Forearms";
+            case SHOULDERS -> "Anterior, Lateral, and Posterior Deltoids, Upper Trapezius, Rotator Cuff";
+            case BICEPS -> "Biceps Brachii, Brachialis, Brachioradialis, Forearms";
+            case TRICEPS -> "Triceps Brachii (Long, Lateral, Medial Heads), Anconeus";
             case CORE -> "Rectus Abdominis, Transverse Abdominis, Obliques, Hip Flexors";
             case ISOMETRIC -> "Primary Joint Stabilizers, Scapular Stabilizers, Core";
             case SKILL -> "Shoulders, Core, Scapular Stabilizers, Full-Body Tension";
+            case FLEXIBILITY -> "Target Muscle Belly, Tendons, Joint Capsule, Postural Stabilizers";
+            case MOBILITY -> "Joint Rotators, Deep Stabilizers, Connective Tissue, Core";
+            case FULL_BODY -> "Quadriceps, Glutes, Back, Pectorals, Shoulders, Core";
+            case CARDIO -> "Cardiorespiratory System, Lower Body, Core, Work Capacity";
         };
         String equipment = switch (safeCategory) {
-            case LEGS -> (name.toLowerCase(Locale.US).contains("box") || name.toLowerCase(Locale.US).contains("step"))
+            case LEGS, GLUTES -> (name.toLowerCase(Locale.US).contains("box") || name.toLowerCase(Locale.US).contains("step"))
                     ? "Plyo Box or Bench"
-                    : (name.toLowerCase(Locale.US).contains("nordic") ? "Partner, Strap, or Anchored Bar" : "Bodyweight / Floor");
-            case PULL -> "Pull-Up Bar or Gymnastic Rings";
-            case PUSH -> "Floor or Parallettes";
+                    : (name.toLowerCase(Locale.US).contains("nordic")
+                            ? "Partner, Strap, or Anchored Bar"
+                            : (name.toLowerCase(Locale.US).contains("barbell") || name.toLowerCase(Locale.US).contains("dumbbell")
+                                    ? "Barbell / Dumbbells / Squat Rack"
+                                    : "Bodyweight / Floor"));
+            case PULL, BACK -> "Pull-Up Bar, Gymnastic Rings, or Cable/Row Station";
+            case PUSH, CHEST -> "Floor, Parallettes, Bench, or Dumbbells/Barbell";
+            case SHOULDERS, BICEPS, TRICEPS -> "Bodyweight / Rings / Dumbbells / Barbell";
             case CORE -> "Floor or Pull-Up Bar";
             case ISOMETRIC, SKILL -> "Floor, Parallettes, or Pull-Up Bar";
+            case FLEXIBILITY, MOBILITY -> "Exercise Mat / Wall / Strap / Resistance Band";
+            case FULL_BODY, CARDIO -> "Bodyweight / Jump Rope / Sled / Kettlebell";
         };
         String description = String.format("%s %s calisthenics movement targeting %s.",
                 difficulty.name().charAt(0) + difficulty.name().substring(1).toLowerCase(Locale.US),

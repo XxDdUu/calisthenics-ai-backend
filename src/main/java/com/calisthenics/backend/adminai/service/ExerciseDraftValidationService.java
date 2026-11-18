@@ -21,7 +21,11 @@ public class ExerciseDraftValidationService {
     private static final Pattern SEPARATOR_SPLIT = Pattern.compile("\\s*(?:\\u2014|\\u2013|\\||·|\\s-\\s)\\s*");
     private static final Pattern TRAILING_PAREN = Pattern.compile("^(.*?)\\s*\\(([^()]+)\\)\\s*$");
     private static final Pattern CODE_TOKEN = Pattern.compile("^[A-Z0-9_]{3,50}$");
-    private static final Pattern CATEGORY_TOKEN = Pattern.compile("\\b(PUSH|PULL|CORE|LEGS|LEG|SKILL|ISOMETRIC)\\b", Pattern.CASE_INSENSITIVE);
+    private static final Pattern CATEGORY_TOKEN = Pattern.compile(
+            "\\b(PUSH|PULL|CORE|LEGS|LEG|SKILL|ISOMETRIC|FLEXIBILITY|MOBILITY|CHEST|BACK|SHOULDERS|BICEPS|TRICEPS|GLUTES|FULL_BODY|CARDIO)\\b",
+            Pattern.CASE_INSENSITIVE
+    );
+    private static final Pattern UPPERCASE_BACK_TOKEN = Pattern.compile("\\bBACK\\b");
     private static final Pattern DIFFICULTY_TOKEN = Pattern.compile("\\b(BEGINNER|INTERMEDIATE|ADVANCED|ELITE)\\b", Pattern.CASE_INSENSITIVE);
     private static final Pattern EXPLICIT_COUNT_WITH_NOUN = Pattern.compile(
             "\\b(\\d+)\\s+(?:more\\s+|new\\s+|additional\\s+|these\\s+|those\\s+)?(?:[a-z-]+\\s+){0,2}(?:exercises?|bài tập)\\b",
@@ -29,7 +33,17 @@ public class ExerciseDraftValidationService {
     );
 
     // Word-boundary category patterns for current-turn intent extraction
-    private static final Pattern LEGS_PATTERN = Pattern.compile("\\b(?:legs?|lower[- ]?body|quads?|quadriceps|hamstrings?|calves|glutes?|squats?|lunges?|chân|đùi)\\b", Pattern.CASE_INSENSITIVE);
+    private static final Pattern LEGS_PATTERN = Pattern.compile("\\b(?:legs?|lower[- ]?body|quads?|quadriceps|hamstrings?|calves|squats?|lunges?|chân|đùi)\\b", Pattern.CASE_INSENSITIVE);
+    private static final Pattern GLUTES_PATTERN = Pattern.compile("\\b(?:glutes?|glute\\s+bridges?|hip\\s+thrusts?)\\b", Pattern.CASE_INSENSITIVE);
+    private static final Pattern FLEXIBILITY_PATTERN = Pattern.compile("\\b(?:flexibility|stretching|splits?|pike\\s+stretch|pancake)\\b", Pattern.CASE_INSENSITIVE);
+    private static final Pattern MOBILITY_PATTERN = Pattern.compile("\\b(?:mobility|joint\\s+prep|car|cars|thoracic\\s+rotation)\\b", Pattern.CASE_INSENSITIVE);
+    private static final Pattern CARDIO_PATTERN = Pattern.compile("\\b(?:cardio|hiit|conditioning|burpees?|jump\\s+rope|sprints?|endurance)\\b", Pattern.CASE_INSENSITIVE);
+    private static final Pattern FULL_BODY_PATTERN = Pattern.compile("\\b(?:full[- ]?body|total[- ]?body)\\b", Pattern.CASE_INSENSITIVE);
+    private static final Pattern CHEST_PATTERN = Pattern.compile("\\b(?:chest\\s+(?:exercises?|workouts?|day)|pectorals?|pec\\s+fly|bench\\s+press)\\b", Pattern.CASE_INSENSITIVE);
+    private static final Pattern BACK_PATTERN = Pattern.compile("\\b(?:back\\s+(?:exercises?|workouts?|day)|lat\\s+pulldown|deadlifts?)\\b", Pattern.CASE_INSENSITIVE);
+    private static final Pattern SHOULDERS_PATTERN = Pattern.compile("\\b(?:shoulders?|deltoids?|delts?|overhead\\s+press|lateral\\s+raise)\\b", Pattern.CASE_INSENSITIVE);
+    private static final Pattern BICEPS_PATTERN = Pattern.compile("\\b(?:biceps?|bicep\\s+curls?|hammer\\s+curls?|preacher\\s+curls?)\\b", Pattern.CASE_INSENSITIVE);
+    private static final Pattern TRICEPS_PATTERN = Pattern.compile("\\b(?:triceps?|tricep\\s+extensions?|skull\\s+crushers?|pushdowns?)\\b", Pattern.CASE_INSENSITIVE);
     private static final Pattern PUSH_PATTERN = Pattern.compile("\\b(?:push|chest|triceps?|shoulders?|dips?|push[- ]?ups?|đẩy|ngực)\\b", Pattern.CASE_INSENSITIVE);
     private static final Pattern PULL_PATTERN = Pattern.compile("\\b(?:pull|back|biceps?|rows?|chin[- ]?ups?|pull[- ]?ups?|kéo|lưng)\\b", Pattern.CASE_INSENSITIVE);
     private static final Pattern CORE_PATTERN = Pattern.compile("\\b(?:core|abs|abdominal|abdominals|obliques?|planks?|hollow|compression|bụng)\\b", Pattern.CASE_INSENSITIVE);
@@ -460,16 +474,24 @@ public class ExerciseDraftValidationService {
             return null;
         }
         ExerciseCategory enumToken = extractCategoryToken(text);
-        if (enumToken != null && (
-                text.toLowerCase(Locale.US).contains("legs")
-                        || text.toLowerCase(Locale.US).contains("core")
-                        || text.toLowerCase(Locale.US).contains("push")
-                        || text.toLowerCase(Locale.US).contains("pull")
-                        || text.toLowerCase(Locale.US).contains("isometric")
-                        || text.toLowerCase(Locale.US).contains("skill"))) {
-            return enumToken;
+        if (enumToken != null && enumToken != ExerciseCategory.BACK) {
+            if (text.contains(enumToken.name())) {
+                return enumToken;
+            }
+        } else if (UPPERCASE_BACK_TOKEN.matcher(text).find()) {
+            return ExerciseCategory.BACK;
         }
         if (LEGS_PATTERN.matcher(text).find()) return ExerciseCategory.LEGS;
+        if (FLEXIBILITY_PATTERN.matcher(text).find()) return ExerciseCategory.FLEXIBILITY;
+        if (MOBILITY_PATTERN.matcher(text).find()) return ExerciseCategory.MOBILITY;
+        if (FULL_BODY_PATTERN.matcher(text).find()) return ExerciseCategory.FULL_BODY;
+        if (CARDIO_PATTERN.matcher(text).find()) return ExerciseCategory.CARDIO;
+        if (CHEST_PATTERN.matcher(text).find()) return ExerciseCategory.CHEST;
+        if (BACK_PATTERN.matcher(text).find()) return ExerciseCategory.BACK;
+        if (SHOULDERS_PATTERN.matcher(text).find()) return ExerciseCategory.SHOULDERS;
+        if (BICEPS_PATTERN.matcher(text).find()) return ExerciseCategory.BICEPS;
+        if (TRICEPS_PATTERN.matcher(text).find()) return ExerciseCategory.TRICEPS;
+        if (GLUTES_PATTERN.matcher(text).find()) return ExerciseCategory.GLUTES;
         if (PUSH_PATTERN.matcher(text).find()) return ExerciseCategory.PUSH;
         if (PULL_PATTERN.matcher(text).find()) return ExerciseCategory.PULL;
         if (CORE_PATTERN.matcher(text).find()) return ExerciseCategory.CORE;
