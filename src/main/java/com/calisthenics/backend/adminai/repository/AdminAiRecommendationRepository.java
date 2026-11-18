@@ -22,6 +22,8 @@ public interface AdminAiRecommendationRepository extends JpaRepository<AdminAiRe
             AdminRecommendationStatus status
     );
 
+    List<AdminAiRecommendation> findByConversationIdOrderByCreatedAtAsc(Long conversationId);
+
     boolean existsByRecommendationTypeAndTitleIgnoreCaseAndStatusIn(
             AdminRecommendationType recommendationType,
             String title,

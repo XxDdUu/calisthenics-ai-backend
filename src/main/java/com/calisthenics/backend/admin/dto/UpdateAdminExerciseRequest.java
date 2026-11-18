@@ -2,13 +2,16 @@ package com.calisthenics.backend.admin.dto;
 
 import com.calisthenics.backend.exercise.DifficultyLevel;
 import com.calisthenics.backend.exercise.ExerciseCategory;
+import com.calisthenics.backend.exercise.ExerciseOrigin;
+import com.calisthenics.backend.exercise.ExerciseStatus;
+import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
-import jakarta.validation.Valid;
 
 import java.util.List;
+
 public record UpdateAdminExerciseRequest(
         @NotBlank(message = "Exercise name is required")
         @Size(max = 100, message = "Exercise name must not exceed 100 characters")
@@ -42,7 +45,11 @@ public record UpdateAdminExerciseRequest(
         @Size(max = 100, message = "An exercise cannot have more than 100 media items")
         List<@Valid ExerciseMediaItemRequest> mediaItems,
 
-        Boolean replaceMediaItems
+        Boolean replaceMediaItems,
+
+        ExerciseStatus status,
+
+        ExerciseOrigin origin
 ) {
     public UpdateAdminExerciseRequest(
             String name,
@@ -71,6 +78,42 @@ public record UpdateAdminExerciseRequest(
                 equipment,
                 active,
                 mediaItems,
+                null,
+                null,
+                null
+        );
+    }
+
+    public UpdateAdminExerciseRequest(
+            String name,
+            String code,
+            ExerciseCategory category,
+            DifficultyLevel difficulty,
+            String description,
+            String targetMuscles,
+            String instructions,
+            String imageUrl,
+            String videoUrl,
+            String equipment,
+            Boolean active,
+            List<ExerciseMediaItemRequest> mediaItems,
+            Boolean replaceMediaItems
+    ) {
+        this(
+                name,
+                code,
+                category,
+                difficulty,
+                description,
+                targetMuscles,
+                instructions,
+                imageUrl,
+                videoUrl,
+                equipment,
+                active,
+                mediaItems,
+                replaceMediaItems,
+                null,
                 null
         );
     }

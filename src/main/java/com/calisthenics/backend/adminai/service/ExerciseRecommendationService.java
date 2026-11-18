@@ -4,23 +4,46 @@ import com.calisthenics.backend.admin.AdminExerciseService;
 import com.calisthenics.backend.admin.dto.AdminExerciseResponse;
 import com.calisthenics.backend.admin.dto.CreateAdminExerciseRequest;
 import com.calisthenics.backend.adminai.dto.ExerciseRecommendationPayload;
+import com.calisthenics.backend.adminai.dto.data.ExerciseDraftBatchResultResponse;
+import com.calisthenics.backend.adminai.entity.AdminAiConversation;
+import com.calisthenics.backend.adminai.entity.AdminAiRecommendation;
+import com.calisthenics.backend.adminai.repository.AdminAiConversationRepository;
+import com.calisthenics.backend.adminai.repository.AdminAiRecommendationRepository;
+import com.calisthenics.backend.adminai.type.AdminRecommendationPriority;
+import com.calisthenics.backend.adminai.type.AdminRecommendationStatus;
+import com.calisthenics.backend.adminai.type.AdminRecommendationType;
 import com.calisthenics.backend.exercise.DifficultyLevel;
 import com.calisthenics.backend.exercise.Exercise;
 import com.calisthenics.backend.exercise.ExerciseCategory;
+import com.calisthenics.backend.exercise.ExerciseOrigin;
 import com.calisthenics.backend.exercise.ExerciseRepository;
+import com.calisthenics.backend.exercise.ExerciseStatus;
+import com.calisthenics.backend.user.User;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.ZonedDateTime;
 import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class ExerciseRecommendationService {
 
+    private static final Pattern COUNT_PATTERN = Pattern.compile("\\b(\\d+)\\b");
+    private static final String DRAFT_BATCH_PREFIX = "AI_DRAFT_BATCH:";
+
     private final ExerciseRepository exerciseRepository;
     private final AdminExerciseService adminExerciseService;
+    private final AdminAiRecommendationRepository recommendationRepository;
+    private final AdminAiConversationRepository conversationRepository;
+    private final ObjectMapper objectMapper;
 
     private static final List<ExerciseRecommendationPayload> CANONICAL_PROGRESSION_LIBRARY = List.of(
             // Planche Progressions
@@ -413,6 +436,232 @@ public class ExerciseRecommendationService {
                     .description("Full-depth single-leg squat with the non-working leg extended forward off the floor.")
                     .instructions("Extend one leg straight in front, descend under control to full depth on the standing leg, and drive through heel to stand.")
                     .whyAdd("Addresses lower-body progression gaps beyond basic Bodyweight Squats.")
+                    .build(),
+            ExerciseRecommendationPayload.builder()
+                    .name("Bulgarian Split Squat")
+                    .code("BULGARIAN_SPLIT_SQUAT")
+                    .category(ExerciseCategory.LEGS)
+                    .difficulty(DifficultyLevel.BEGINNER)
+                    .targetSkill("Single-Leg Strength")
+                    .progressionLevel("Split-Stance Strength & Balance")
+                    .prerequisites("15 Bodyweight Squats, 10 Lunges per leg")
+                    .targetMuscles("Quadriceps, Glutes, Hip Stabilizers")
+                    .equipment("Bench or Low Box")
+                    .description("Rear-foot-elevated unilateral squat building single-leg hypertrophy, balance, and knee stability.")
+                    .instructions("Place top of rear foot on bench behind you, lower back knee vertically under control until front thigh is parallel or below, and drive up through front heel.")
+                    .whyAdd("Bridges bilateral squats and advanced unilateral work like Pistol Squats.")
+                    .build(),
+            ExerciseRecommendationPayload.builder()
+                    .name("Cossack Squat")
+                    .code("COSSACK_SQUAT")
+                    .category(ExerciseCategory.LEGS)
+                    .difficulty(DifficultyLevel.INTERMEDIATE)
+                    .targetSkill("Lower Body Mobility & Strength")
+                    .progressionLevel("Lateral Squat & Adductor Strength")
+                    .prerequisites("20 Deep Bodyweight Squats")
+                    .targetMuscles("Quadriceps, Adductors, Glutes, Hamstrings, Ankles")
+                    .equipment("Floor")
+                    .description("Deep lateral single-leg squat shifting weight fully over one heel while the opposite leg stays straight.")
+                    .instructions("Take a wide stance, sit hips back and down over one leg keeping the working heel flat and trailing toes pointed upward, then switch sides.")
+                    .whyAdd("Develops frontal-plane leg strength alongside hip and ankle mobility.")
+                    .build(),
+            ExerciseRecommendationPayload.builder()
+                    .name("Assisted Pistol Squat")
+                    .code("ASSISTED_PISTOL_SQUAT")
+                    .category(ExerciseCategory.LEGS)
+                    .difficulty(DifficultyLevel.INTERMEDIATE)
+                    .targetSkill("Single-Leg Strength")
+                    .progressionLevel("Step 2 - Counterbalance or Support Pistol")
+                    .prerequisites("12 Bulgarian Split Squats per side")
+                    .targetMuscles("Quadriceps, Glutes, Core, Ankle Dorsiflexors")
+                    .equipment("Doorframe, Pole, or Suspension Straps")
+                    .description("Support-assisted single-leg pistol squat allowing strict control through the bottom sticking point.")
+                    .instructions("Lightly hold a vertical support in front of chest, extend free leg forward, descend slowly to full depth, and stand using minimal arm assistance.")
+                    .whyAdd("Teaches full pistol squat mechanics before unassisted reps.")
+                    .build(),
+            ExerciseRecommendationPayload.builder()
+                    .name("Shrimp Squat")
+                    .code("SHRIMP_SQUAT")
+                    .category(ExerciseCategory.LEGS)
+                    .difficulty(DifficultyLevel.INTERMEDIATE)
+                    .targetSkill("Single-Leg Strength")
+                    .progressionLevel("Quad-Dominant Unilateral Squat")
+                    .prerequisites("12 Bulgarian Split Squats per leg")
+                    .targetMuscles("Quadriceps, Glutes, Balance Stabilizers")
+                    .equipment("Floor")
+                    .description("Single-leg squat with the rear foot tucked behind the glutes rather than extended forward.")
+                    .instructions("Hold non-working ankle behind your glutes or hover it behind you, hinge slightly forward, lower back knee gently to floor, and press back up.")
+                    .whyAdd("Builds heavy single-leg quadriceps strength with less hamstring flexibility demand than Pistol Squats.")
+                    .build(),
+            ExerciseRecommendationPayload.builder()
+                    .name("Nordic Hamstring Curl")
+                    .code("NORDIC_HAMSTRING_CURL")
+                    .category(ExerciseCategory.LEGS)
+                    .difficulty(DifficultyLevel.ADVANCED)
+                    .targetSkill("Posterior Chain Strength")
+                    .progressionLevel("Eccentric & Concentric Knee Flexion")
+                    .prerequisites("15 Glute Bridges, 12 Single-Leg Glute Bridges")
+                    .targetMuscles("Hamstrings, Glutes, Calves, Core")
+                    .equipment("Partner, Strap, or Anchored Bar")
+                    .description("High-tension bodyweight knee-flexion movement focusing on eccentric hamstring strength and resilience.")
+                    .instructions("Kneel with ankles anchored securely, maintain a straight torso-to-thigh line, lower chest toward floor as slowly as possible using hamstrings, and push lightly off hands to reset.")
+                    .whyAdd("Provides unmatched bodyweight posterior-chain overload and hamstring injury protection.")
+                    .build(),
+            ExerciseRecommendationPayload.builder()
+                    .name("Single-Leg Calf Raise")
+                    .code("SINGLE_LEG_CALF_RAISE")
+                    .category(ExerciseCategory.LEGS)
+                    .difficulty(DifficultyLevel.BEGINNER)
+                    .targetSkill("Lower Body Strength")
+                    .progressionLevel("Ankle & Calf Conditioning")
+                    .prerequisites("20 Two-Leg Calf Raises")
+                    .targetMuscles("Gastrocnemius, Soleus, Ankle Stabilizers")
+                    .equipment("Step or Floor")
+                    .description("Unilateral standing calf raise through a full ankle plantar-to-dorsiflexion range of motion.")
+                    .instructions("Stand on the edge of a step on one foot, lower heel slowly to a deep stretch for 2 seconds, pause, and drive smoothly onto the ball of the foot.")
+                    .whyAdd("Strengthens calves and Achilles tendons for pistol squats and plyometrics.")
+                    .build(),
+            ExerciseRecommendationPayload.builder()
+                    .name("Sissy Squat")
+                    .code("SISSY_SQUAT")
+                    .category(ExerciseCategory.LEGS)
+                    .difficulty(DifficultyLevel.INTERMEDIATE)
+                    .targetSkill("Quadriceps Strength")
+                    .progressionLevel("Isolated Knee Extension Strength")
+                    .prerequisites("25 Bodyweight Squats")
+                    .targetMuscles("Quadriceps, Rectus Femoris, Core, Hip Flexors")
+                    .equipment("Floor or Support Pole")
+                    .description("Lean-back knee-dominant bodyweight squat isolating the quadriceps through deep knee flexion.")
+                    .instructions("Stand tall, rise onto balls of feet, drive knees forward while leaning torso straight back in one line with thighs, pause low, and extend knees strongly.")
+                    .whyAdd("Delivers deep bodyweight quadriceps stretch and tendon strength without external weights.")
+                    .build(),
+            ExerciseRecommendationPayload.builder()
+                    .name("Single-Leg Glute Bridge")
+                    .code("SINGLE_LEG_GLUTE_BRIDGE")
+                    .category(ExerciseCategory.LEGS)
+                    .difficulty(DifficultyLevel.BEGINNER)
+                    .targetSkill("Posterior Chain Strength")
+                    .progressionLevel("Unilateral Hip Extension")
+                    .prerequisites("20 Two-Leg Glute Bridges")
+                    .targetMuscles("Gluteus Maximus, Hamstrings, Core")
+                    .equipment("Floor")
+                    .description("Unilateral floor hip thrust isolating glute drive and pelvic stability.")
+                    .instructions("Lie supine with one foot planted flat and opposite leg extended upward, squeeze glutes to drive hips to full extension, pause 1 second, and lower smoothly.")
+                    .whyAdd("Builds foundational posterior chain activation alongside squat patterns.")
+                    .build(),
+            ExerciseRecommendationPayload.builder()
+                    .name("Explosive Jump Squat")
+                    .code("EXPLOSIVE_JUMP_SQUAT")
+                    .category(ExerciseCategory.LEGS)
+                    .difficulty(DifficultyLevel.BEGINNER)
+                    .targetSkill("Lower Body Power")
+                    .progressionLevel("Plyometric Squat Power")
+                    .prerequisites("20 Strict Bodyweight Squats")
+                    .targetMuscles("Quadriceps, Glutes, Calves, Hip Extensors")
+                    .equipment("Floor")
+                    .description("Dynamic triple-extension squat jump developing explosive lower-body power and landing mechanics.")
+                    .instructions("Descend to a quarter-or-half squat, explode vertically off the ground, and absorb landing softly with aligned knees.")
+                    .whyAdd("Adds athletic power training to bodyweight leg programs.")
+                    .build(),
+            ExerciseRecommendationPayload.builder()
+                    .name("Reverse Nordic Curl")
+                    .code("REVERSE_NORDIC_CURL")
+                    .category(ExerciseCategory.LEGS)
+                    .difficulty(DifficultyLevel.INTERMEDIATE)
+                    .targetSkill("Quadriceps Mobility & Strength")
+                    .progressionLevel("Eccentric Quad Extension")
+                    .prerequisites("20 Bodyweight Squats")
+                    .targetMuscles("Rectus Femoris, Vastus Lateralis, Hip Flexors, Core")
+                    .equipment("Mat or Soft Floor")
+                    .description("Kneeling eccentric quadriceps exercise lowering the rigid torso backward toward the heels.")
+                    .instructions("Kneel tall with glutes and abs braced, lean straight backward from the knees as far as controlled without arching lower back, then pull back upright.")
+                    .whyAdd("Strengthens end-range knee flexion and rectus femoris flexibility simultaneously.")
+                    .build(),
+
+            // Additional Core / Push / Pull exercises
+            ExerciseRecommendationPayload.builder()
+                    .name("Hollow Body Hold")
+                    .code("HOLLOW_BODY_HOLD")
+                    .category(ExerciseCategory.CORE)
+                    .difficulty(DifficultyLevel.BEGINNER)
+                    .targetSkill("Core & Compression")
+                    .progressionLevel("Fundamental Anti-Extension Line")
+                    .prerequisites("30s Plank")
+                    .targetMuscles("Rectus Abdominis, Transverse Abdominis, Hip Flexors")
+                    .equipment("Floor")
+                    .description("Gymnastics foundational core hold maintaining posterior pelvic tilt with arms and legs extended.")
+                    .instructions("Press lower back firmly into the floor, lift shoulder blades and straight legs slightly off the ground, and breathe steadily without losing lumbar contact.")
+                    .whyAdd("Foundation for Handstand, Planche, Front Lever, and Hanging Leg Raises.")
+                    .build(),
+            ExerciseRecommendationPayload.builder()
+                    .name("Hanging Leg Raise")
+                    .code("HANGING_LEG_RAISE")
+                    .category(ExerciseCategory.CORE)
+                    .difficulty(DifficultyLevel.INTERMEDIATE)
+                    .targetSkill("Core & Compression")
+                    .progressionLevel("Strict Bar Compression")
+                    .prerequisites("30s Dead Hang, 12 Knee Raises")
+                    .targetMuscles("Lower Abdominals, Hip Flexors, Lats, Grip")
+                    .equipment("Pull-Up Bar")
+                    .description("Strict straight-leg raise from dead hang lifting toes all the way to the bar without swinging.")
+                    .instructions("Start from a still dead hang, depress shoulders slightly, raise straight legs smoothly until shins tap the bar, and lower under control.")
+                    .whyAdd("Develops active pike compression and grip endurance.")
+                    .build(),
+            ExerciseRecommendationPayload.builder()
+                    .name("Archer Push-Up")
+                    .code("ARCHER_PUSH_UP")
+                    .category(ExerciseCategory.PUSH)
+                    .difficulty(DifficultyLevel.INTERMEDIATE)
+                    .targetSkill("One-Arm Push-Up Progression")
+                    .progressionLevel("Unilateral Horizontal Pressing")
+                    .prerequisites("25 Strict Push-Ups, 10 Diamond Push-Ups")
+                    .targetMuscles("Pectorals, Anterior Deltoids, Triceps, Core")
+                    .equipment("Floor")
+                    .description("Wide-stance pushing progression shifting weight heavily onto one pressing arm while the assisting arm stays straight.")
+                    .instructions("Adopt a wide hand stance with fingers angled out, lower chest toward one hand while extending opposite arm straight sideways, press back to center, and alternate.")
+                    .whyAdd("Builds single-arm pressing strength without weights.")
+                    .build(),
+            ExerciseRecommendationPayload.builder()
+                    .name("Diamond Push-Up")
+                    .code("DIAMOND_PUSH_UP")
+                    .category(ExerciseCategory.PUSH)
+                    .difficulty(DifficultyLevel.BEGINNER)
+                    .targetSkill("Upper Body Pushing")
+                    .progressionLevel("Close-Grip Pressing")
+                    .prerequisites("12 Standard Push-Ups")
+                    .targetMuscles("Triceps, Inner Chest, Anterior Deltoids, Core")
+                    .equipment("Floor")
+                    .description("Close-grip push-up variation emphasizing triceps lockout and shoulder stability.")
+                    .instructions("Place hands together beneath sternum forming a triangle with thumbs and index fingers, keep elbows tracking cleanly back, lower chest to hands, and press up.")
+                    .whyAdd("Essential hypertrophy and lockout progression after basic push-ups.")
+                    .build(),
+            ExerciseRecommendationPayload.builder()
+                    .name("Australian Pull-Up")
+                    .code("AUSTRALIAN_PULL_UP")
+                    .category(ExerciseCategory.PULL)
+                    .difficulty(DifficultyLevel.BEGINNER)
+                    .targetSkill("Upper Body Pulling")
+                    .progressionLevel("Horizontal Row Foundation")
+                    .prerequisites("20s Dead Hang")
+                    .targetMuscles("Mid-Back, Lats, Rhomboids, Posterior Deltoids, Biceps")
+                    .equipment("Low Bar or Gymnastic Rings")
+                    .description("Horizontal bodyweight row scalable by body angle for beginners building pulling volume and scapular control.")
+                    .instructions("Keep body straight in a plank beneath a chest-high bar, pull chest cleanly to bar squeezing shoulder blades together, pause, and lower to straight arms.")
+                    .whyAdd("Key beginner horizontal pull before strict vertical pull-ups.")
+                    .build(),
+            ExerciseRecommendationPayload.builder()
+                    .name("Archer Pull-Up")
+                    .code("ARCHER_PULL_UP")
+                    .category(ExerciseCategory.PULL)
+                    .difficulty(DifficultyLevel.ADVANCED)
+                    .targetSkill("One-Arm Pull-Up Progression")
+                    .progressionLevel("Unilateral Vertical Pulling")
+                    .prerequisites("15 Strict Pull-Ups")
+                    .targetMuscles("Lats, Biceps, Brachialis, Forearms, Rear Deltoids")
+                    .equipment("Pull-Up Bar")
+                    .description("Wide-grip pulling movement driving one shoulder toward the hand while keeping the assisting arm relatively straight.")
+                    .instructions("Grip wide on bar, pull chest dynamically toward one hand while extending opposite arm toward straight, lower slowly, and alternate sides.")
+                    .whyAdd("Essential bridge between weighted/high-rep pull-ups and One-Arm Pull-Ups.")
                     .build()
     );
 
@@ -486,9 +735,314 @@ public class ExerciseRecommendationService {
                 null,
                 payload.getEquipment(),
                 publishImmediately,
-                List.of()
+                List.of(),
+                publishImmediately ? ExerciseStatus.PUBLISHED : ExerciseStatus.DRAFT,
+                ExerciseOrigin.AI_RECOMMENDED
         );
         return adminExerciseService.createExercise(createReq);
+    }
+
+    @Transactional
+    public ExerciseDraftBatchResultResponse createExerciseDrafts(
+            User admin,
+            Long conversationId,
+            String userPrompt,
+            ExerciseCategory explicitCategory,
+            String skillFilter,
+            DifficultyLevel difficultyFilter,
+            Integer requestedCount
+    ) {
+        int targetCount = resolveRequestedCount(userPrompt, requestedCount);
+        ExerciseCategory targetCategory = explicitCategory != null
+                ? explicitCategory
+                : detectCategoryFromText(userPrompt, skillFilter);
+        String categoryLabel = targetCategory != null
+                ? targetCategory.name()
+                : (skillFilter != null && !skillFilter.isBlank() ? skillFilter.trim() : "GENERAL");
+        String signature = buildDraftBatchSignature(userPrompt, targetCategory, difficultyFilter, targetCount);
+
+        AdminAiConversation conversation = conversationId != null
+                ? conversationRepository.findById(conversationId).orElse(null)
+                : null;
+
+        // Idempotent retry protection within the same conversation or within 60 seconds for the same admin
+        List<AdminExerciseResponse> priorRetryMatches = findExistingRetryBatchDrafts(admin, conversationId, signature);
+        if (!priorRetryMatches.isEmpty()) {
+            return ExerciseDraftBatchResultResponse.builder()
+                    .success(true)
+                    .category(categoryLabel)
+                    .requestedCount(targetCount)
+                    .createdCount(0)
+                    .createdExercises(List.of())
+                    .existingDrafts(priorRetryMatches)
+                    .message("Prevented duplicate creation on retry; returning " + priorRetryMatches.size()
+                            + " already saved draft exercise(s).")
+                    .build();
+        }
+
+        List<Exercise> existingCatalog = exerciseRepository.findAll();
+        Set<String> existingNames = existingCatalog.stream()
+                .map(e -> normalizeIdentifier(e.getName()))
+                .collect(Collectors.toSet());
+        Set<String> existingCodes = existingCatalog.stream()
+                .map(e -> normalizeIdentifier(e.getCode()))
+                .collect(Collectors.toSet());
+
+        List<ExerciseRecommendationPayload> matchingPool = CANONICAL_PROGRESSION_LIBRARY.stream()
+                .filter(c -> !existingNames.contains(normalizeIdentifier(c.getName()))
+                        && !existingCodes.contains(normalizeIdentifier(c.getCode())))
+                .filter(c -> matchesCategoryOrSkill(c, targetCategory, skillFilter))
+                .toList();
+
+        List<ExerciseRecommendationPayload> selected = new ArrayList<>();
+        if (difficultyFilter != null) {
+            matchingPool.stream()
+                    .filter(c -> c.getDifficulty() == difficultyFilter)
+                    .limit(targetCount)
+                    .forEach(selected::add);
+        }
+        for (ExerciseRecommendationPayload candidate : matchingPool) {
+            if (selected.size() >= targetCount) {
+                break;
+            }
+            if (selected.stream().noneMatch(s -> normalizeIdentifier(s.getName())
+                    .equals(normalizeIdentifier(candidate.getName())))) {
+                selected.add(candidate);
+            }
+        }
+
+        if (selected.isEmpty()) {
+            List<AdminExerciseResponse> existingCategoryDrafts = existingCatalog.stream()
+                    .filter(e -> e.getStatus() == ExerciseStatus.DRAFT && e.getOrigin() == ExerciseOrigin.AI_RECOMMENDED)
+                    .filter(e -> targetCategory == null || e.getCategory() == targetCategory)
+                    .sorted(Comparator.comparing(Exercise::getId, Comparator.nullsLast(Comparator.reverseOrder())))
+                    .limit(targetCount)
+                    .map(e -> adminExerciseService.getExercise(e.getId()))
+                    .toList();
+            if (!existingCategoryDrafts.isEmpty()) {
+                return ExerciseDraftBatchResultResponse.builder()
+                        .success(true)
+                        .category(categoryLabel)
+                        .requestedCount(targetCount)
+                        .createdCount(0)
+                        .createdExercises(List.of())
+                        .existingDrafts(existingCategoryDrafts)
+                        .message("All matching canonical " + categoryLabel
+                                + " exercises already exist in the catalog, including "
+                                + existingCategoryDrafts.size() + " AI-recommended draft(s).")
+                        .build();
+            }
+            return ExerciseDraftBatchResultResponse.builder()
+                    .success(false)
+                    .errorMessage("No new unique " + categoryLabel
+                            + " exercises remain to add without duplicating existing catalog entries.")
+                    .category(categoryLabel)
+                    .requestedCount(targetCount)
+                    .createdCount(0)
+                    .build();
+        }
+
+        List<AdminExerciseResponse> createdExercises = new ArrayList<>();
+        try {
+            for (ExerciseRecommendationPayload payload : selected) {
+                CreateAdminExerciseRequest createReq = new CreateAdminExerciseRequest(
+                        payload.getName().trim(),
+                        payload.getCode(),
+                        payload.getCategory() != null ? payload.getCategory() : ExerciseCategory.SKILL,
+                        payload.getDifficulty() != null ? payload.getDifficulty() : DifficultyLevel.INTERMEDIATE,
+                        payload.getDescription(),
+                        payload.getTargetMuscles(),
+                        payload.getInstructions(),
+                        null,
+                        null,
+                        payload.getEquipment(),
+                        false,
+                        List.of(),
+                        ExerciseStatus.DRAFT,
+                        ExerciseOrigin.AI_RECOMMENDED
+                );
+                AdminExerciseResponse saved = adminExerciseService.createExercise(createReq);
+                if (saved == null || saved.id() == null || !exerciseRepository.existsById(saved.id())) {
+                    throw new IllegalStateException("Persistence verification failed for exercise: " + payload.getName());
+                }
+                createdExercises.add(saved);
+
+                saveRecommendationTrace(admin, conversation, payload, saved.id(), signature);
+            }
+        } catch (Exception ex) {
+            log.error("Failed while persisting AI exercise drafts: {}", ex.getMessage(), ex);
+            return ExerciseDraftBatchResultResponse.builder()
+                    .success(false)
+                    .errorMessage("Failed to save AI exercise drafts to database: " + ex.getMessage())
+                    .category(categoryLabel)
+                    .requestedCount(targetCount)
+                    .createdCount(createdExercises.size())
+                    .createdExercises(createdExercises)
+                    .build();
+        }
+
+        return ExerciseDraftBatchResultResponse.builder()
+                .success(!createdExercises.isEmpty())
+                .errorMessage(createdExercises.isEmpty() ? "No exercises were persisted." : null)
+                .category(categoryLabel)
+                .requestedCount(targetCount)
+                .createdCount(createdExercises.size())
+                .createdExercises(createdExercises)
+                .existingDrafts(List.of())
+                .message("Saved " + createdExercises.size() + " AI-recommended exercise draft(s) in " + categoryLabel + ".")
+                .build();
+    }
+
+    private List<AdminExerciseResponse> findExistingRetryBatchDrafts(
+            User admin,
+            Long conversationId,
+            String signature
+    ) {
+        String marker = DRAFT_BATCH_PREFIX + signature;
+        List<AdminAiRecommendation> candidates = new ArrayList<>();
+        if (conversationId != null) {
+            candidates.addAll(recommendationRepository.findByConversationIdOrderByCreatedAtAsc(conversationId));
+        } else if (admin != null) {
+            ZonedDateTime cutoff = ZonedDateTime.now().minusSeconds(60);
+            recommendationRepository.findByRecommendationTypeOrderByCreatedAtDesc(AdminRecommendationType.EXERCISE).stream()
+                    .filter(r -> r.getCreatedByAdmin() != null && Objects.equals(r.getCreatedByAdmin().getId(), admin.getId()))
+                    .filter(r -> r.getCreatedAt() == null || !r.getCreatedAt().isBefore(cutoff))
+                    .forEach(candidates::add);
+        }
+
+        List<Long> matchedIds = candidates.stream()
+                .filter(r -> marker.equals(r.getReviewNotes())
+                        && "EXERCISE".equalsIgnoreCase(r.getCreatedResourceType())
+                        && r.getCreatedResourceId() != null)
+                .map(AdminAiRecommendation::getCreatedResourceId)
+                .distinct()
+                .toList();
+
+        if (matchedIds.isEmpty()) {
+            return List.of();
+        }
+        return exerciseRepository.findAllById(matchedIds).stream()
+                .map(e -> adminExerciseService.getExercise(e.getId()))
+                .toList();
+    }
+
+    private void saveRecommendationTrace(
+            User admin,
+            AdminAiConversation conversation,
+            ExerciseRecommendationPayload payload,
+            Long createdExerciseId,
+            String signature
+    ) {
+        String payloadJson = "{}";
+        try {
+            payloadJson = objectMapper.writeValueAsString(payload);
+        } catch (Exception ignored) {
+        }
+        AdminAiRecommendation entity = AdminAiRecommendation.builder()
+                .recommendationType(AdminRecommendationType.EXERCISE)
+                .status(AdminRecommendationStatus.APPROVED)
+                .priority(AdminRecommendationPriority.MEDIUM)
+                .title("AI Draft Exercise: " + payload.getName())
+                .summary(payload.getDescription())
+                .rationale(payload.getWhyAdd())
+                .payloadJson(payloadJson)
+                .conversation(conversation)
+                .createdByAdmin(admin)
+                .reviewedByAdmin(admin)
+                .reviewedAt(ZonedDateTime.now())
+                .reviewNotes(DRAFT_BATCH_PREFIX + signature)
+                .createdResourceId(createdExerciseId)
+                .createdResourceType("EXERCISE")
+                .build();
+        recommendationRepository.save(entity);
+    }
+
+    private boolean matchesCategoryOrSkill(
+            ExerciseRecommendationPayload candidate,
+            ExerciseCategory targetCategory,
+            String skillFilter
+    ) {
+        if (targetCategory != null) {
+            return candidate.getCategory() == targetCategory;
+        }
+        if (skillFilter != null && !skillFilter.isBlank()) {
+            String filterLower = skillFilter.trim().toLowerCase(Locale.US);
+            return (candidate.getTargetSkill() != null && candidate.getTargetSkill().toLowerCase(Locale.US).contains(filterLower))
+                    || candidate.getName().toLowerCase(Locale.US).contains(filterLower)
+                    || candidate.getCategory().name().toLowerCase(Locale.US).contains(filterLower);
+        }
+        return true;
+    }
+
+    public static ExerciseCategory detectCategoryFromText(String prompt, String skillFilter) {
+        String combined = ((prompt != null ? prompt : "") + " " + (skillFilter != null ? skillFilter : ""))
+                .toLowerCase(Locale.US);
+        if (combined.contains("leg") || combined.contains("squat") || combined.contains("lower body")
+                || combined.contains("quad") || combined.contains("hamstring") || combined.contains("calf")
+                || combined.contains("glute") || combined.contains("chân") || combined.contains("đùi")) {
+            return ExerciseCategory.LEGS;
+        }
+        if (combined.contains("push") || combined.contains("chest") || combined.contains("tricep")
+                || combined.contains("shoulder") || combined.contains("dip") || combined.contains("đẩy")
+                || combined.contains("ngực")) {
+            return ExerciseCategory.PUSH;
+        }
+        if (combined.contains("pull") || combined.contains("back") || combined.contains("bicep")
+                || combined.contains("row") || combined.contains("chin") || combined.contains("kéo")
+                || combined.contains("lưng")) {
+            return ExerciseCategory.PULL;
+        }
+        if (combined.contains("core") || combined.contains(" abs") || combined.contains("abdominal")
+                || combined.contains("plank") || combined.contains("hollow") || combined.contains("bụng")) {
+            return ExerciseCategory.CORE;
+        }
+        if (combined.contains("isometric") || combined.contains("hold") || combined.contains("tĩnh")) {
+            return ExerciseCategory.ISOMETRIC;
+        }
+        if (combined.contains("skill") || combined.contains("planche") || combined.contains("lever")
+                || combined.contains("handstand") || combined.contains("flag") || combined.contains("muscle-up")) {
+            return ExerciseCategory.SKILL;
+        }
+        return null;
+    }
+
+    public static int resolveRequestedCount(String prompt, Integer explicitCount) {
+        if (explicitCount != null && explicitCount > 0) {
+            return Math.min(10, explicitCount);
+        }
+        if (prompt == null || prompt.isBlank()) {
+            return 3;
+        }
+        String lower = prompt.toLowerCase(Locale.US);
+        Matcher m = COUNT_PATTERN.matcher(lower);
+        if (m.find()) {
+            try {
+                int parsed = Integer.parseInt(m.group(1));
+                if (parsed >= 1 && parsed <= 10) {
+                    return parsed;
+                }
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        if (lower.contains(" three ") || lower.contains(" 3 ") || lower.contains(" ba ")) return 3;
+        if (lower.contains(" two ") || lower.contains(" 2 ") || lower.contains(" hai ")) return 2;
+        if (lower.contains(" four ") || lower.contains(" 4 ") || lower.contains(" bốn ")) return 4;
+        if (lower.contains(" five ") || lower.contains(" 5 ") || lower.contains(" năm ")) return 5;
+        if (lower.contains(" one ") || lower.contains(" a new ") || lower.contains(" một ")) return 1;
+        return 3;
+    }
+
+    private String buildDraftBatchSignature(
+            String userPrompt,
+            ExerciseCategory category,
+            DifficultyLevel difficulty,
+            int count
+    ) {
+        String normPrompt = userPrompt == null ? "" : userPrompt.trim().toLowerCase(Locale.US).replaceAll("\\s+", " ");
+        return (category != null ? category.name() : "ANY")
+                + "|" + (difficulty != null ? difficulty.name() : "ANY")
+                + "|" + count
+                + "|" + Integer.toHexString(normPrompt.hashCode());
     }
 
     public static String normalizeIdentifier(String input) {

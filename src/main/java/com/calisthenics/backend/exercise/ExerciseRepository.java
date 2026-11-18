@@ -18,9 +18,19 @@ public interface ExerciseRepository extends JpaRepository<Exercise, Long>, JpaSp
 
     List<Exercise> findByActiveTrue();
 
+    List<Exercise> findByActiveTrueOrderByNameAsc();
+
     List<Exercise> findByCategory(ExerciseCategory category);
 
     List<Exercise> findByDifficulty(DifficultyLevel difficulty);
+
+    long countByStatus(ExerciseStatus status);
+
+    long countByOrigin(ExerciseOrigin origin);
+
+    long countByActiveTrue();
+
+    long countByActiveFalse();
 
     boolean existsByCode(String code);
 

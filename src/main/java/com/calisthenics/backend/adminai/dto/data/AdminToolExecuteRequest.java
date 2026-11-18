@@ -1,6 +1,8 @@
 package com.calisthenics.backend.adminai.dto.data;
 
 import com.calisthenics.backend.adminai.type.AdminAnalyticsRange;
+import com.calisthenics.backend.exercise.DifficultyLevel;
+import com.calisthenics.backend.exercise.ExerciseCategory;
 import com.calisthenics.backend.gettingstarted.dto.AdminGettingStartedProgramRequest;
 import com.calisthenics.backend.gettingstarted.dto.GettingStartedExerciseOperationRequest;
 import lombok.AllArgsConstructor;
@@ -43,4 +45,9 @@ public class AdminToolExecuteRequest {
     // PRO entitlement management fields
     private String userIdentifier;
     private String reason;
+
+    // Exercise draft creation fields
+    private Integer requestedCount;
+    private ExerciseCategory exerciseCategory;
+    private DifficultyLevel difficultyLevel;
 }

@@ -392,9 +392,31 @@ public class GeminiApiClient {
         prSchema.put("properties", prProperties);
 
         Map<String, Object> planProperties = new LinkedHashMap<>();
-        planProperties.put("prompt", Map.of("type", "STRING", "description", "Distilled workout plan generation prompt"));
+        planProperties.put("prompt", Map.of("type", "STRING", "description", "Distilled workout plan generation or query prompt"));
         planProperties.put("fitness_level", Map.of("type", "STRING", "enum", List.of("BEGINNER", "INTERMEDIATE", "ADVANCED")));
         planProperties.put("duration_weeks", Map.of("type", "INTEGER", "description", "Program duration in weeks (1-12)"));
+        planProperties.put("tool_name", Map.of(
+                "type", "STRING",
+                "enum", List.of(
+                        "get_my_workout_plan",
+                        "get_weekly_workout_schedule",
+                        "get_workout_day_details",
+                        "get_exercise_details",
+                        "create_workout_plan",
+                        "update_workout_plan",
+                        "assign_workout_plan",
+                        "add_exercise_to_workout",
+                        "remove_exercise_from_workout",
+                        "regenerate_workout_plan"
+                ),
+                "description", "Read-only tools for view/show/list/explain requests; write tools only for explicit create/modify/replace requests"
+        ));
+        planProperties.put("day_of_week", Map.of(
+                "type", "STRING",
+                "enum", List.of("MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY", "TODAY", "NEXT"),
+                "description", "Target day if asking about or modifying a specific day"
+        ));
+        planProperties.put("detailed", Map.of("type", "BOOLEAN", "description", "True when user asks for full details or instructions"));
 
         Map<String, Object> planSchema = new LinkedHashMap<>();
         planSchema.put("type", "OBJECT");
@@ -430,7 +452,17 @@ public class GeminiApiClient {
         Map<String, Object> rootProperties = new LinkedHashMap<>();
         rootProperties.put("intent", Map.of(
                 "type", "STRING",
-                "enum", List.of("WORKOUT_PLAN", "PR_RECORD", "PROGRESS_ANALYSIS", "PROFILE_UPDATE", "GENERAL_CHAT"),
+                "enum", List.of(
+                        "WORKOUT_PLAN",
+                        "WORKOUT_PLAN_VIEW",
+                        "WORKOUT_DAY_VIEW",
+                        "EXERCISE_DETAILS_VIEW",
+                        "WORKOUT_PLAN_UPDATE",
+                        "PR_RECORD",
+                        "PROGRESS_ANALYSIS",
+                        "PROFILE_UPDATE",
+                        "GENERAL_CHAT"
+                ),
                 "description", "Detected user intent"
         ));
         rootProperties.put("reply", Map.of(
@@ -458,6 +490,7 @@ public class GeminiApiClient {
                         "PLATFORM_OVERVIEW",
                         "USER_TRAINING_ANALYTICS",
                         "EXERCISE_RECOMMENDATION",
+                        "EXERCISE_DRAFT_CREATION",
                         "WORKOUT_PROGRAM_RECOMMENDATION",
                         "OPERATIONAL_INSIGHTS",
                         "GENERAL_ADMIN_ADVISORY",
@@ -490,6 +523,7 @@ public class GeminiApiClient {
                                 "get_platform_engagement",
                                 "analyze_user_segments",
                                 "generate_admin_recommendations",
+                                "create_exercise_drafts",
                                 "createProgram",
                                 "updateProgram",
                                 "previewProgram",
@@ -556,6 +590,7 @@ public class GeminiApiClient {
                         "PLATFORM_OVERVIEW",
                         "USER_TRAINING_ANALYTICS",
                         "EXERCISE_RECOMMENDATION",
+                        "EXERCISE_DRAFT_CREATION",
                         "WORKOUT_PROGRAM_RECOMMENDATION",
                         "OPERATIONAL_INSIGHTS",
                         "GENERAL_ADMIN_ADVISORY",

@@ -169,7 +169,9 @@ public class AdminAIService {
         String fullSystemPrompt = baseSystemPrompt + "\n" + routedTools.sanitizedToolContextForPrompt();
 
         GeminiAdminAgentOutput geminiOutput = null;
-        if (routedTools.pendingConfirmation() == null && routedTools.proToolResult() == null) {
+        if (routedTools.pendingConfirmation() == null
+                && routedTools.proToolResult() == null
+                && routedTools.exerciseDraftResult() == null) {
             try {
                 geminiOutput = geminiApiClient.callAdminAgent(fullSystemPrompt, geminiContents).orElse(null);
             } catch (Exception ex) {
@@ -183,7 +185,9 @@ public class AdminAIService {
         }
 
         List<AdminRecommendationResponse> generatedRecommendations = new ArrayList<>();
-        boolean skipGlobalRecs = isGettingStartedOrCampaignIntent(intent) || intent == AdminAiIntent.PRO_MANAGEMENT;
+        boolean skipGlobalRecs = isGettingStartedOrCampaignIntent(intent)
+                || intent == AdminAiIntent.PRO_MANAGEMENT
+                || intent == AdminAiIntent.EXERCISE_DRAFT_CREATION;
         boolean wantsGlobalRecs = !skipGlobalRecs && ((geminiOutput != null && Boolean.TRUE.equals(geminiOutput.getGenerateRecommendations()))
                 || (userPrompt.toLowerCase().contains("recommend")
                 && !userPrompt.toLowerCase().contains("what exercises")
@@ -207,7 +211,9 @@ public class AdminAIService {
         }
 
         boolean requireDeterministicReply = routedTools.pendingConfirmation() != null
-                || routedTools.proToolResult() != null;
+                || routedTools.proToolResult() != null
+                || routedTools.exerciseDraftResult() != null
+                || (geminiOutput != null && claimsUnsubstantiatedExerciseCreation(geminiOutput.getReply(), routedTools));
         String replyContent = (!requireDeterministicReply
                 && geminiOutput != null
                 && geminiOutput.getReply() != null
@@ -229,6 +235,10 @@ public class AdminAIService {
         );
 
         conversationService.updateTitleIfDefault(conversation, generateConversationTitle(userPrompt, intent));
+
+        List<AdminExerciseResponse> createdDrafts = routedTools.exerciseDraftResult() != null
+                ? routedTools.exerciseDraftResult().getCreatedExercises()
+                : null;
 
         return AdminChatResponse.builder()
                 .conversationId(conversation.getId())
@@ -258,6 +268,8 @@ public class AdminAIService {
                 .proCandidates(routedTools.proToolResult() != null
                         ? routedTools.proToolResult().getCandidates()
                         : null)
+                .createdExercises(createdDrafts)
+                .exerciseDraftResult(routedTools.exerciseDraftResult())
                 .missingDataNotes(routedTools.missingDataNotes())
                 .suggestedFollowUps(followUps)
                 .build();
@@ -772,6 +784,7 @@ public class AdminAIService {
                 - grantPro (prepare a confirmation request before granting unlimited admin PRO access to target_user_identifier [email, username, or user ID])
                 - revokePro (prepare a confirmation request before revoking admin-granted PRO access from target_user_identifier while preserving paid subscriptions)
                 - checkProStatus (inspect a user's current effective tier, paid subscription, and admin-granted PRO status)
+                - create_exercise_drafts (persist new AI-recommended exercises directly in the exercises catalog with DRAFT status and AI_RECOMMENDED origin when admin asks to add/create exercises)
                 Never fabricate data. Never request raw user passwords or private message text.
                 """;
     }
@@ -808,6 +821,10 @@ public class AdminAIService {
 
         if (AdminToolRouter.isProManagementPrompt(lower)) {
             return AdminAiIntent.PRO_MANAGEMENT;
+        }
+
+        if (AdminToolRouter.isExerciseDraftCreationPrompt(lower)) {
+            return AdminAiIntent.EXERCISE_DRAFT_CREATION;
         }
 
         if (lower.contains("what exercises")
@@ -1168,11 +1185,12 @@ public class AdminAIService {
                             .append(adh.getActiveCoachAssignmentsCount()).append(" active coach assignments.\n");
                 }
             }
+            case EXERCISE_DRAFT_CREATION -> appendExerciseDraftCreationSummary(sb, routedTools);
             case EXERCISE_RECOMMENDATION -> {
                 String skillLabel = detectedSkill != null ? detectedSkill : "Calisthenics Skill & Strength";
                 sb.append("### 💡 Exercise Recommendations for ").append(skillLabel).append("\n\n");
                 sb.append("Based on an audit of our current **").append(ov.getTotalExercises())
-                        .append("-exercise** catalog and athlete training patterns, the following non-duplicate progressions are recommended for administrator review:\n\n");
+                        .append("-exercise** catalog and athlete training patterns, the following non-duplicate progressions are suggested for administrator review (conversational recommendations — not yet saved in the Exercise Catalog until approved):\n\n");
                 if (recommendations.isEmpty()) {
                     sb.append("- All canonical progressions for **").append(skillLabel)
                             .append("** are already present in the exercise library!\n");
@@ -1189,7 +1207,7 @@ public class AdminAIService {
                             sb.append("   - **Why Add**: ").append(p.getWhyAdd()).append("\n\n");
                         }
                     }
-                    sb.append("> **Action Required**: These recommendations have been queued with status `PENDING_APPROVAL`. Approve any recommendation to create the exercise in the library.\n");
+                    sb.append("> **Action Required**: These suggestions are queued with status `PENDING_APPROVAL` and are **not published or saved as active catalog exercises** until approved by an Admin.\n");
                 }
             }
             case WORKOUT_PROGRAM_RECOMMENDATION -> {
@@ -1303,9 +1321,14 @@ public class AdminAIService {
                     "Suggest new workout programs",
                     "Which areas of the platform need improvement?"
             );
+            case EXERCISE_DRAFT_CREATION -> List.of(
+                    "Show all draft exercises in the catalog",
+                    "Add 2 more core exercises to draft",
+                    "What exercises should we add to improve our Planche training library?"
+            );
             case EXERCISE_RECOMMENDATION -> List.of(
                     "What exercises should we add for Front Lever and Back Lever?",
-                    "Suggest new workout programs",
+                    "Add 3 leg exercises to draft",
                     "Summarize platform activity this month"
             );
             case WORKOUT_PROGRAM_RECOMMENDATION -> List.of(
@@ -1368,6 +1391,9 @@ public class AdminAIService {
             AdminToolRouter.RoutedChatToolsResult routedTools
     ) {
         if (routedTools != null) {
+            if (routedTools.exerciseDraftResult() != null) {
+                return AdminAiIntent.EXERCISE_DRAFT_CREATION;
+            }
             if (routedTools.pendingConfirmation() != null) {
                 return AdminAiIntent.CONFIRMATION_REQUIRED;
             }
@@ -1497,6 +1523,67 @@ public class AdminAIService {
                 .append("(e.g. `Grant PRO to user@example.com` or `Revoke PRO from user123`).\n");
     }
 
+    private void appendExerciseDraftCreationSummary(StringBuilder sb, AdminToolRouter.RoutedChatToolsResult routedTools) {
+        ExerciseDraftBatchResultResponse res = routedTools.exerciseDraftResult();
+        if (res == null) {
+            sb.append("Error: Exercise creation tool did not execute. No exercises were added to the database.\n");
+            return;
+        }
+        if (!res.isSuccess()) {
+            sb.append("### ❌ Failed to Save Exercise Drafts\n\n")
+                    .append(res.getErrorMessage() != null
+                            ? res.getErrorMessage()
+                            : "Persistence failed before exercises could be saved.")
+                    .append("\n");
+            return;
+        }
+        if (res.getCreatedExercises() != null && !res.getCreatedExercises().isEmpty()) {
+            sb.append("### Added ").append(res.getCreatedExercises().size())
+                    .append(" Exercise(s) to Draft (`AI Recommended`)\n\n");
+            int idx = 1;
+            for (AdminExerciseResponse ex : res.getCreatedExercises()) {
+                sb.append(idx++).append(". **").append(ex.name()).append("** (`").append(ex.code())
+                        .append("`, ID #").append(ex.id()).append(") — ")
+                        .append(ex.category()).append(" · ").append(ex.difficulty())
+                        .append(" · Status: `").append(ex.status()).append("` · Origin: `")
+                        .append(ex.origin()).append("`\n");
+            }
+            sb.append("\nAll newly created exercises are saved as **Draft** in **Admin > Exercises > Draft** ")
+                    .append("and remain hidden from regular users until published by an Admin.\n");
+        } else if (res.getExistingDrafts() != null && !res.getExistingDrafts().isEmpty()) {
+            sb.append("### Existing Exercise Drafts Preserved (No Duplicates Created)\n\n")
+                    .append(res.getMessage()).append("\n\n");
+            int idx = 1;
+            for (AdminExerciseResponse ex : res.getExistingDrafts()) {
+                sb.append(idx++).append(". **").append(ex.name()).append("** (`").append(ex.code())
+                        .append("`, ID #").append(ex.id()).append(") — ")
+                        .append(ex.category()).append(" · ").append(ex.difficulty())
+                        .append(" · Status: `").append(ex.status()).append("` · Origin: `")
+                        .append(ex.origin()).append("`\n");
+            }
+        } else {
+            sb.append("No new exercises were created in the database.\n");
+        }
+    }
+
+    private boolean claimsUnsubstantiatedExerciseCreation(
+            String reply,
+            AdminToolRouter.RoutedChatToolsResult routedTools
+    ) {
+        if (reply == null || reply.isBlank()) {
+            return false;
+        }
+        boolean hasPersistedDrafts = routedTools != null
+                && routedTools.exerciseDraftResult() != null
+                && routedTools.exerciseDraftResult().isSuccess()
+                && routedTools.exerciseDraftResult().getCreatedCount() > 0;
+        if (hasPersistedDrafts) {
+            return false;
+        }
+        String lower = reply.toLowerCase(Locale.US);
+        return lower.matches("(?s).*\\b(i've added|i have added|added \\d+ .*exercise|saved .* to the draft|created \\d+ .*exercise).*");
+    }
+
     private String generateConversationTitle(String userPrompt, AdminAiIntent intent) {
         String clean = userPrompt.replaceAll("[^a-zA-Z0-9\\s-]", "").trim();
         if (clean.isBlank()) {
@@ -1504,6 +1591,7 @@ public class AdminAIService {
                 case PLATFORM_OVERVIEW -> "Platform Activity Overview";
                 case USER_TRAINING_ANALYTICS -> "Training & User Analytics";
                 case EXERCISE_RECOMMENDATION -> "Exercise Library Recommendations";
+                case EXERCISE_DRAFT_CREATION -> "Exercise Drafts Added";
                 case WORKOUT_PROGRAM_RECOMMENDATION -> "Draft Workout Programs";
                 case OPERATIONAL_INSIGHTS -> "Operational Improvements";
                 case USER_STATISTICS_AND_SEARCH -> "Global User Statistics";

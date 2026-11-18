@@ -6,6 +6,7 @@ import com.calisthenics.backend.aichat.entity.AiMessage;
 import com.calisthenics.backend.aichat.repository.AiConversationRepository;
 import com.calisthenics.backend.aichat.repository.AiMessageRepository;
 import com.calisthenics.backend.aichat.service.AiAssistantService;
+import com.calisthenics.backend.aichat.service.UserAiWorkoutToolService;
 import com.calisthenics.backend.aiworkout.dto.AiWorkoutPlanPreviewResponse;
 import com.calisthenics.backend.aiworkout.dto.GenerateAiWorkoutPlanRequest;
 import com.calisthenics.backend.aiworkout.gemini.GeminiApiClient;
@@ -30,7 +31,9 @@ import com.calisthenics.backend.user.UserRepository;
 import com.calisthenics.backend.workout.WorkoutSession;
 import com.calisthenics.backend.workout.WorkoutSessionRepository;
 import com.calisthenics.backend.workout.WorkoutSessionStatus;
+import com.calisthenics.backend.workoutplan.type.WorkoutDayOfWeek;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -64,6 +67,7 @@ public class AiAssistantServiceImpl implements AiAssistantService {
     private final ObjectMapper objectMapper;
     private final ClientBodyMeasurementRepository measurementRepository;
     private final CoachProfileRepository coachProfileRepository;
+    private final UserAiWorkoutToolService userAiWorkoutToolService;
 
     @Override
     @Transactional(readOnly = true)
@@ -204,6 +208,12 @@ public class AiAssistantServiceImpl implements AiAssistantService {
         // 3. Prepare Multi-turn Conversation Context for Gemini
         List<AiMessage> history = aiMessageRepository.findTop15ByConversationIdOrderByCreatedAtDesc(conversationId);
         Collections.reverse(history); // chronological order
+        List<AiMessage> priorHistory = history.stream()
+                .filter(m -> userMessage.getId() == null || !Objects.equals(m.getId(), userMessage.getId()))
+                .filter(m -> !("user".equalsIgnoreCase(m.getRole()) && userContent.equals(m.getContent()) && m == history.get(history.size() - 1)))
+                .toList();
+
+        WorkoutIntentClassification preClassifiedWorkout = classifyWorkoutIntent(userContent, priorHistory);
 
         List<GeminiRequestDto.Content> geminiContents = new ArrayList<>();
         for (AiMessage msg : history) {
@@ -216,21 +226,29 @@ public class AiAssistantServiceImpl implements AiAssistantService {
 
         String systemPrompt = buildSystemPrompt(user, clientProfileOpt.orElse(null), latestWeight, recentPrs, recentSessions);
 
-        // 4. Call Gemini Structured Intent Classifier & Assistant
+        // 4. Call Gemini Structured Intent Classifier & Assistant (skip unnecessary write bias when deterministic read-only intent applies)
         GeminiAssistantOutput assistantOutput = null;
-        try {
-            assistantOutput = geminiApiClient.callAssistant(systemPrompt, geminiContents).orElse(null);
-        } catch (Exception ex) {
-            log.warn("Gemini assistant call encountered error: {}. Falling back to rule-based engine.", ex.getMessage());
+        if (preClassifiedWorkout == null || !preClassifiedWorkout.readOnly()) {
+            try {
+                assistantOutput = geminiApiClient.callAssistant(systemPrompt, geminiContents).orElse(null);
+            } catch (Exception ex) {
+                log.warn("Gemini assistant call encountered error: {}. Falling back to rule-based engine.", ex.getMessage());
+            }
         }
 
-        // 5. Rule-Based Fallback if Gemini is offline or unconfigured
+        // 5. Rule-Based Fallback if Gemini is offline or skipped for read-only safety
         if (assistantOutput == null || assistantOutput.getIntent() == null) {
-            assistantOutput = fallbackIntentEngine(userContent, recentPrs);
+            assistantOutput = fallbackIntentEngine(userContent, recentPrs, priorHistory);
         }
+
+        // Guardrail: enforce deterministic read-only/write workout classification over generic WORKOUT_PLAN
+        WorkoutIntentClassification finalWorkoutDecision = reconcileWorkoutDecision(
+                preClassifiedWorkout, userContent, assistantOutput, priorHistory);
 
         // 6. Action Execution based on Intent
-        String detectedIntent = assistantOutput.getIntent();
+        String detectedIntent = finalWorkoutDecision != null
+                ? finalWorkoutDecision.intent()
+                : assistantOutput.getIntent();
         String replyContent = assistantOutput.getReply();
         String actionMetadataJson = null;
 
@@ -240,6 +258,19 @@ public class AiAssistantServiceImpl implements AiAssistantService {
                 replyContent = prResult.replyOverride;
             }
             actionMetadataJson = prResult.metadataJson;
+        } else if (finalWorkoutDecision != null) {
+            ActionResult planResult = executeClassifiedWorkoutTool(
+                    userId,
+                    userContent,
+                    finalWorkoutDecision,
+                    assistantOutput.getWorkoutPlanAction(),
+                    priorHistory,
+                    request.getTimezone()
+            );
+            if (planResult.replyOverride != null) {
+                replyContent = planResult.replyOverride;
+            }
+            actionMetadataJson = planResult.metadataJson;
         } else if ("WORKOUT_PLAN".equalsIgnoreCase(detectedIntent)) {
             ActionResult planResult = executeWorkoutPlanAction(userId, userContent, assistantOutput.getWorkoutPlanAction(), request.getTimezone());
             if (planResult.replyOverride != null) {
@@ -332,15 +363,16 @@ public class AiAssistantServiceImpl implements AiAssistantService {
         sb.append("1. 'PR_RECORD': The user wants to record a Personal Record or reports achieving a new best (e.g., 'I did 10 muscle ups', 'Hit 30kg dip for 3 reps', 'Recorded a 10s handstand').\n");
         sb.append("   - If unambiguous (exercise, value, and type are clear), populate 'pr_action' with 'is_ambiguous=false'.\n");
         sb.append("   - If ambiguous (e.g. missing value, missing exercise), set 'is_ambiguous=true' and ask a clarifying question in 'reply'.\n");
-        sb.append("2. 'WORKOUT_PLAN': The user requests a calisthenics workout plan, schedule, or split (e.g., 'Make me a 4-day plan for front lever', 'Suggest a beginner routine').\n");
-        sb.append("   - Populate 'workout_plan_action' with prompt, fitness_level, and duration_weeks.\n");
-        sb.append("3. 'PROGRESS_ANALYSIS': The user asks about their progress, plateaus, improvements, or training trends (e.g., 'How is my pull up progress?', 'Am I plateauing on dips?').\n");
+        sb.append("2. 'WORKOUT_PLAN_VIEW' / 'WORKOUT_DAY_VIEW' / 'EXERCISE_DETAILS_VIEW' (STRICTLY READ-ONLY): The user asks to view, show, list, or explain their existing workout plan, weekly schedule, today's workout, or a specific day's workout (e.g., 'Show my workout plan', 'What am I training today?', 'Show Wednesday', 'Lịch tập của tôi thế nào?'). NEVER create or modify a workout plan for these queries.\n");
+        sb.append("3. 'WORKOUT_PLAN' / 'WORKOUT_PLAN_UPDATE' (WRITE ONLY ON EXPLICIT REQUEST): The user explicitly asks to create, generate, replace, regenerate, change, add exercises to, or remove exercises from a workout plan.\n");
+        sb.append("   - Populate 'workout_plan_action' with tool_name, prompt, fitness_level, duration_weeks, day_of_week, and detailed.\n");
+        sb.append("4. 'PROGRESS_ANALYSIS': The user asks about their progress, plateaus, improvements, or training trends (e.g., 'How is my pull up progress?', 'Am I plateauing on dips?').\n");
         sb.append("   - Populate 'progress_analysis_action'. Provide data-backed insights.\n");
-        sb.append("4. 'PROFILE_UPDATE': The user requests to update their personal/athlete profile details (e.g. 'Cập nhật cân nặng của tôi thành 76kg', 'Đổi mục tiêu tập luyện thành Straddle Planche', 'My height is 178 cm', 'Update my bio to Calisthenics athlete', 'Change display name to Alex').\n");
+        sb.append("5. 'PROFILE_UPDATE': The user requests to update their personal/athlete profile details (e.g. 'Cập nhật cân nặng của tôi thành 76kg', 'Đổi mục tiêu tập luyện thành Straddle Planche', 'My height is 178 cm', 'Update my bio to Calisthenics athlete', 'Change display name to Alex').\n");
         sb.append("   - Supported editable fields: display_name, full_name, bio, height_cm, weight_kg, experience_level, training_experience, primary_goals, training_interests, preferred_frequency, coaching_language, gender.\n");
         sb.append("   - If unambiguous and has specific field and value, set 'is_ambiguous=false' and populate 'profile_update_action'.\n");
         sb.append("   - If ambiguous or missing specific values (e.g. 'update my profile' without specifying what), set 'is_ambiguous=true' and ask what they want to change in 'clarification_question'.\n");
-        sb.append("5. 'GENERAL_CHAT': Form tips, exercise breakdowns, mobility advice, recovery, or motivation.\n");
+        sb.append("6. 'GENERAL_CHAT': Form tips, exercise breakdowns, mobility advice, recovery, or motivation.\n");
         sb.append("   - Provide structured, rich Markdown responses (headers, bold, bullet points).\n");
         return sb.toString();
     }
@@ -440,6 +472,8 @@ public class AiAssistantServiceImpl implements AiAssistantService {
 
             Map<String, Object> cardData = new LinkedHashMap<>();
             cardData.put("type", "WORKOUT_PLAN_PREVIEW");
+            cardData.put("toolName", UserAiWorkoutToolService.TOOL_CREATE_WORKOUT_PLAN);
+            cardData.put("readOnly", false);
             cardData.put("plan", preview);
             String metadataJson = objectMapper.writeValueAsString(cardData);
 
@@ -794,7 +828,338 @@ public class AiAssistantServiceImpl implements AiAssistantService {
         }
     }
 
-    private GeminiAssistantOutput fallbackIntentEngine(String userMessage, List<PersonalRecord> recentPrs) {
+    private record WorkoutIntentClassification(
+            String intent,
+            String toolName,
+            boolean readOnly,
+            WorkoutDayOfWeek targetDay,
+            boolean isToday,
+            boolean nextSession,
+            boolean detailed
+    ) {}
+
+    private WorkoutIntentClassification reconcileWorkoutDecision(
+            WorkoutIntentClassification preClassified,
+            String userMessage,
+            GeminiAssistantOutput assistantOutput,
+            List<AiMessage> priorHistory
+    ) {
+        if (preClassified != null) {
+            return preClassified;
+        }
+        if (assistantOutput == null || assistantOutput.getIntent() == null) {
+            return null;
+        }
+        String intent = assistantOutput.getIntent().trim().toUpperCase(Locale.US);
+        GeminiAssistantOutput.WorkoutPlanAction action = assistantOutput.getWorkoutPlanAction();
+        String declaredTool = action != null ? action.getToolName() : null;
+        boolean detailed = action != null && Boolean.TRUE.equals(action.getDetailed());
+        WorkoutDayOfWeek day = parseDayOfWeek(action != null ? action.getDayOfWeek() : null, userMessage);
+        boolean isToday = action != null && "TODAY".equalsIgnoreCase(action.getDayOfWeek());
+        boolean nextSession = action != null && "NEXT".equalsIgnoreCase(action.getDayOfWeek());
+
+        if ("WORKOUT_PLAN_VIEW".equals(intent)) {
+            String tool = detailed
+                    ? UserAiWorkoutToolService.TOOL_GET_WEEKLY_WORKOUT_SCHEDULE
+                    : UserAiWorkoutToolService.TOOL_GET_MY_WORKOUT_PLAN;
+            return new WorkoutIntentClassification("WORKOUT_PLAN_VIEW", tool, true, null, false, false, detailed);
+        }
+        if ("WORKOUT_DAY_VIEW".equals(intent)) {
+            return new WorkoutIntentClassification("WORKOUT_DAY_VIEW",
+                    UserAiWorkoutToolService.TOOL_GET_WORKOUT_DAY_DETAILS, true, day, isToday, nextSession, true);
+        }
+        if ("EXERCISE_DETAILS_VIEW".equals(intent)) {
+            return new WorkoutIntentClassification("EXERCISE_DETAILS_VIEW",
+                    UserAiWorkoutToolService.TOOL_GET_EXERCISE_DETAILS, true, null, false, false, true);
+        }
+        if ("WORKOUT_PLAN_UPDATE".equals(intent)) {
+            String tool = (declaredTool != null && !UserAiWorkoutToolService.isReadOnlyTool(declaredTool))
+                    ? declaredTool
+                    : UserAiWorkoutToolService.TOOL_UPDATE_WORKOUT_PLAN;
+            return new WorkoutIntentClassification("WORKOUT_PLAN_UPDATE", tool, false, day, false, false, true);
+        }
+        if ("WORKOUT_PLAN".equals(intent)) {
+            if (declaredTool != null && UserAiWorkoutToolService.isReadOnlyTool(declaredTool)) {
+                return new WorkoutIntentClassification("WORKOUT_PLAN_VIEW", declaredTool, true, day, isToday, nextSession, detailed);
+            }
+            if (UserAiWorkoutToolService.TOOL_REGENERATE_WORKOUT_PLAN.equals(declaredTool)) {
+                return new WorkoutIntentClassification("WORKOUT_PLAN",
+                        UserAiWorkoutToolService.TOOL_REGENERATE_WORKOUT_PLAN, false, day, false, false, false);
+            }
+            return new WorkoutIntentClassification("WORKOUT_PLAN",
+                    UserAiWorkoutToolService.TOOL_CREATE_WORKOUT_PLAN, false, day, false, false, false);
+        }
+        return null;
+    }
+
+    private ActionResult executeClassifiedWorkoutTool(
+            Long userId,
+            String userContent,
+            WorkoutIntentClassification decision,
+            GeminiAssistantOutput.WorkoutPlanAction planAction,
+            List<AiMessage> priorHistory,
+            String timezone
+    ) {
+        boolean isVn = isVietnamese(userContent);
+        if (decision.readOnly()) {
+            try {
+                UserAiWorkoutToolService.WorkoutToolResult result = switch (decision.toolName()) {
+                    case UserAiWorkoutToolService.TOOL_GET_WEEKLY_WORKOUT_SCHEDULE ->
+                            userAiWorkoutToolService.getWeeklyWorkoutSchedule(userId, decision.detailed(), isVn);
+                    case UserAiWorkoutToolService.TOOL_GET_WORKOUT_DAY_DETAILS ->
+                            userAiWorkoutToolService.getWorkoutDayDetails(
+                                    userId, decision.targetDay(), decision.isToday(), decision.nextSession(),
+                                    timezone, decision.detailed(), isVn);
+                    case UserAiWorkoutToolService.TOOL_GET_EXERCISE_DETAILS ->
+                            userAiWorkoutToolService.getExerciseDetails(userId, userContent, isVn);
+                    default -> userAiWorkoutToolService.getMyWorkoutPlan(userId, decision.detailed(), isVn);
+                };
+                return new ActionResult(result.reply(), result.metadataJson());
+            } catch (Exception ex) {
+                log.error("Read-only workout retrieval failed for userId={}, tool={}: {}",
+                        userId, decision.toolName(), ex.getMessage(), ex);
+                String errReply = isVn
+                        ? "Tôi gặp lỗi khi truy xuất lịch tập hiện tại của bạn. Không có thay đổi nào được thực hiện. Vui lòng thử lại sau."
+                        : "I encountered an error while retrieving your current workout plan. No changes were made to your plans. Please try again shortly.";
+                String errMeta = safeToJson(Map.of(
+                        "type", decision.intent(),
+                        "toolName", decision.toolName(),
+                        "readOnly", true,
+                        "error", true
+                ));
+                return new ActionResult(errReply, errMeta);
+            }
+        }
+
+        // Write tools
+        if (UserAiWorkoutToolService.TOOL_CREATE_WORKOUT_PLAN.equals(decision.toolName())) {
+            return executeWorkoutPlanAction(userId, userContent, planAction, timezone);
+        }
+        if (UserAiWorkoutToolService.TOOL_REGENERATE_WORKOUT_PLAN.equals(decision.toolName())) {
+            String fitnessLevel = planAction != null ? planAction.getFitnessLevel() : "INTERMEDIATE";
+            Integer weeks = planAction != null ? planAction.getDurationWeeks() : 4;
+            UserAiWorkoutToolService.WorkoutToolResult res = userAiWorkoutToolService.createWorkoutPlan(
+                    userId, userContent, fitnessLevel, weeks, timezone, isVn, true);
+            return new ActionResult(res.reply(), res.metadataJson());
+        }
+        if (UserAiWorkoutToolService.TOOL_UPDATE_WORKOUT_PLAN.equals(decision.toolName())) {
+            UserAiWorkoutToolService.WorkoutToolResult res = userAiWorkoutToolService.updateWorkoutPlan(
+                    userId, decision.targetDay(), userContent, timezone, isVn);
+            return new ActionResult(res.reply(), res.metadataJson());
+        }
+        if (UserAiWorkoutToolService.TOOL_ADD_EXERCISE_TO_WORKOUT.equals(decision.toolName())) {
+            UserAiWorkoutToolService.WorkoutToolResult res = userAiWorkoutToolService.addExerciseToWorkout(
+                    userId, decision.targetDay(), userContent, timezone, isVn);
+            return new ActionResult(res.reply(), res.metadataJson());
+        }
+        if (UserAiWorkoutToolService.TOOL_REMOVE_EXERCISE_FROM_WORKOUT.equals(decision.toolName())) {
+            UserAiWorkoutToolService.WorkoutToolResult res = userAiWorkoutToolService.removeExerciseFromWorkout(
+                    userId, decision.targetDay(), userContent, priorHistory, isVn);
+            return new ActionResult(res.reply(), res.metadataJson());
+        }
+        if (UserAiWorkoutToolService.TOOL_ASSIGN_WORKOUT_PLAN.equals(decision.toolName())) {
+            UserAiWorkoutToolService.WorkoutToolResult res = userAiWorkoutToolService.assignWorkoutPlan(
+                    userId, null, userContent, isVn);
+            return new ActionResult(res.reply(), res.metadataJson());
+        }
+        return executeWorkoutPlanAction(userId, userContent, planAction, timezone);
+    }
+
+    private WorkoutIntentClassification classifyWorkoutIntent(String userMessage, List<AiMessage> priorHistory) {
+        if (userMessage == null || userMessage.isBlank()) {
+            return null;
+        }
+        String lower = userMessage.toLowerCase(Locale.US).trim();
+
+        // Do not hijack explicit PR/profile/progress queries
+        boolean mentionsProfile = lower.contains("profile") || lower.contains("hồ sơ")
+                || lower.contains("weight") || lower.contains("cân nặng")
+                || lower.contains("height") || lower.contains("chiều cao")
+                || lower.contains("display name") || lower.contains("tên hiển thị")
+                || lower.contains("primary goal") || lower.contains("mục tiêu tập luyện")
+                || lower.contains("bio") || lower.contains("tiểu sử");
+        if (mentionsProfile) {
+            return null;
+        }
+
+        WorkoutDayOfWeek weekday = UserAiWorkoutToolService.extractWeekday(userMessage);
+        String prevIntent = findLastAssistantIntent(priorHistory);
+        WorkoutDayOfWeek prevDay = findLastAssistantDay(priorHistory);
+        boolean hasWorkoutHistoryContext = prevIntent != null && prevIntent.startsWith("WORKOUT_");
+
+        boolean mentionsPlanOrSchedule = lower.contains("workout plan")
+                || lower.contains("training plan")
+                || lower.contains("workout schedule")
+                || lower.contains("weekly schedule")
+                || lower.contains("weekly routine")
+                || lower.contains("workout routine")
+                || lower.contains("training split")
+                || lower.contains("current plan")
+                || lower.contains("my plan")
+                || lower.contains("my schedule")
+                || lower.contains("my routine")
+                || lower.contains("plan") && (lower.contains("show") || lower.contains("create") || lower.contains("replace") || lower.contains("regenerate") || lower.contains("remove") || lower.contains("assign") || lower.contains("update") || lower.contains("my"))
+                || lower.contains("routine") && (lower.contains("show") || lower.contains("create") || lower.contains("generate") || lower.contains("replace") || lower.contains("my"))
+                || lower.contains("lịch tập")
+                || lower.contains("kế hoạch tập");
+
+        boolean mentionsTodayTraining = lower.contains("training today")
+                || lower.contains("workout today")
+                || lower.contains("today's workout")
+                || lower.contains("what am i training")
+                || lower.contains("hôm nay tôi tập gì")
+                || lower.contains("hôm nay tập gì")
+                || lower.contains("lịch tập hôm nay");
+
+        boolean mentionsNextSession = lower.contains("next training session")
+                || lower.contains("next workout")
+                || lower.contains("next session")
+                || lower.contains("buổi tập tiếp theo");
+
+        boolean mentionsExerciseVerb = lower.contains("exercise") || lower.contains("exercises") || lower.contains("bài tập");
+
+        // 1. Check EXPLICIT WRITE intents first
+        boolean hasReplaceVerb = lower.contains("replace") || lower.contains("regenerate")
+                || lower.contains("redo") || lower.contains("rebuild")
+                || lower.contains("thay thế") || lower.contains("tạo lại");
+        if (hasReplaceVerb && (mentionsPlanOrSchedule || hasWorkoutHistoryContext || lower.contains("it"))) {
+            return new WorkoutIntentClassification("WORKOUT_PLAN",
+                    UserAiWorkoutToolService.TOOL_REGENERATE_WORKOUT_PLAN, false, weekday, false, false, false);
+        }
+
+        boolean hasCreateVerb = lower.contains("create") || lower.contains("generate")
+                || lower.contains("make me") || lower.contains("make a")
+                || lower.contains("build me") || lower.contains("build a")
+                || lower.contains("design a") || lower.contains("suggest a new")
+                || lower.contains("tạo lịch") || lower.contains("lập lịch") || lower.contains("tạo một lịch");
+        if (hasCreateVerb && (mentionsPlanOrSchedule || lower.contains("split") || lower.contains("schedule") || lower.contains("workout"))) {
+            return new WorkoutIntentClassification("WORKOUT_PLAN",
+                    UserAiWorkoutToolService.TOOL_CREATE_WORKOUT_PLAN, false, weekday, false, false, false);
+        }
+
+        boolean hasAddVerb = lower.startsWith("add ") || lower.contains(" add ") || lower.contains("thêm ");
+        if (hasAddVerb && (mentionsExerciseVerb || mentionsPlanOrSchedule || weekday != null || hasWorkoutHistoryContext)) {
+            return new WorkoutIntentClassification("WORKOUT_PLAN_UPDATE",
+                    UserAiWorkoutToolService.TOOL_ADD_EXERCISE_TO_WORKOUT, false, weekday, false, false, true);
+        }
+
+        boolean hasRemoveVerb = lower.contains("remove ") || lower.contains("delete ")
+                || lower.contains("drop ") || lower.contains("xóa ") || lower.contains("bỏ ");
+        if (hasRemoveVerb && (mentionsExerciseVerb || mentionsPlanOrSchedule || weekday != null || hasWorkoutHistoryContext)) {
+            return new WorkoutIntentClassification("WORKOUT_PLAN_UPDATE",
+                    UserAiWorkoutToolService.TOOL_REMOVE_EXERCISE_FROM_WORKOUT, false, weekday, false, false, true);
+        }
+
+        boolean hasModifyVerb = lower.contains("change ") || lower.contains("modify ")
+                || lower.contains("update ") || lower.contains("switch ")
+                || lower.contains("swap ") || lower.contains("edit ")
+                || lower.contains("đổi ") || lower.contains("sửa ") || lower.contains("chỉnh ");
+        if (hasModifyVerb && (mentionsPlanOrSchedule || weekday != null || lower.contains("workout"))) {
+            return new WorkoutIntentClassification("WORKOUT_PLAN_UPDATE",
+                    UserAiWorkoutToolService.TOOL_UPDATE_WORKOUT_PLAN, false, weekday, false, false, true);
+        }
+
+        boolean hasAssignVerb = (lower.contains("assign ") || lower.contains("activate ") || lower.contains("kích hoạt"))
+                && mentionsPlanOrSchedule;
+        if (hasAssignVerb) {
+            return new WorkoutIntentClassification("WORKOUT_PLAN_UPDATE",
+                    UserAiWorkoutToolService.TOOL_ASSIGN_WORKOUT_PLAN, false, null, false, false, false);
+        }
+
+        // 2. Check EXPLICIT READ-ONLY intents
+        boolean asksDetail = lower.contains("detail") || lower.contains("details")
+                || lower.contains("full") || lower.contains("complete")
+                || lower.contains("list all") || lower.contains("explain")
+                || lower.contains("chi tiết") || lower.contains("đầy đủ");
+
+        if (mentionsTodayTraining) {
+            return new WorkoutIntentClassification("WORKOUT_DAY_VIEW",
+                    UserAiWorkoutToolService.TOOL_GET_WORKOUT_DAY_DETAILS, true, null, true, false, true);
+        }
+
+        if (mentionsNextSession) {
+            return new WorkoutIntentClassification("WORKOUT_DAY_VIEW",
+                    UserAiWorkoutToolService.TOOL_GET_WORKOUT_DAY_DETAILS, true, null, false, true, true);
+        }
+
+        if (weekday != null) {
+            return new WorkoutIntentClassification("WORKOUT_DAY_VIEW",
+                    UserAiWorkoutToolService.TOOL_GET_WORKOUT_DAY_DETAILS, true, weekday, false, false, true);
+        }
+
+        if (mentionsPlanOrSchedule) {
+            String tool = (asksDetail || lower.contains("schedule") || lower.contains("weekly")
+                    || lower.contains("lịch") || lower.contains("list all"))
+                    ? UserAiWorkoutToolService.TOOL_GET_WEEKLY_WORKOUT_SCHEDULE
+                    : UserAiWorkoutToolService.TOOL_GET_MY_WORKOUT_PLAN;
+            return new WorkoutIntentClassification("WORKOUT_PLAN_VIEW", tool, true, null, false, false,
+                    asksDetail || lower.contains("list all") || lower.contains("weekly") || lower.contains("schedule"));
+        }
+
+        if (lower.contains("exercise details") || lower.contains("details for ")
+                || lower.contains("show exercise ") || lower.contains("chi tiết bài tập")) {
+            return new WorkoutIntentClassification("EXERCISE_DETAILS_VIEW",
+                    UserAiWorkoutToolService.TOOL_GET_EXERCISE_DETAILS, true, null, false, false, true);
+        }
+
+        // 3. Follow-up context resolution (e.g., "Show it in more detail", "Show it in detail")
+        boolean isDetailFollowUp = (asksDetail || lower.contains("tell me more") || lower.contains("show it") || lower.contains("xem thêm"))
+                && !lower.contains("progress") && !lower.contains("pr ");
+        if (hasWorkoutHistoryContext && isDetailFollowUp) {
+            if ("WORKOUT_DAY_VIEW".equals(prevIntent) && prevDay != null) {
+                return new WorkoutIntentClassification("WORKOUT_DAY_VIEW",
+                        UserAiWorkoutToolService.TOOL_GET_WORKOUT_DAY_DETAILS, true, prevDay, false, false, true);
+            }
+            return new WorkoutIntentClassification("WORKOUT_PLAN_VIEW",
+                    UserAiWorkoutToolService.TOOL_GET_WEEKLY_WORKOUT_SCHEDULE, true, null, false, false, true);
+        }
+
+        return null;
+    }
+
+    private String findLastAssistantIntent(List<AiMessage> history) {
+        if (history == null) return null;
+        for (int i = history.size() - 1; i >= 0; i--) {
+            AiMessage m = history.get(i);
+            if ("assistant".equalsIgnoreCase(m.getRole()) && m.getIntent() != null) {
+                return m.getIntent().trim().toUpperCase(Locale.US);
+            }
+        }
+        return null;
+    }
+
+    private WorkoutDayOfWeek findLastAssistantDay(List<AiMessage> history) {
+        if (history == null) return null;
+        for (int i = history.size() - 1; i >= 0; i--) {
+            AiMessage m = history.get(i);
+            if ("assistant".equalsIgnoreCase(m.getRole()) && m.getMetadata() != null) {
+                try {
+                    JsonNode root = objectMapper.readTree(m.getMetadata());
+                    if (root.hasNonNull("dayOfWeek")) {
+                        return WorkoutDayOfWeek.valueOf(root.get("dayOfWeek").asText().trim().toUpperCase(Locale.US));
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+        }
+        return null;
+    }
+
+    private WorkoutDayOfWeek parseDayOfWeek(String rawDay, String userMessage) {
+        if (rawDay != null && !rawDay.isBlank()) {
+            try {
+                return WorkoutDayOfWeek.valueOf(rawDay.trim().toUpperCase(Locale.US));
+            } catch (IllegalArgumentException ignored) {
+            }
+        }
+        return UserAiWorkoutToolService.extractWeekday(userMessage);
+    }
+
+    private GeminiAssistantOutput fallbackIntentEngine(
+            String userMessage,
+            List<PersonalRecord> recentPrs,
+            List<AiMessage> priorHistory
+    ) {
         String lower = userMessage.toLowerCase();
 
         // 1. Profile Update Pattern Checks (Vietnamese & English)
@@ -877,7 +1242,23 @@ public class AiAssistantServiceImpl implements AiAssistantService {
                     .build();
         }
 
-        // 3. Workout Plan Pattern Check
+        // 3. Workout Plan Pattern Check (with explicit Read-Only vs Write separation)
+        WorkoutIntentClassification classified = classifyWorkoutIntent(userMessage, priorHistory);
+        if (classified != null) {
+            return GeminiAssistantOutput.builder()
+                    .intent(classified.intent())
+                    .reply(null)
+                    .workoutPlanAction(GeminiAssistantOutput.WorkoutPlanAction.builder()
+                            .prompt(userMessage)
+                            .fitnessLevel("INTERMEDIATE")
+                            .durationWeeks(4)
+                            .toolName(classified.toolName())
+                            .dayOfWeek(classified.targetDay() != null ? classified.targetDay().name()
+                                    : (classified.isToday() ? "TODAY" : (classified.nextSession() ? "NEXT" : null)))
+                            .detailed(classified.detailed())
+                            .build())
+                    .build();
+        }
         if (lower.contains("plan") || lower.contains("routine") || lower.contains("split") || lower.contains("schedule")) {
             return GeminiAssistantOutput.builder()
                     .intent("WORKOUT_PLAN")
@@ -886,6 +1267,7 @@ public class AiAssistantServiceImpl implements AiAssistantService {
                             .prompt(userMessage)
                             .fitnessLevel("INTERMEDIATE")
                             .durationWeeks(4)
+                            .toolName(UserAiWorkoutToolService.TOOL_CREATE_WORKOUT_PLAN)
                             .build())
                     .build();
         }
@@ -1021,7 +1403,10 @@ public class AiAssistantServiceImpl implements AiAssistantService {
         return lower.contains("cập nhật") || lower.contains("hồ sơ") || lower.contains("cân nặng")
                 || lower.contains("chiều cao") || lower.contains("mục tiêu") || lower.contains("tập luyện")
                 || lower.contains("của tôi") || lower.contains("thành") || lower.contains("đổi")
-                || lower.contains("xin chào") || lower.contains("trình độ") || lower.contains("bạn");
+                || lower.contains("xin chào") || lower.contains("trình độ") || lower.contains("bạn")
+                || lower.contains("lịch tập") || lower.contains("hôm nay") || lower.contains("xem")
+                || lower.contains("thứ ") || lower.contains("bài tập") || lower.contains("tạo")
+                || lower.contains("thêm") || lower.contains("xóa") || lower.contains("chi tiết");
     }
 
     private String safeToJson(Object obj) {
@@ -1048,7 +1433,7 @@ public class AiAssistantServiceImpl implements AiAssistantService {
         if (userMessage == null || userMessage.isBlank()) {
             return switch (intent) {
                 case "PR_RECORD" -> "PR Record Log";
-                case "WORKOUT_PLAN" -> "Workout Plan Session";
+                case "WORKOUT_PLAN", "WORKOUT_PLAN_VIEW", "WORKOUT_DAY_VIEW", "WORKOUT_PLAN_UPDATE" -> "Workout Plan Session";
                 case "PROGRESS_ANALYSIS" -> "Progress Analysis";
                 case "PROFILE_UPDATE" -> "Profile Update";
                 default -> "Calisthenics Coaching";

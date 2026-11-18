@@ -3,8 +3,10 @@ package com.calisthenics.backend.exercise;
 import com.calisthenics.backend.exercise.dto.CreateExerciseRequest;
 import com.calisthenics.backend.exercise.dto.ExerciseResponse;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.util.List;
 import java.util.stream.Collectors;
@@ -18,6 +20,7 @@ public class ExerciseService {
     @Transactional(readOnly = true)
     public List<ExerciseResponse> getAllExercises() {
         return exerciseRepository.findAll().stream()
+                .filter(this::isPublished)
                 .map(this::mapToResponse)
                 .collect(Collectors.toList());
     }
@@ -25,15 +28,21 @@ public class ExerciseService {
     @Transactional(readOnly = true)
     public ExerciseResponse getExerciseById(Long id) {
         Exercise exercise = exerciseRepository.findById(id)
-                .orElseThrow(() -> new RuntimeException("Exercise not found with id: " + id));
+                .filter(this::isPublished)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Exercise not found with id: " + id));
         return mapToResponse(exercise);
     }
 
     @Transactional(readOnly = true)
     public ExerciseResponse getExerciseByCode(String code) {
         Exercise exercise = exerciseRepository.findByCode(code)
-                .orElseThrow(() -> new RuntimeException("Exercise not found with code: " + code));
+                .filter(this::isPublished)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Exercise not found with code: " + code));
         return mapToResponse(exercise);
+    }
+
+    private boolean isPublished(Exercise exercise) {
+        return exercise != null && exercise.isActive() && exercise.getStatus() == ExerciseStatus.PUBLISHED;
     }
 
     @Transactional
@@ -50,6 +59,9 @@ public class ExerciseService {
                 .description(request.getDescription())
                 .targetMuscles(request.getTargetMuscles())
                 .instructions(request.getInstructions())
+                .status(ExerciseStatus.PUBLISHED)
+                .origin(ExerciseOrigin.MANUAL)
+                .active(true)
                 .build();
 
         Exercise saved = exerciseRepository.save(exercise);
@@ -70,6 +82,8 @@ public class ExerciseService {
                 .videoUrl(exercise.getVideoUrl())
                 .equipment(exercise.getEquipment())
                 .active(exercise.isActive())
+                .status(exercise.getStatus())
+                .origin(exercise.getOrigin())
                 .mediaItems(ExerciseMediaMapper.toResponses(exercise))
                 .build();
     }

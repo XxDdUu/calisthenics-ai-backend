@@ -2,12 +2,16 @@ package com.calisthenics.backend.admin;
 
 import com.calisthenics.backend.admin.dto.AdminExerciseDeleteResponse;
 import com.calisthenics.backend.admin.dto.AdminExerciseResponse;
+import com.calisthenics.backend.admin.dto.AdminExerciseStatsResponse;
 import com.calisthenics.backend.admin.dto.AdminPageResponse;
+import com.calisthenics.backend.admin.dto.BulkUpdateExerciseStatusRequest;
 import com.calisthenics.backend.admin.dto.CreateAdminExerciseRequest;
 import com.calisthenics.backend.admin.dto.UpdateAdminExerciseRequest;
 import com.calisthenics.backend.admin.dto.UpdateExerciseStatusRequest;
 import com.calisthenics.backend.exercise.DifficultyLevel;
 import com.calisthenics.backend.exercise.ExerciseCategory;
+import com.calisthenics.backend.exercise.ExerciseOrigin;
+import com.calisthenics.backend.exercise.ExerciseStatus;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
@@ -16,6 +20,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
 
 @RestController
 @RequestMapping("/api/v1/admin/exercises")
@@ -35,11 +41,32 @@ public class AdminExerciseController {
             @RequestParam(required = false) ExerciseCategory category,
             @RequestParam(required = false) DifficultyLevel difficulty,
             @RequestParam(required = false) Boolean active,
+            @RequestParam(required = false) ExerciseStatus status,
+            @RequestParam(required = false) ExerciseOrigin origin,
             @RequestParam(defaultValue = "name") String sortBy,
             @RequestParam(defaultValue = "ASC") String sortDirection
     ) {
+        if (status == null && origin == null) {
+            return ResponseEntity.ok(adminExerciseService.getExercises(
+                    page, size, search, category, difficulty, active, sortBy, sortDirection));
+        }
         return ResponseEntity.ok(adminExerciseService.getExercises(
-                page, size, search, category, difficulty, active, sortBy, sortDirection));
+                page, size, search, category, difficulty, active, status, origin, sortBy, sortDirection));
+    }
+
+    @GetMapping("/stats")
+    @Operation(summary = "Get exercise counts by publication status and AI origin (Admin only)")
+    public ResponseEntity<AdminExerciseStatsResponse> getExerciseStats() {
+        return ResponseEntity.ok(adminExerciseService.getExerciseStats());
+    }
+
+    @PatchMapping("/bulk-status")
+    @Operation(summary = "Bulk publish or return exercises to draft (Admin only)")
+    public ResponseEntity<List<AdminExerciseResponse>> bulkUpdateStatus(
+            @Valid @RequestBody BulkUpdateExerciseStatusRequest request
+    ) {
+        return ResponseEntity.ok(adminExerciseService.bulkUpdateStatus(
+                request.exerciseIds(), request.resolveActive()));
     }
 
     @GetMapping("/{exerciseId}")
@@ -67,12 +94,12 @@ public class AdminExerciseController {
     }
 
     @PatchMapping("/{exerciseId}/status")
-    @Operation(summary = "Activate or deactivate an exercise (Admin only)")
+    @Operation(summary = "Activate/publish or deactivate/draft an exercise (Admin only)")
     public ResponseEntity<AdminExerciseResponse> updateExerciseStatus(
             @PathVariable Long exerciseId,
             @Valid @RequestBody UpdateExerciseStatusRequest request
     ) {
-        return ResponseEntity.ok(adminExerciseService.updateStatus(exerciseId, request.active()));
+        return ResponseEntity.ok(adminExerciseService.updateStatus(exerciseId, request.resolveActive()));
     }
 
     @DeleteMapping("/{exerciseId}")

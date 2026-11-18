@@ -10,6 +10,8 @@ import com.calisthenics.backend.adminai.type.AdminAiIntent;
 import com.calisthenics.backend.adminai.type.AdminAnalyticsRange;
 import com.calisthenics.backend.adminai.type.AdminRecommendationPriority;
 import com.calisthenics.backend.adminai.type.AdminToolName;
+import com.calisthenics.backend.exercise.DifficultyLevel;
+import com.calisthenics.backend.exercise.ExerciseCategory;
 import com.calisthenics.backend.gettingstarted.dto.GettingStartedCampaignAnalyticsResponse;
 import com.calisthenics.backend.gettingstarted.dto.GettingStartedCampaignSummaryResponse;
 import com.calisthenics.backend.gettingstarted.dto.GettingStartedDayResponse;
@@ -66,6 +68,7 @@ public class AdminToolRouter {
     private final AdminContextService adminContextService;
     private final AdminGettingStartedToolService adminGettingStartedToolService;
     private final AdminProToolService adminProToolService;
+    private final ExerciseRecommendationService exerciseRecommendationService;
 
     public record RoutedChatToolsResult(
             AdminAiIntent resolvedIntent,
@@ -85,7 +88,8 @@ public class AdminToolRouter {
             List<GettingStartedCampaignSummaryResponse> activeCampaigns,
             GettingStartedCampaignAnalyticsResponse campaignAnalytics,
             AdminPendingConfirmationResponse pendingConfirmation,
-            AdminProToolResultResponse proToolResult
+            AdminProToolResultResponse proToolResult,
+            ExerciseDraftBatchResultResponse exerciseDraftResult
     ) {}
 
     public AdminToolExecuteResponse executeSingleTool(AdminToolExecuteRequest request) {
@@ -254,6 +258,23 @@ public class AdminToolRouter {
                 recordCount = recs.size();
                 summary = "Generated " + recs.size() + " data-backed administrative recommendations";
             }
+            case CREATE_EXERCISE_DRAFTS -> {
+                ExerciseDraftBatchResultResponse res = exerciseRecommendationService.createExerciseDrafts(
+                        admin,
+                        request.getConversationId(),
+                        request.getInstruction(),
+                        request.getExerciseCategory(),
+                        request.getSkillKeyword(),
+                        request.getDifficultyLevel(),
+                        request.getRequestedCount()
+                );
+                if (!res.isSuccess()) {
+                    throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, res.getErrorMessage());
+                }
+                data = res;
+                recordCount = res.getCreatedCount();
+                summary = res.getMessage();
+            }
             default -> throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Unsupported admin tool");
         }
 
@@ -322,6 +343,7 @@ public class AdminToolRouter {
         GettingStartedCampaignAnalyticsResponse campaignAnalytics = null;
         AdminPendingConfirmationResponse pendingConfirmation = null;
         AdminProToolResultResponse proToolResult = null;
+        ExerciseDraftBatchResultResponse exerciseDraftResult = null;
 
         boolean hasProTools = toolsToRun.stream().anyMatch(adminProToolService::isProTool);
         if (hasProTools) {
@@ -484,6 +506,46 @@ public class AdminToolRouter {
             }
         }
 
+        if (toolsToRun.contains(AdminToolName.CREATE_EXERCISE_DRAFTS)) {
+            long t0 = System.currentTimeMillis();
+            User admin = adminAuthorizationService.requireAuthenticatedAdmin();
+            DifficultyLevel diff = null;
+            if (geminiPlan != null && !isBlank(geminiPlan.getExperienceLevel())) {
+                try {
+                    diff = DifficultyLevel.valueOf(geminiPlan.getExperienceLevel().trim().toUpperCase(Locale.US));
+                } catch (IllegalArgumentException ignored) {
+                }
+            }
+            ExerciseCategory inferredCategory = ExerciseRecommendationService.detectCategoryFromText(userPrompt, effectiveSkill);
+            int requestedCount = ExerciseRecommendationService.resolveRequestedCount(userPrompt, null);
+            exerciseDraftResult = exerciseRecommendationService.createExerciseDrafts(
+                    admin,
+                    request.getConversationId(),
+                    userPrompt,
+                    inferredCategory,
+                    effectiveSkill,
+                    diff,
+                    requestedCount
+            );
+            String toolStatus = exerciseDraftResult.isSuccess() ? "EXECUTED" : "FAILED";
+            String toolSummary = exerciseDraftResult.isSuccess()
+                    ? exerciseDraftResult.getMessage()
+                    : exerciseDraftResult.getErrorMessage();
+            long count = exerciseDraftResult.getCreatedCount();
+            if (!exerciseDraftResult.isSuccess() && exerciseDraftResult.getErrorMessage() != null) {
+                missingDataNotes.add(exerciseDraftResult.getErrorMessage());
+            }
+            executionRecords.add(AdminToolExecutionRecord.builder()
+                    .toolName(AdminToolName.CREATE_EXERCISE_DRAFTS.getToolName())
+                    .status(toolStatus)
+                    .parametersSummary("category=" + exerciseDraftResult.getCategory() + ",requested=" + requestedCount)
+                    .summary(toolSummary)
+                    .recordCount(count)
+                    .durationMs(Math.max(0L, System.currentTimeMillis() - t0))
+                    .executedAt(ZonedDateTime.now())
+                    .build());
+        }
+
         if (toolsToRun.contains(AdminToolName.GENERATE_ADMIN_RECOMMENDATIONS)) {
             long t0 = System.currentTimeMillis();
             if (userStats == null) {
@@ -504,7 +566,7 @@ public class AdminToolRouter {
         String sanitizedPromptContext = formatSanitizedPromptContext(
                 timeRange, executionRecords, userStats, segmentResponse, engagementResponse, coachingResponse, inspectedUser,
                 dataRecommendations, missingDataNotes, gettingStartedProgram, gettingStartedPreview, activeCampaigns,
-                campaignAnalytics, pendingConfirmation, proToolResult);
+                campaignAnalytics, pendingConfirmation, proToolResult, exerciseDraftResult);
 
         return new RoutedChatToolsResult(
                 intent,
@@ -524,7 +586,8 @@ public class AdminToolRouter {
                 activeCampaigns,
                 campaignAnalytics,
                 pendingConfirmation,
-                proToolResult
+                proToolResult,
+                exerciseDraftResult
         );
     }
 
@@ -694,6 +757,10 @@ public class AdminToolRouter {
                 proTool = AdminToolName.CHECK_PRO_STATUS;
             }
             return new LinkedHashSet<>(Set.of(proTool));
+        }
+
+        if (isExerciseDraftCreationPrompt(lower) || intent == AdminAiIntent.EXERCISE_DRAFT_CREATION) {
+            return new LinkedHashSet<>(Set.of(AdminToolName.CREATE_EXERCISE_DRAFTS));
         }
 
         if (request.getTargetUserId() != null || intent == AdminAiIntent.USER_DRILL_DOWN) {
@@ -902,7 +969,8 @@ public class AdminToolRouter {
             List<GettingStartedCampaignSummaryResponse> activeCampaigns,
             GettingStartedCampaignAnalyticsResponse analytics,
             AdminPendingConfirmationResponse pendingConfirmation,
-            AdminProToolResultResponse proToolResult
+            AdminProToolResultResponse proToolResult,
+            ExerciseDraftBatchResultResponse exerciseDraftResult
     ) {
         StringBuilder sb = new StringBuilder();
         sb.append("\n=== EXECUTED ADMIN DATA TOOLS (TIME RANGE: ")
@@ -1000,6 +1068,19 @@ public class AdminToolRouter {
         }
         appendGettingStartedPromptContext(sb, program, preview, activeCampaigns, analytics, pendingConfirmation);
         appendProPromptContext(sb, proToolResult);
+        if (exerciseDraftResult != null) {
+            sb.append("EXERCISE DRAFT TOOL RESULT: success=").append(exerciseDraftResult.isSuccess())
+                    .append(", category=").append(exerciseDraftResult.getCategory())
+                    .append(", createdCount=").append(exerciseDraftResult.getCreatedCount());
+            if (!exerciseDraftResult.isSuccess() && exerciseDraftResult.getErrorMessage() != null) {
+                sb.append(", error=").append(exerciseDraftResult.getErrorMessage());
+            } else {
+                sb.append(", createdIds=").append(exerciseDraftResult.getCreatedExercises().stream()
+                        .map(e -> "#" + e.id() + " " + e.name() + " [" + e.status() + ", " + e.origin() + "]")
+                        .toList());
+            }
+            sb.append("\n");
+        }
         sb.append("STRICT RULES: Cite exact counts, percentages, and time range. Distinguish measured facts from AI recommendations. Never invent numbers.\n");
         return sb.toString();
     }
@@ -1299,5 +1380,25 @@ public class AdminToolRouter {
                 || lower.contains("pro membership")
                 || lower.contains("unlimited pro")
                 || lower.contains("have pro");
+    }
+
+    public static boolean isExerciseDraftCreationPrompt(String lower) {
+        if (lower == null || lower.isBlank()
+                || isGettingStartedOrCampaignPrompt(lower)
+                || isProManagementPrompt(lower)) {
+            return false;
+        }
+        if (lower.contains("what exercise") || lower.contains("which exercise")
+                || lower.contains("missing exercise") || lower.contains("missing progression")
+                || lower.contains("recommend exercises") || lower.contains("suggest exercises")) {
+            return false;
+        }
+        boolean mentionsExercise = lower.contains("exercise") || lower.contains("bài tập");
+        boolean hasCreateVerb = lower.contains("add") || lower.contains("create")
+                || lower.contains("generate") || lower.contains("save")
+                || lower.contains("thêm") || lower.contains("tạo");
+        boolean mentionsWorkoutProgram = (lower.contains("workout program") || lower.contains("draft program"))
+                && !lower.contains("to draft") && !lower.contains("catalog") && !lower.contains("library");
+        return mentionsExercise && hasCreateVerb && !mentionsWorkoutProgram;
     }
 }

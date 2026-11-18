@@ -2,6 +2,7 @@ package com.calisthenics.backend.admin;
 
 import com.calisthenics.backend.admin.dto.AdminExerciseDeleteResponse;
 import com.calisthenics.backend.admin.dto.AdminExerciseResponse;
+import com.calisthenics.backend.admin.dto.AdminExerciseStatsResponse;
 import com.calisthenics.backend.admin.dto.AdminPageResponse;
 import com.calisthenics.backend.admin.dto.CreateAdminExerciseRequest;
 import com.calisthenics.backend.admin.dto.UpdateAdminExerciseRequest;
@@ -14,7 +15,9 @@ import com.calisthenics.backend.exercise.ExerciseMediaItem;
 import com.calisthenics.backend.exercise.ExerciseMediaMapper;
 import com.calisthenics.backend.exercise.ExerciseMediaType;
 import com.calisthenics.backend.exercise.ExerciseCategory;
+import com.calisthenics.backend.exercise.ExerciseOrigin;
 import com.calisthenics.backend.exercise.ExerciseRepository;
+import com.calisthenics.backend.exercise.ExerciseStatus;
 import com.calisthenics.backend.workout.WorkoutSessionExerciseRepository;
 import com.calisthenics.backend.workoutplan.repository.WorkoutPlanExerciseRepository;
 import jakarta.persistence.criteria.Predicate;
@@ -59,14 +62,39 @@ public class AdminExerciseService {
             String sortBy,
             String sortDirection
     ) {
+        return getExercises(page, size, search, category, difficulty, active, null, null, sortBy, sortDirection);
+    }
+
+    @Transactional(readOnly = true)
+    public AdminPageResponse<AdminExerciseResponse> getExercises(
+            int page,
+            int size,
+            String search,
+            ExerciseCategory category,
+            DifficultyLevel difficulty,
+            Boolean active,
+            ExerciseStatus status,
+            ExerciseOrigin origin,
+            String sortBy,
+            String sortDirection
+    ) {
         Sort sort = resolveSort(sortBy, sortDirection);
         Pageable pageable = PageRequest.of(Math.max(0, page), Math.min(MAX_PAGE_SIZE, Math.max(1, size)), sort);
-        Specification<Exercise> spec = exerciseSpecification(search, category, difficulty, active);
+        Specification<Exercise> spec = exerciseSpecification(search, category, difficulty, active, status, origin);
 
         Page<Exercise> exercisePage = exerciseRepository.findAll(spec, pageable);
 
         Page<AdminExerciseResponse> mappedPage = exercisePage.map(this::mapToAdminResponse);
         return AdminPageResponse.from(mappedPage);
+    }
+
+    @Transactional(readOnly = true)
+    public AdminExerciseStatsResponse getExerciseStats() {
+        long total = exerciseRepository.count();
+        long published = exerciseRepository.countByStatus(ExerciseStatus.PUBLISHED);
+        long draft = exerciseRepository.countByStatus(ExerciseStatus.DRAFT);
+        long aiRecommended = exerciseRepository.countByOrigin(ExerciseOrigin.AI_RECOMMENDED);
+        return new AdminExerciseStatsResponse(total, published, draft, aiRecommended);
     }
 
     @Transactional(readOnly = true)
@@ -91,6 +119,14 @@ public class AdminExerciseService {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Exercise with code '" + code + "' already exists");
         }
 
+        ExerciseStatus resolvedStatus = request.status() != null
+                ? request.status()
+                : (request.active() != null
+                        ? (request.active() ? ExerciseStatus.PUBLISHED : ExerciseStatus.DRAFT)
+                        : ExerciseStatus.PUBLISHED);
+        boolean resolvedActive = resolvedStatus == ExerciseStatus.PUBLISHED;
+        ExerciseOrigin resolvedOrigin = request.origin() != null ? request.origin() : ExerciseOrigin.MANUAL;
+
         Exercise exercise = Exercise.builder()
                 .name(trimmedName)
                 .code(code)
@@ -102,7 +138,9 @@ public class AdminExerciseService {
                 .imageUrl(normalizeUrl(request.imageUrl()))
                 .videoUrl(normalizeUrl(request.videoUrl()))
                 .equipment(request.equipment())
-                .active(request.active() != null ? request.active() : true)
+                .active(resolvedActive)
+                .status(resolvedStatus)
+                .origin(resolvedOrigin)
                 .build();
 
         normalizeMediaItems(exercise, request.imageUrl(), request.videoUrl(), request.mediaItems(), true);
@@ -145,8 +183,13 @@ public class AdminExerciseService {
                 request.mediaItems(),
                 Boolean.TRUE.equals(request.replaceMediaItems())
         );
-        if (request.active() != null) {
+        if (request.status() != null) {
+            exercise.setStatus(request.status());
+        } else if (request.active() != null) {
             exercise.setActive(request.active());
+        }
+        if (request.origin() != null) {
+            exercise.setOrigin(request.origin());
         }
 
         Exercise updated = exerciseRepository.save(exercise);
@@ -161,6 +204,22 @@ public class AdminExerciseService {
         exercise.setActive(active);
         Exercise updated = exerciseRepository.save(exercise);
         return mapToAdminResponse(updated);
+    }
+
+    @Transactional
+    public List<AdminExerciseResponse> bulkUpdateStatus(List<Long> exerciseIds, boolean active) {
+        if (exerciseIds == null || exerciseIds.isEmpty()) {
+            return List.of();
+        }
+        List<Exercise> exercises = exerciseRepository.findAllById(exerciseIds);
+        if (exercises.isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "No exercises found for the provided IDs");
+        }
+        for (Exercise exercise : exercises) {
+            exercise.setActive(active);
+        }
+        List<Exercise> saved = exerciseRepository.saveAll(exercises);
+        return saved.stream().map(this::mapToAdminResponse).toList();
     }
 
     @Transactional
@@ -219,6 +278,8 @@ public class AdminExerciseService {
                 exercise.getVideoUrl(),
                 exercise.getEquipment(),
                 exercise.isActive(),
+                exercise.getStatus(),
+                exercise.getOrigin(),
                 exercise.getCreatedAt(),
                 planRefs,
                 sessionRefs,
@@ -341,7 +402,9 @@ public class AdminExerciseService {
             String search,
             ExerciseCategory category,
             DifficultyLevel difficulty,
-            Boolean active
+            Boolean active,
+            ExerciseStatus status,
+            ExerciseOrigin origin
     ) {
         return (root, query, cb) -> {
             List<Predicate> predicates = new ArrayList<>();
@@ -364,6 +427,14 @@ public class AdminExerciseService {
 
             if (active != null) {
                 predicates.add(cb.equal(root.get("active"), active));
+            }
+
+            if (status != null) {
+                predicates.add(cb.equal(root.get("status"), status));
+            }
+
+            if (origin != null) {
+                predicates.add(cb.equal(root.get("origin"), origin));
             }
 
             return cb.and(predicates.toArray(new Predicate[0]));

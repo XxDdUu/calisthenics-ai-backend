@@ -5,6 +5,7 @@ import com.calisthenics.backend.aichat.entity.AiConversation;
 import com.calisthenics.backend.aichat.entity.AiMessage;
 import com.calisthenics.backend.aichat.repository.AiConversationRepository;
 import com.calisthenics.backend.aichat.repository.AiMessageRepository;
+import com.calisthenics.backend.aichat.service.UserAiWorkoutToolService;
 import com.calisthenics.backend.aichat.service.impl.AiAssistantServiceImpl;
 import com.calisthenics.backend.aiworkout.dto.AiWorkoutPlanPreviewResponse;
 import com.calisthenics.backend.aiworkout.gemini.GeminiApiClient;
@@ -85,6 +86,9 @@ class AiAssistantServiceTest {
 
     @Mock
     private CoachProfileRepository coachProfileRepository;
+
+    @Mock
+    private UserAiWorkoutToolService userAiWorkoutToolService;
 
     @Spy
     private ObjectMapper objectMapper = new ObjectMapper();

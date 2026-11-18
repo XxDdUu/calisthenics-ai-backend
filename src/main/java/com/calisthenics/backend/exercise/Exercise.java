@@ -57,6 +57,15 @@ public class Exercise {
     @Builder.Default
     private boolean active = true;
 
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 32)
+    private ExerciseStatus status;
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 32)
+    @Builder.Default
+    private ExerciseOrigin origin = ExerciseOrigin.MANUAL;
+
     @OneToMany(mappedBy = "exercise", cascade = CascadeType.ALL, orphanRemoval = true)
     @OrderBy("displayOrder ASC, id ASC")
     @Builder.Default
@@ -65,4 +74,47 @@ public class Exercise {
     @CreationTimestamp
     @Column(name = "created_at", updatable = false)
     private ZonedDateTime createdAt;
+
+    public ExerciseStatus getStatus() {
+        return status != null ? status : (active ? ExerciseStatus.PUBLISHED : ExerciseStatus.DRAFT);
+    }
+
+    public ExerciseOrigin getOrigin() {
+        return origin != null ? origin : ExerciseOrigin.MANUAL;
+    }
+
+    public void setActive(boolean active) {
+        this.active = active;
+        this.status = active ? ExerciseStatus.PUBLISHED : ExerciseStatus.DRAFT;
+    }
+
+    public void setStatus(ExerciseStatus status) {
+        this.status = status;
+        if (status != null) {
+            this.active = (status == ExerciseStatus.PUBLISHED);
+        }
+    }
+
+    @PrePersist
+    @PreUpdate
+    protected void syncLifecycleFields() {
+        if (origin == null) {
+            origin = ExerciseOrigin.MANUAL;
+        }
+        if (status == null) {
+            status = active ? ExerciseStatus.PUBLISHED : ExerciseStatus.DRAFT;
+        } else {
+            active = (status == ExerciseStatus.PUBLISHED);
+        }
+    }
+
+    public static class ExerciseBuilder {
+        public ExerciseBuilder status(ExerciseStatus status) {
+            this.status = status;
+            if (status != null) {
+                this.active(status == ExerciseStatus.PUBLISHED);
+            }
+            return this;
+        }
+    }
 }

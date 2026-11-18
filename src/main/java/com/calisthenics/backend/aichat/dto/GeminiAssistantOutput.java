@@ -133,6 +133,15 @@ public class GeminiAssistantOutput {
 
         @JsonProperty("duration_weeks")
         private Integer durationWeeks;
+
+        @JsonProperty("tool_name")
+        private String toolName;
+
+        @JsonProperty("day_of_week")
+        private String dayOfWeek;
+
+        @JsonProperty("detailed")
+        private Boolean detailed;
     }
 
     @Data
