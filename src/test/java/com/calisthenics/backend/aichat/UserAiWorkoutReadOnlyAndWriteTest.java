@@ -4,8 +4,6 @@ import com.calisthenics.backend.aichat.dto.AiMessageResponse;
 import com.calisthenics.backend.aichat.dto.CreateAiConversationRequest;
 import com.calisthenics.backend.aichat.dto.GeminiAssistantOutput;
 import com.calisthenics.backend.aichat.dto.SendAiMessageRequest;
-import com.calisthenics.backend.aichat.repository.AiConversationRepository;
-import com.calisthenics.backend.aichat.repository.AiMessageRepository;
 import com.calisthenics.backend.aichat.service.UserAiWorkoutToolService;
 import com.calisthenics.backend.aiworkout.dto.AiWorkoutPlanPreviewResponse;
 import com.calisthenics.backend.aiworkout.gemini.GeminiApiClient;
@@ -35,7 +33,7 @@ import com.calisthenics.backend.workoutplan.type.WorkoutDayOfWeek;
 import com.calisthenics.backend.workoutplan.type.WorkoutSessionType;
 import com.calisthenics.backend.workoutplan.type.WorkoutSplitType;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import jakarta.persistence.EntityManager;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -45,10 +43,10 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.boot.test.mock.mockito.SpyBean;
 import org.springframework.http.MediaType;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.time.DayOfWeek;
 import java.time.LocalDate;
@@ -74,20 +72,73 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @SpringBootTest
 @AutoConfigureMockMvc
 @ActiveProfiles("test")
-@Transactional
 class UserAiWorkoutReadOnlyAndWriteTest {
+
+    private static final List<String> TABLES_IN_DELETE_ORDER = List.of(
+            "admin_ai_pending_actions",
+            "admin_ai_audit_logs",
+            "admin_ai_recommendations",
+            "admin_ai_messages",
+            "admin_ai_conversations",
+            "admin_pro_audit_logs",
+            "membership_entitlements",
+            "getting_started_campaign_events",
+            "getting_started_day_progress",
+            "getting_started_day_completions",
+            "shared_personal_records",
+            "personal_records",
+            "workout_logs",
+            "workout_session_sets",
+            "workout_session_exercises",
+            "workout_sessions",
+            "getting_started_enrollments",
+            "getting_started_program_user_states",
+            "getting_started_program_exercises",
+            "getting_started_program_days",
+            "getting_started_programs",
+            "workout_plan_assignments",
+            "workout_plan_exercises",
+            "workout_plan_days",
+            "workout_plans",
+            "coach_client_relationships",
+            "chat_messages",
+            "chat_conversations",
+            "user_presence",
+            "ai_messages",
+            "ai_conversations",
+            "ai_workout_plan_logs",
+            "coach_review_events",
+            "coach_reviews",
+            "user_report_evidence",
+            "user_report_actions",
+            "user_reports",
+            "notifications",
+            "rep_histories",
+            "analysis_sessions",
+            "analyses",
+            "video_analysis_keypoints",
+            "video_analyses",
+            "video_analysis_quota_usages",
+            "profile_media_items",
+            "client_body_measurements",
+            "client_profiles",
+            "coach_profiles",
+            "exercise_media_items",
+            "exercises",
+            "password_reset_otps",
+            "registration_otps",
+            "users"
+    );
 
     @Autowired private MockMvc mockMvc;
     @Autowired private ObjectMapper objectMapper;
     @Autowired private JwtTokenProvider jwtTokenProvider;
+    @Autowired private JdbcTemplate jdbcTemplate;
     @Autowired private UserRepository userRepository;
     @Autowired private ExerciseRepository exerciseRepository;
     @Autowired private WorkoutPlanRepository workoutPlanRepository;
     @Autowired private CoachClientRelationshipRepository relationshipRepository;
     @Autowired private WorkoutPlanAssignmentRepository assignmentRepository;
-    @Autowired private AiConversationRepository aiConversationRepository;
-    @Autowired private AiMessageRepository aiMessageRepository;
-    @Autowired private EntityManager entityManager;
 
     @MockBean private GeminiApiClient geminiApiClient;
     @SpyBean private AiWorkoutPlanService aiWorkoutPlanService;
@@ -106,17 +157,15 @@ class UserAiWorkoutReadOnlyAndWriteTest {
     private Exercise bulgarianSplitSquat;
     private WorkoutPlan personalPlan;
 
+    private void cleanDb() {
+        for (String table : TABLES_IN_DELETE_ORDER) {
+            jdbcTemplate.update("DELETE FROM " + table);
+        }
+    }
+
     @BeforeEach
     void setUp() {
-        aiMessageRepository.deleteAll();
-        aiConversationRepository.deleteAll();
-        assignmentRepository.deleteAll();
-        workoutPlanRepository.deleteAll();
-        relationshipRepository.deleteAll();
-        exerciseRepository.deleteAll();
-        userRepository.deleteAll();
-        entityManager.flush();
-        entityManager.clear();
+        cleanDb();
 
         long ts = System.currentTimeMillis();
         athleteWithPlan = userRepository.save(User.builder()
@@ -202,10 +251,13 @@ class UserAiWorkoutReadOnlyAndWriteTest {
 
         personalPlan = buildWeeklyPlanFor(athleteWithPlan, "Upper Lower Mastery");
         personalPlan = workoutPlanRepository.save(personalPlan);
-        entityManager.flush();
-        entityManager.clear();
 
         when(geminiApiClient.callAssistant(anyString(), anyList())).thenReturn(Optional.empty());
+    }
+
+    @AfterEach
+    void tearDown() {
+        cleanDb();
     }
 
     private WorkoutPlan buildWeeklyPlanFor(User owner, String planName) {

@@ -101,12 +101,12 @@ public class UserAiWorkoutToolService {
 
     // ==================== READ-ONLY TOOLS ====================
 
-    @Transactional(readOnly = true)
+    @Transactional(readOnly = true, noRollbackFor = Exception.class)
     public WorkoutToolResult getMyWorkoutPlan(Long userId, boolean detailed, boolean isVn) {
         return retrievePlan(userId, TOOL_GET_MY_WORKOUT_PLAN, detailed, isVn);
     }
 
-    @Transactional(readOnly = true)
+    @Transactional(readOnly = true, noRollbackFor = Exception.class)
     public WorkoutToolResult getWeeklyWorkoutSchedule(Long userId, boolean detailed, boolean isVn) {
         return retrievePlan(userId, TOOL_GET_WEEKLY_WORKOUT_SCHEDULE, detailed, isVn);
     }
@@ -143,7 +143,7 @@ public class UserAiWorkoutToolService {
         }
     }
 
-    @Transactional(readOnly = true)
+    @Transactional(readOnly = true, noRollbackFor = Exception.class)
     public WorkoutToolResult getWorkoutDayDetails(
             Long userId,
             WorkoutDayOfWeek explicitDay,
@@ -206,7 +206,7 @@ public class UserAiWorkoutToolService {
         }
     }
 
-    @Transactional(readOnly = true)
+    @Transactional(readOnly = true, noRollbackFor = Exception.class)
     public WorkoutToolResult getExerciseDetails(Long userId, String prompt, boolean isVn) {
         try {
             List<Exercise> publishedCatalog = exerciseRepository.findAll().stream()

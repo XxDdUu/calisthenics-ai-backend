@@ -2,10 +2,6 @@ package com.calisthenics.backend.adminai;
 
 import com.calisthenics.backend.adminai.dto.AdminChatRequest;
 import com.calisthenics.backend.adminai.dto.AdminChatResponse;
-import com.calisthenics.backend.adminai.repository.AdminAiAuditLogRepository;
-import com.calisthenics.backend.adminai.repository.AdminAiConversationRepository;
-import com.calisthenics.backend.adminai.repository.AdminAiMessageRepository;
-import com.calisthenics.backend.adminai.repository.AdminAiRecommendationRepository;
 import com.calisthenics.backend.aiworkout.gemini.GeminiApiClient;
 import com.calisthenics.backend.exercise.DifficultyLevel;
 import com.calisthenics.backend.exercise.Exercise;
@@ -20,7 +16,7 @@ import com.calisthenics.backend.user.User;
 import com.calisthenics.backend.user.UserRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import jakarta.persistence.EntityManager;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -29,10 +25,10 @@ import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMock
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.http.MediaType;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 import java.util.Optional;
@@ -48,19 +44,70 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @SpringBootTest
 @AutoConfigureMockMvc
 @ActiveProfiles("test")
-@Transactional
 class ExerciseDraftAndCatalogFlowTest {
+
+    private static final List<String> TABLES_IN_DELETE_ORDER = List.of(
+            "admin_ai_pending_actions",
+            "admin_ai_audit_logs",
+            "admin_ai_recommendations",
+            "admin_ai_messages",
+            "admin_ai_conversations",
+            "admin_pro_audit_logs",
+            "membership_entitlements",
+            "getting_started_campaign_events",
+            "getting_started_day_progress",
+            "getting_started_day_completions",
+            "shared_personal_records",
+            "personal_records",
+            "workout_logs",
+            "workout_session_sets",
+            "workout_session_exercises",
+            "workout_sessions",
+            "getting_started_enrollments",
+            "getting_started_program_user_states",
+            "getting_started_program_exercises",
+            "getting_started_program_days",
+            "getting_started_programs",
+            "workout_plan_assignments",
+            "workout_plan_exercises",
+            "workout_plan_days",
+            "workout_plans",
+            "coach_client_relationships",
+            "chat_messages",
+            "chat_conversations",
+            "user_presence",
+            "ai_messages",
+            "ai_conversations",
+            "ai_workout_plan_logs",
+            "coach_review_events",
+            "coach_reviews",
+            "user_report_evidence",
+            "user_report_actions",
+            "user_reports",
+            "notifications",
+            "rep_histories",
+            "analysis_sessions",
+            "analyses",
+            "video_analysis_keypoints",
+            "video_analyses",
+            "video_analysis_quota_usages",
+            "profile_media_items",
+            "client_body_measurements",
+            "client_profiles",
+            "coach_profiles",
+            "exercise_media_items",
+            "exercises",
+            "password_reset_otps",
+            "registration_otps",
+            "users"
+    );
 
     @Autowired private MockMvc mockMvc;
     @Autowired private ObjectMapper objectMapper;
     @Autowired private JwtTokenProvider jwtTokenProvider;
+    @Autowired private JdbcTemplate jdbcTemplate;
     @Autowired private UserRepository userRepository;
     @Autowired private ExerciseRepository exerciseRepository;
-    @Autowired private AdminAiAuditLogRepository auditLogRepository;
-    @Autowired private AdminAiRecommendationRepository recommendationRepository;
-    @Autowired private AdminAiMessageRepository messageRepository;
-    @Autowired private AdminAiConversationRepository conversationRepository;
-    @Autowired private EntityManager entityManager;
 
     @MockBean private GeminiApiClient geminiApiClient;
 
@@ -70,16 +117,15 @@ class ExerciseDraftAndCatalogFlowTest {
     private String userToken;
     private Exercise publishedPushUp;
 
+    private void cleanDb() {
+        for (String table : TABLES_IN_DELETE_ORDER) {
+            jdbcTemplate.update("DELETE FROM " + table);
+        }
+    }
+
     @BeforeEach
     void setUp() {
-        auditLogRepository.deleteAll();
-        recommendationRepository.deleteAll();
-        messageRepository.deleteAll();
-        conversationRepository.deleteAll();
-        exerciseRepository.deleteAll();
-        userRepository.deleteAll();
-        entityManager.flush();
-        entityManager.clear();
+        cleanDb();
 
         long ts = System.currentTimeMillis();
         adminUser = userRepository.save(User.builder()
@@ -112,6 +158,11 @@ class ExerciseDraftAndCatalogFlowTest {
 
         when(geminiApiClient.planAdminTools(anyString(), anyList())).thenReturn(Optional.empty());
         when(geminiApiClient.callAdminAgent(anyString(), anyList())).thenReturn(Optional.empty());
+    }
+
+    @AfterEach
+    void tearDown() {
+        cleanDb();
     }
 
     @Test
@@ -280,7 +331,6 @@ class ExerciseDraftAndCatalogFlowTest {
                     .active(true)
                     .build());
         }
-        entityManager.flush();
 
         AdminChatRequest req = AdminChatRequest.builder()
                 .message("Add 3 leg exercises")
