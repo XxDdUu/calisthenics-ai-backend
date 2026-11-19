@@ -140,6 +140,12 @@ public class GeminiAssistantOutput {
         @JsonProperty("day_of_week")
         private String dayOfWeek;
 
+        @JsonProperty("source_day_of_week")
+        private String sourceDayOfWeek;
+
+        @JsonProperty("exercise_name")
+        private String exerciseName;
+
         @JsonProperty("detailed")
         private Boolean detailed;
     }

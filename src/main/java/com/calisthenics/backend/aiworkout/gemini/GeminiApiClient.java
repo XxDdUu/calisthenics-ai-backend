@@ -430,6 +430,7 @@ public class GeminiApiClient {
                         "assign_workout_plan",
                         "add_exercise_to_workout",
                         "remove_exercise_from_workout",
+                        "move_exercise_between_days",
                         "regenerate_workout_plan"
                 ),
                 "description", "Read-only tools for view/show/list/explain requests; write tools only for explicit create/modify/replace requests"
@@ -437,7 +438,16 @@ public class GeminiApiClient {
         planProperties.put("day_of_week", Map.of(
                 "type", "STRING",
                 "enum", List.of("MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY", "TODAY", "NEXT"),
-                "description", "Target day if asking about or modifying a specific day"
+                "description", "Target weekday explicitly requested by the user"
+        ));
+        planProperties.put("source_day_of_week", Map.of(
+                "type", "STRING",
+                "enum", List.of("MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"),
+                "description", "Source weekday when moving an exercise from one day to another"
+        ));
+        planProperties.put("exercise_name", Map.of(
+                "type", "STRING",
+                "description", "Exact exercise name requested by the user"
         ));
         planProperties.put("detailed", Map.of("type", "BOOLEAN", "description", "True when user asks for full details or instructions"));
 

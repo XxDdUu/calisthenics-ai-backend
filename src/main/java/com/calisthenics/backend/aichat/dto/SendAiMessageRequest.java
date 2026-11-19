@@ -1,5 +1,6 @@
 package com.calisthenics.backend.aichat.dto;
 
+import com.calisthenics.backend.workoutplan.type.WorkoutDayOfWeek;
 import jakarta.validation.constraints.NotBlank;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -16,4 +17,11 @@ public class SendAiMessageRequest {
     private String message;
 
     private String timezone;
+
+    private WorkoutDayOfWeek selectedDayOfWeek;
+
+    public SendAiMessageRequest(String message, String timezone) {
+        this.message = message;
+        this.timezone = timezone;
+    }
 }

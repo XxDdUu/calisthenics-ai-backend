@@ -60,10 +60,67 @@ public class UserAiWorkoutToolService {
     public static final String TOOL_ASSIGN_WORKOUT_PLAN = "assign_workout_plan";
     public static final String TOOL_ADD_EXERCISE_TO_WORKOUT = "add_exercise_to_workout";
     public static final String TOOL_REMOVE_EXERCISE_FROM_WORKOUT = "remove_exercise_from_workout";
+    public static final String TOOL_MOVE_EXERCISE_BETWEEN_DAYS = "move_exercise_between_days";
     public static final String TOOL_REGENERATE_WORKOUT_PLAN = "regenerate_workout_plan";
 
     private static final DateTimeFormatter DATE_FORMAT = DateTimeFormatter.ofPattern("MMM dd, yyyy", Locale.US);
-    private static final Pattern NUMBER_PATTERN = Pattern.compile("\\b(\\d+)\\b");
+    private static final Pattern GENERIC_COUNT_PATTERN = Pattern.compile(
+            "(?i)\\b(\\d{1,2})\\s+(?:[a-zÀ-ỹ-]+\\s+){0,2}(?:exercises?|bài\\s*tập)\\b");
+    private static final Pattern SETS_PATTERN = Pattern.compile("(?i)\\b(\\d{1,2})\\s*sets?\\b");
+    private static final Pattern REPS_PATTERN = Pattern.compile("(?i)\\b(\\d{1,3})\\s*reps?\\b");
+    private static final Pattern TIMES_REPS_PATTERN = Pattern.compile(
+            "(?i)\\b\\d{1,2}\\s*[x×]\\s*(\\d{1,3})(?!\\s*(?:s|sec|secs|second|seconds))\\b");
+    private static final Pattern REST_AFTER_PATTERN = Pattern.compile(
+            "(?i)\\b(\\d{1,3})\\s*(?:s|sec|secs|seconds?)?\\s*rest\\b");
+    private static final Pattern REST_BEFORE_PATTERN = Pattern.compile(
+            "(?i)\\brest\\s*[:=]?\\s*(?:of\\s*)?(\\d{1,3})\\s*(?:s|sec|secs|seconds?)?\\b");
+    private static final Pattern HOLD_PATTERN = Pattern.compile(
+            "(?i)\\b(\\d{1,3})\\s*(?:s|sec|secs|seconds?)\\s*(?:hold\\b)?(?!\\s*rest\\b)");
+    private static final Pattern HOLD_PREFIX_PATTERN = Pattern.compile(
+            "(?i)\\bhold\\s*(?:for\\s*)?(\\d{1,3})\\s*(?:s|sec|secs|seconds?)\\b");
+    private static final Pattern WEEKDAY_TOKEN_PATTERN = Pattern.compile(
+            "(?<![\\p{L}\\p{N}])(" +
+                    "monday|mon|" +
+                    "tuesday|tues|tue|" +
+                    "wednesday|wed|" +
+                    "thursday|thurs|thur|thu|" +
+                    "friday|fri|" +
+                    "saturday|sat|" +
+                    "sunday|sun|" +
+                    "thứ\\s*(?:2|hai|3|ba|4|tư|5|năm|6|sáu|7|bảy)|" +
+                    "chủ\\s*nhật|chu\\s*nhat|" +
+                    "t[2-7]|cn" +
+                    ")(?![\\p{L}\\p{N}])",
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+    private static final Pattern NEGATED_WEEKDAY_PREFIX_PATTERN = Pattern.compile(
+            "(?i)(?:^|[\\s,;:()])(?:not|no|never|don't|do\\s+not|instead\\s+of|rather\\s+than|excluding|except|không\\s+phải|đừng|thay\\s+vì)(?:\\s+(?:on|to|in|into|for|at|vào|cho))?\\s+$");
+    private static final Pattern SOURCE_WEEKDAY_PREFIX_PATTERN = Pattern.compile(
+            "(?i)(?:^|[\\s,;:()])(?:from|off|out\\s+of|từ|khỏi)\\s+$");
+    private static final Pattern TARGET_WEEKDAY_PREFIX_PATTERN = Pattern.compile(
+            "(?i)(?:^|[\\s,;:()])(?:to|into|onto|on|for|in|vào|sang|qua|cho|tới)\\s+$");
+    private static final Set<String> MOVEMENT_VARIANT_MODIFIERS = Set.of(
+            "raise", "row", "pull", "push", "press", "curl", "dip", "fly",
+            "extension", "negative", "eccentric", "lean", "kick", "squat",
+            "lunge", "crunch", "plank", "jump", "walk", "rotation", "bridge",
+            "hang", "muscle", "handstand", "planche", "lever", "flag", "sit"
+    );
+    private static final Set<String> DYNAMIC_MOVEMENT_WORDS = Set.of(
+            "raise", "row", "pull", "push", "press", "curl", "dip", "fly",
+            "squat", "lunge", "crunch", "jump", "walk", "kick", "muscle", "extension"
+    );
+
+    public record MoveDays(WorkoutDayOfWeek sourceDay, WorkoutDayOfWeek targetDay) {}
+
+    private record WeekdayMatch(
+            WorkoutDayOfWeek day,
+            int start,
+            int end,
+            boolean negated,
+            boolean sourcePrep,
+            boolean targetPrep
+    ) {}
+
+    private record ExercisePrescription(Integer sets, Integer reps, Integer durationSeconds, Integer restSeconds) {}
 
     private final WorkoutPlanRepository workoutPlanRepository;
     private final WorkoutPlanDayRepository workoutPlanDayRepository;
@@ -343,6 +400,18 @@ public class UserAiWorkoutToolService {
             String timezone,
             boolean isVn
     ) {
+        return updateWorkoutPlan(userId, targetDay, null, prompt, timezone, isVn);
+    }
+
+    @Transactional
+    public WorkoutToolResult updateWorkoutPlan(
+            Long userId,
+            WorkoutDayOfWeek targetDay,
+            WorkoutDayOfWeek selectedDayOfWeek,
+            String prompt,
+            String timezone,
+            boolean isVn
+    ) {
         Optional<ResolvedPlan> planOpt = resolveOwnedPersonalPlan(userId);
         if (planOpt.isEmpty()) {
             String msg = isVn
@@ -352,15 +421,14 @@ public class UserAiWorkoutToolService {
         }
 
         WorkoutPlan plan = planOpt.get().plan();
-        WorkoutDayOfWeek dayToUpdate = targetDay != null ? targetDay : extractWeekday(prompt);
+        WorkoutDayOfWeek dayToUpdate = resolveTargetDay(extractWeekday(prompt), targetDay, selectedDayOfWeek);
         if (dayToUpdate == null) {
             return createWorkoutPlan(userId, prompt, null, 4, timezone, isVn, true);
         }
 
-        WorkoutPlanDay day = loadOrderedDays(plan).stream()
-                .filter(d -> d.getDayOfWeek() == dayToUpdate)
-                .findFirst()
-                .orElse(null);
+        List<WorkoutPlanDay> days = loadOrderedDays(plan);
+        Map<WorkoutDayOfWeek, List<Long>> preSnapshot = captureDayExerciseIdsSnapshot(days);
+        WorkoutPlanDay day = findDay(days, dayToUpdate);
 
         if (day == null) {
             String msg = isVn
@@ -382,17 +450,22 @@ public class UserAiWorkoutToolService {
             workoutPlanDayRepository.save(day);
         }
 
+        Map<WorkoutDayOfWeek, WorkoutPlanDay> verifiedDays = reloadAndVerifyMutation(
+                plan.getId(), preSnapshot, Set.of(dayToUpdate), Map.of(), Map.of());
+        WorkoutPlan reloaded = workoutPlanRepository.findWithDetailsById(plan.getId()).orElse(plan);
+        WorkoutPlanDay verifiedDay = verifiedDays.getOrDefault(dayToUpdate, day);
+
         String dayFormatted = formatSingleDayMarkdown(
-                new ResolvedPlan(plan, null, null), dayToUpdate, day, false, false, isVn);
+                new ResolvedPlan(reloaded, null, null), dayToUpdate, verifiedDay, false, false, isVn);
         String header = isVn
                 ? "✅ **Đã cập nhật lịch tập cho " + formatDayLabel(dayToUpdate, true) + "!**\n\n"
                 : "✅ **Updated " + formatDayLabel(dayToUpdate, false) + "'s workout!**\n\n";
-        Map<String, Object> meta = Map.of(
-                "type", "WORKOUT_PLAN_UPDATED",
-                "toolName", TOOL_UPDATE_WORKOUT_PLAN,
-                "readOnly", false,
-                "dayOfWeek", dayToUpdate.name()
-        );
+        Map<String, Object> meta = new LinkedHashMap<>();
+        meta.put("type", "WORKOUT_PLAN_UPDATED");
+        meta.put("toolName", TOOL_UPDATE_WORKOUT_PLAN);
+        meta.put("readOnly", false);
+        meta.put("mutated", true);
+        meta.put("dayOfWeek", dayToUpdate.name());
         return new WorkoutToolResult(TOOL_UPDATE_WORKOUT_PLAN, false, "WORKOUT_PLAN_UPDATE", true, header + dayFormatted, safeToJson(meta));
     }
 
@@ -404,37 +477,70 @@ public class UserAiWorkoutToolService {
             String timezone,
             boolean isVn
     ) {
+        return addExerciseToWorkout(userId, explicitDay, null, prompt, null, List.of(), timezone, isVn);
+    }
+
+    @Transactional
+    public WorkoutToolResult addExerciseToWorkout(
+            Long userId,
+            WorkoutDayOfWeek explicitDay,
+            WorkoutDayOfWeek selectedDayOfWeek,
+            String prompt,
+            String explicitExerciseName,
+            List<AiMessage> history,
+            String timezone,
+            boolean isVn
+    ) {
         Optional<ResolvedPlan> planOpt = resolveOwnedPersonalPlan(userId);
         if (planOpt.isEmpty()) {
             String msg = isVn
                     ? "Bạn chưa có lịch tập cá nhân để thêm bài tập. Hãy tạo lịch tập trước khi thêm bài mới."
                     : "You don't have an active personal workout plan to add exercises to yet.";
-            return new WorkoutToolResult(TOOL_ADD_EXERCISE_TO_WORKOUT, false, "WORKOUT_PLAN_UPDATE", false, msg, null);
+            return buildNonMutatingFailureResult(TOOL_ADD_EXERCISE_TO_WORKOUT, msg, null, null);
+        }
+
+        List<Exercise> publishedCatalog = loadPublishedCatalog();
+        WorkoutDayOfWeek fromPrompt = extractWeekday(prompt);
+        WorkoutDayOfWeek dayToModify = resolveTargetDay(fromPrompt, explicitDay, selectedDayOfWeek);
+
+        // Identify the requested exercise(s) strictly before modifying any state.
+        Optional<Exercise> matchedExercise = findRequestedExercise(
+                publishedCatalog, prompt, explicitExerciseName, history);
+        ExerciseCategory requestedCategory = detectCategory(prompt);
+        boolean genericCategoryRequest = matchedExercise.isEmpty() && isGenericCategoryExerciseRequest(prompt, requestedCategory);
+
+        if (dayToModify == null) {
+            String pendingEx = matchedExercise.map(Exercise::getName).orElse(null);
+            String msg;
+            if (pendingEx != null) {
+                msg = isVn
+                        ? "Bạn muốn thêm **" + pendingEx + "** vào thứ mấy trong tuần (ví dụ: Thứ Hai, Thứ Ba, ...)?"
+                        : "Which weekday would you like to add **" + pendingEx + "** to (for example: Monday, Tuesday, ...)?";
+            } else {
+                msg = isVn
+                        ? "Vui lòng cho biết tên bài tập và thứ bạn muốn thêm vào lịch tập (ví dụ: \"Thêm Front Lever Raises vào Thứ Ba\")."
+                        : "Please specify both the exercise name and the weekday you want to add it to (for example: \"Add Front Lever Raises to Tuesday\").";
+            }
+            Map<String, Object> meta = new LinkedHashMap<>();
+            meta.put("type", "WORKOUT_PLAN_CLARIFICATION");
+            meta.put("toolName", TOOL_ADD_EXERCISE_TO_WORKOUT);
+            meta.put("readOnly", false);
+            meta.put("mutated", false);
+            meta.put("pendingAction", "ADD");
+            if (pendingEx != null) {
+                meta.put("exerciseName", pendingEx);
+            }
+            return new WorkoutToolResult(TOOL_ADD_EXERCISE_TO_WORKOUT, false, "WORKOUT_PLAN_UPDATE", false, msg, safeToJson(meta));
         }
 
         WorkoutPlan plan = planOpt.get().plan();
         List<WorkoutPlanDay> days = loadOrderedDays(plan);
-        WorkoutDayOfWeek dayToModify = explicitDay != null ? explicitDay : extractWeekday(prompt);
-        if (dayToModify == null) {
-            dayToModify = days.stream()
-                    .filter(d -> !d.isRestDay())
-                    .map(WorkoutPlanDay::getDayOfWeek)
-                    .findFirst()
-                    .orElse(WorkoutDayOfWeek.MONDAY);
-        }
-        WorkoutDayOfWeek finalDayDow = dayToModify;
-        WorkoutPlanDay day = days.stream()
-                .filter(d -> d.getDayOfWeek() == finalDayDow)
-                .findFirst()
-                .orElse(null);
+        WorkoutPlanDay day = findDay(days, dayToModify);
         if (day == null) {
-            return new WorkoutToolResult(TOOL_ADD_EXERCISE_TO_WORKOUT, false, "WORKOUT_PLAN_UPDATE", false,
-                    isVn ? "Không tìm thấy ngày tập." : "Could not find the target workout day.", null);
+            return buildNonMutatingFailureResult(TOOL_ADD_EXERCISE_TO_WORKOUT,
+                    isVn ? "Không tìm thấy ngày tập." : "Could not find the target workout day.",
+                    dayToModify, null);
         }
-
-        List<Exercise> publishedCatalog = exerciseRepository.findAll().stream()
-                .filter(e -> e.isActive() && e.getStatus() != ExerciseStatus.DRAFT)
-                .toList();
 
         Set<Long> existingExerciseIds = new HashSet<>();
         for (WorkoutPlanExercise pe : loadOrderedExercises(day)) {
@@ -443,78 +549,88 @@ public class UserAiWorkoutToolService {
             }
         }
 
-        int requestedCount = parseCount(prompt, 1);
-        ExerciseCategory requestedCategory = detectCategory(prompt);
-
         List<Exercise> toAdd = new ArrayList<>();
-        // First try direct exercise name match
-        Optional<Exercise> directMatch = findBestMatchingExercise(publishedCatalog, prompt);
-        if (directMatch.isPresent() && !existingExerciseIds.contains(directMatch.get().getId())) {
-            toAdd.add(directMatch.get());
-        }
-
-        if (toAdd.size() < requestedCount) {
+        if (matchedExercise.isPresent()) {
+            Exercise exact = matchedExercise.get();
+            if (existingExerciseIds.contains(exact.getId())) {
+                String msg = isVn
+                        ? "Bài tập **" + exact.getName() + "** đã có trong lịch tập **" + formatDayLabel(dayToModify, true)
+                                + "** rồi. Không thêm trùng hoặc tự ý thay thế bằng bài tập khác."
+                        : "**" + exact.getName() + "** is already scheduled on **" + formatDayLabel(dayToModify, false)
+                                + "**. No duplicate or substitute exercise was added.";
+                return buildNonMutatingFailureResult(TOOL_ADD_EXERCISE_TO_WORKOUT, msg, dayToModify, "ALREADY_EXISTS");
+            }
+            toAdd.add(exact);
+        } else if (genericCategoryRequest) {
+            int requestedCount = parseRequestedGenericCount(prompt, 1);
             publishedCatalog.stream()
                     .filter(e -> !existingExerciseIds.contains(e.getId()))
-                    .filter(e -> toAdd.stream().noneMatch(added -> Objects.equals(added.getId(), e.getId())))
-                    .filter(e -> requestedCategory == null || e.getCategory() == requestedCategory)
-                    .limit(requestedCount - toAdd.size())
+                    .filter(e -> e.getCategory() == requestedCategory)
+                    .limit(requestedCount)
                     .forEach(toAdd::add);
         }
 
         if (toAdd.isEmpty()) {
             String msg = isVn
-                    ? "Không tìm thấy bài tập phù hợp mới trong danh mục công khai để thêm vào ngày tập này."
-                    : "No matching new published exercises were found in the catalog to add to that day.";
-            return new WorkoutToolResult(TOOL_ADD_EXERCISE_TO_WORKOUT, false, "WORKOUT_PLAN_UPDATE", false, msg, null);
+                    ? "Không tìm thấy bài tập khớp chính xác trong danh mục công khai để thêm vào **"
+                            + formatDayLabel(dayToModify, true) + "**. Không có thay đổi nào được thực hiện."
+                    : "I couldn't find a matching published exercise in the catalog for that request. Please specify the exact exercise name; no changes were made to **"
+                            + formatDayLabel(dayToModify, false) + "**.";
+            return buildNonMutatingFailureResult(TOOL_ADD_EXERCISE_TO_WORKOUT, msg, dayToModify, "EXERCISE_NOT_FOUND");
         }
+
+        Map<WorkoutDayOfWeek, List<Long>> preSnapshot = captureDayExerciseIdsSnapshot(days);
 
         if (day.isRestDay()) {
             day.setRestDay(false);
-            if (day.getName() == null || day.getName().toLowerCase(Locale.US).contains("rest")) {
+            if (day.getName() == null || day.getName().isBlank() || day.getName().toLowerCase(Locale.US).contains("rest")) {
                 day.setName(requestedCategory != null ? requestedCategory.name() + " Day" : "Custom Training");
+            }
+            if (day.getSessionType() == null || day.getSessionType() == WorkoutSessionType.REST) {
+                day.setSessionType(requestedCategory != null ? inferSessionTypeFromCategory(requestedCategory) : WorkoutSessionType.CUSTOM);
             }
             workoutPlanDayRepository.save(day);
         }
 
-        List<String> addedNames = new ArrayList<>();
+        ExercisePrescription parsedPrescription = parseExercisePrescription(prompt);
+        List<Long> expectedAddedAssignmentIds = new ArrayList<>();
         for (Exercise ex : toAdd) {
-            WorkoutPlanExerciseRequest addReq = new WorkoutPlanExerciseRequest();
-            addReq.setExerciseId(ex.getId());
-            addReq.setSets(3);
-            boolean isometric = ex.getCategory() == ExerciseCategory.ISOMETRIC
-                    || (ex.getName() != null && ex.getName().toLowerCase(Locale.US).contains("hold"))
-                    || (ex.getName() != null && ex.getName().toLowerCase(Locale.US).contains("plank"))
-                    || (ex.getName() != null && ex.getName().toLowerCase(Locale.US).contains("handstand"));
-            if (isometric) {
-                addReq.setDurationSeconds(20);
-            } else {
-                addReq.setReps(10);
+            WorkoutPlanExerciseRequest addReq = buildAddExerciseRequest(ex, parsedPrescription);
+            var created = workoutPlanExerciseService.add(userId, plan.getId(), day.getId(), addReq);
+            if (created != null && created.getId() != null) {
+                expectedAddedAssignmentIds.add(created.getId());
             }
-            addReq.setRestSeconds(90);
-            addReq.setNotes("Added via AI Assistant");
-            workoutPlanExerciseService.add(userId, plan.getId(), day.getId(), addReq);
-            addedNames.add(ex.getName());
         }
 
-        WorkoutPlan reloaded = workoutPlanRepository.findWithDetailsById(plan.getId()).orElse(plan);
-        WorkoutPlanDay reloadedDay = loadOrderedDays(reloaded).stream()
-                .filter(d -> d.getDayOfWeek() == finalDayDow)
-                .findFirst()
-                .orElse(day);
-        String dayMarkdown = formatSingleDayMarkdown(new ResolvedPlan(reloaded, null, null), finalDayDow, reloadedDay, false, false, isVn);
+        Map<WorkoutDayOfWeek, WorkoutPlanDay> verifiedDays = reloadAndVerifyMutation(
+                plan.getId(),
+                preSnapshot,
+                Set.of(dayToModify),
+                Map.of(dayToModify, expectedAddedAssignmentIds),
+                Map.of()
+        );
 
+        WorkoutPlan reloaded = workoutPlanRepository.findWithDetailsById(plan.getId()).orElse(plan);
+        WorkoutPlanDay verifiedDay = verifiedDays.getOrDefault(dayToModify, day);
+        List<WorkoutPlanExercise> verifiedDayExercises = loadOrderedExercises(verifiedDay);
+        List<String> persistedAddedNames = verifiedDayExercises.stream()
+                .filter(pe -> expectedAddedAssignmentIds.contains(pe.getId()))
+                .map(pe -> pe.getExercise().getName())
+                .toList();
+
+        String dayMarkdown = formatSingleDayMarkdown(new ResolvedPlan(reloaded, null, null), dayToModify, verifiedDay, false, false, isVn);
         String header = isVn
-                ? "✅ **Đã thêm " + addedNames.size() + " bài tập vào " + formatDayLabel(finalDayDow, true) + "**: "
-                        + String.join(", ", addedNames) + "\n\n"
-                : "✅ **Added " + addedNames.size() + " exercise(s) to " + formatDayLabel(finalDayDow, false) + "**: "
-                        + String.join(", ", addedNames) + "\n\n";
+                ? "✅ **Đã thêm " + persistedAddedNames.size() + " bài tập vào " + formatDayLabel(dayToModify, true) + "**: "
+                        + String.join(", ", persistedAddedNames) + "\n\n"
+                : "✅ **Added " + persistedAddedNames.size() + " exercise(s) to " + formatDayLabel(dayToModify, false) + "**: "
+                        + String.join(", ", persistedAddedNames) + "\n\n";
         Map<String, Object> meta = new LinkedHashMap<>();
         meta.put("type", "WORKOUT_PLAN_UPDATED");
         meta.put("toolName", TOOL_ADD_EXERCISE_TO_WORKOUT);
         meta.put("readOnly", false);
-        meta.put("addedExercises", addedNames);
-        meta.put("dayOfWeek", finalDayDow.name());
+        meta.put("mutated", true);
+        meta.put("addedExercises", persistedAddedNames);
+        meta.put("dayOfWeek", dayToModify.name());
         return new WorkoutToolResult(TOOL_ADD_EXERCISE_TO_WORKOUT, false, "WORKOUT_PLAN_UPDATE", true, header + dayMarkdown, safeToJson(meta));
     }
 
@@ -526,70 +642,261 @@ public class UserAiWorkoutToolService {
             List<AiMessage> history,
             boolean isVn
     ) {
+        return removeExerciseFromWorkout(userId, explicitDay, null, prompt, null, history, isVn);
+    }
+
+    @Transactional
+    public WorkoutToolResult removeExerciseFromWorkout(
+            Long userId,
+            WorkoutDayOfWeek explicitDay,
+            WorkoutDayOfWeek selectedDayOfWeek,
+            String prompt,
+            String explicitExerciseName,
+            List<AiMessage> history,
+            boolean isVn
+    ) {
         Optional<ResolvedPlan> planOpt = resolveOwnedPersonalPlan(userId);
         if (planOpt.isEmpty()) {
             String msg = isVn
                     ? "Bạn chưa có lịch tập cá nhân để xóa bài tập."
                     : "You don't have an active personal workout plan to remove exercises from.";
-            return new WorkoutToolResult(TOOL_REMOVE_EXERCISE_FROM_WORKOUT, false, "WORKOUT_PLAN_UPDATE", false, msg, null);
+            return buildNonMutatingFailureResult(TOOL_REMOVE_EXERCISE_FROM_WORKOUT, msg, null, null);
         }
 
         WorkoutPlan plan = planOpt.get().plan();
         List<WorkoutPlanDay> days = loadOrderedDays(plan);
-        WorkoutDayOfWeek dayFilter = explicitDay != null ? explicitDay : extractWeekday(prompt);
+        WorkoutDayOfWeek dayFilter = resolveTargetDay(extractWeekday(prompt), explicitDay, selectedDayOfWeek);
 
-        String effectiveQuery = resolveExerciseQueryWithContext(prompt, history);
-        List<WorkoutPlanExercise> candidateMatches = new ArrayList<>();
-        for (WorkoutPlanDay d : days) {
-            if (dayFilter != null && d.getDayOfWeek() != dayFilter) {
-                continue;
+        String effectiveQuery = resolveEffectiveExerciseQuery(prompt, explicitExerciseName, history);
+        if (dayFilter == null) {
+            List<WorkoutPlanExercise> matchesAcrossDays = new ArrayList<>();
+            for (WorkoutPlanDay d : days) {
+                findBestMatchingPlanExercise(loadOrderedExercises(d), effectiveQuery)
+                        .ifPresent(matchesAcrossDays::add);
             }
-            for (WorkoutPlanExercise pe : loadOrderedExercises(d)) {
-                if (pe.getExercise() != null && matchesExerciseQuery(pe.getExercise().getName(), effectiveQuery)) {
-                    candidateMatches.add(pe);
-                }
+            if (matchesAcrossDays.isEmpty()) {
+                String msg = isVn
+                        ? "Không tìm thấy bài tập cần xóa trong lịch tập của bạn. Vui lòng nêu rõ tên bài tập và ngày tập."
+                        : "I couldn't find that exercise in your current workout plan. Please specify the exact exercise name and weekday.";
+                return buildNonMutatingFailureResult(TOOL_REMOVE_EXERCISE_FROM_WORKOUT, msg, null, "EXERCISE_NOT_FOUND");
             }
+            if (matchesAcrossDays.size() > 1) {
+                String matchedDays = matchesAcrossDays.stream()
+                        .map(pe -> formatDayLabel(pe.getWorkoutPlanDay().getDayOfWeek(), isVn))
+                        .distinct()
+                        .reduce((a, b) -> a + ", " + b)
+                        .orElse("");
+                String exName = matchesAcrossDays.get(0).getExercise().getName();
+                String msg = isVn
+                        ? "Bài tập **" + exName + "** xuất hiện ở nhiều ngày (" + matchedDays + "). Bạn muốn xóa ở ngày nào?"
+                        : "**" + exName + "** appears on multiple days (" + matchedDays + "). Which weekday would you like to remove it from?";
+                Map<String, Object> meta = new LinkedHashMap<>();
+                meta.put("type", "WORKOUT_PLAN_CLARIFICATION");
+                meta.put("toolName", TOOL_REMOVE_EXERCISE_FROM_WORKOUT);
+                meta.put("readOnly", false);
+                meta.put("mutated", false);
+                meta.put("pendingAction", "REMOVE");
+                meta.put("exerciseName", exName);
+                return new WorkoutToolResult(TOOL_REMOVE_EXERCISE_FROM_WORKOUT, false, "WORKOUT_PLAN_UPDATE", false, msg, safeToJson(meta));
+            }
+            dayFilter = matchesAcrossDays.get(0).getWorkoutPlanDay().getDayOfWeek();
         }
 
-        if (candidateMatches.isEmpty()) {
+        WorkoutPlanDay targetDayEntity = findDay(days, dayFilter);
+        if (targetDayEntity == null) {
+            return buildNonMutatingFailureResult(TOOL_REMOVE_EXERCISE_FROM_WORKOUT,
+                    isVn ? "Không tìm thấy ngày tập cần xóa." : "Could not find the specified workout day.",
+                    dayFilter, "DAY_NOT_FOUND");
+        }
+
+        Optional<WorkoutPlanExercise> matchOpt = findBestMatchingPlanExercise(
+                loadOrderedExercises(targetDayEntity), effectiveQuery);
+        if (matchOpt.isEmpty()) {
             String msg = isVn
-                    ? "Không tìm thấy bài tập cần xóa trong lịch tập của bạn. Vui lòng nêu rõ tên bài tập và ngày tập."
-                    : "I couldn't find which exercise to remove in your current workout plan. Please specify the exact exercise name.";
-            return new WorkoutToolResult(TOOL_REMOVE_EXERCISE_FROM_WORKOUT, false, "WORKOUT_PLAN_UPDATE", false, msg, null);
+                    ? "Không tìm thấy bài tập phù hợp trong **" + formatDayLabel(dayFilter, true) + "**. Không có thay đổi nào được thực hiện ở các ngày khác."
+                    : "That exercise was not found on **" + formatDayLabel(dayFilter, false) + "**. No changes were made to any other day.";
+            return buildNonMutatingFailureResult(TOOL_REMOVE_EXERCISE_FROM_WORKOUT, msg, dayFilter, "EXERCISE_NOT_FOUND");
         }
 
-        WorkoutPlanExercise toRemove = candidateMatches.get(0);
-        WorkoutPlanDay parentDay = toRemove.getWorkoutPlanDay();
+        Map<WorkoutDayOfWeek, List<Long>> preSnapshot = captureDayExerciseIdsSnapshot(days);
+
+        WorkoutPlanExercise toRemove = matchOpt.get();
+        Long removedId = toRemove.getId();
         String removedName = toRemove.getExercise().getName();
-        workoutPlanExerciseService.remove(userId, plan.getId(), parentDay.getId(), toRemove.getId());
+        workoutPlanExerciseService.remove(userId, plan.getId(), targetDayEntity.getId(), removedId);
+        resequenceDayExercises(targetDayEntity.getId());
 
-        // Resequence display orders via WorkoutPlanExerciseService-safe order updates if needed
-        List<WorkoutPlanExercise> remaining = workoutPlanExerciseRepository
-                .findByWorkoutPlanDayIdOrderByDisplayOrderAsc(parentDay.getId());
-        if (!remaining.isEmpty()) {
-            int maxOrder = remaining.stream().mapToInt(WorkoutPlanExercise::getDisplayOrder).max().orElse(0);
-            int offset = maxOrder + remaining.size() + 1;
-            for (int i = 0; i < remaining.size(); i++) {
-                remaining.get(i).setDisplayOrder(offset + i);
-            }
-            workoutPlanExerciseRepository.saveAllAndFlush(remaining);
-            for (int i = 0; i < remaining.size(); i++) {
-                remaining.get(i).setDisplayOrder(i + 1);
-            }
-            workoutPlanExerciseRepository.saveAllAndFlush(remaining);
+        Map<WorkoutDayOfWeek, WorkoutPlanDay> verifiedDays = reloadAndVerifyMutation(
+                plan.getId(),
+                preSnapshot,
+                Set.of(dayFilter),
+                Map.of(),
+                Map.of(dayFilter, List.of(removedId))
+        );
+
+        WorkoutPlan reloaded = workoutPlanRepository.findWithDetailsById(plan.getId()).orElse(plan);
+        WorkoutPlanDay verifiedDay = verifiedDays.getOrDefault(dayFilter, targetDayEntity);
+        String dayMarkdown = formatSingleDayMarkdown(new ResolvedPlan(reloaded, null, null), dayFilter, verifiedDay, false, false, isVn);
+
+        String header = isVn
+                ? "✅ Đã xóa **" + removedName + "** khỏi **" + formatDayLabel(dayFilter, true) + "** trong lịch tập của bạn.\n\n"
+                : "✅ Removed **" + removedName + "** from **" + formatDayLabel(dayFilter, false) + "** in your workout plan.\n\n";
+        Map<String, Object> meta = new LinkedHashMap<>();
+        meta.put("type", "WORKOUT_PLAN_UPDATED");
+        meta.put("toolName", TOOL_REMOVE_EXERCISE_FROM_WORKOUT);
+        meta.put("readOnly", false);
+        meta.put("mutated", true);
+        meta.put("removedExercise", removedName);
+        meta.put("dayOfWeek", dayFilter.name());
+        return new WorkoutToolResult(TOOL_REMOVE_EXERCISE_FROM_WORKOUT, false, "WORKOUT_PLAN_UPDATE", true, header + dayMarkdown, safeToJson(meta));
+    }
+
+    @Transactional
+    public WorkoutToolResult moveExerciseBetweenDays(
+            Long userId,
+            WorkoutDayOfWeek explicitSourceDay,
+            WorkoutDayOfWeek explicitTargetDay,
+            WorkoutDayOfWeek selectedDayOfWeek,
+            String prompt,
+            String explicitExerciseName,
+            List<AiMessage> history,
+            boolean isVn
+    ) {
+        Optional<ResolvedPlan> planOpt = resolveOwnedPersonalPlan(userId);
+        if (planOpt.isEmpty()) {
+            String msg = isVn
+                    ? "Bạn chưa có lịch tập cá nhân để di chuyển bài tập."
+                    : "You don't have an active personal workout plan to move exercises in.";
+            return buildNonMutatingFailureResult(TOOL_MOVE_EXERCISE_BETWEEN_DAYS, msg, null, null);
         }
 
-        String msg = isVn
-                ? "✅ Đã xóa **" + removedName + "** khỏi **" + formatDayLabel(parentDay.getDayOfWeek(), true) + "** trong lịch tập của bạn."
-                : "✅ Removed **" + removedName + "** from **" + formatDayLabel(parentDay.getDayOfWeek(), false) + "** in your workout plan.";
-        Map<String, Object> meta = Map.of(
-                "type", "WORKOUT_PLAN_UPDATED",
-                "toolName", TOOL_REMOVE_EXERCISE_FROM_WORKOUT,
-                "readOnly", false,
-                "removedExercise", removedName,
-                "dayOfWeek", parentDay.getDayOfWeek().name()
+        MoveDays fromPrompt = extractMoveDays(prompt);
+        WorkoutDayOfWeek sourceDay = fromPrompt.sourceDay() != null
+                ? fromPrompt.sourceDay()
+                : (explicitSourceDay != null ? explicitSourceDay : selectedDayOfWeek);
+        WorkoutDayOfWeek targetDay = fromPrompt.targetDay() != null
+                ? fromPrompt.targetDay()
+                : explicitTargetDay;
+
+        if (sourceDay == null || targetDay == null) {
+            String msg = isVn
+                    ? "Vui lòng nêu rõ cả ngày nguồn và ngày đích khi di chuyển bài tập (ví dụ: \"Chuyển Front Lever Raises từ Thứ Hai sang Thứ Ba\")."
+                    : "Please specify both the source day and destination day when moving an exercise (for example: \"Move Front Lever Raises from Monday to Tuesday\").";
+            return buildNonMutatingFailureResult(TOOL_MOVE_EXERCISE_BETWEEN_DAYS, msg, targetDay, "MISSING_WEEKDAY");
+        }
+
+        if (sourceDay == targetDay) {
+            String msg = isVn
+                    ? "Ngày nguồn và ngày đích giống nhau (**" + formatDayLabel(sourceDay, true) + "**), nên không có thay đổi nào được thực hiện."
+                    : "Source and destination days are both **" + formatDayLabel(sourceDay, false) + "**, so no changes were made.";
+            return buildNonMutatingFailureResult(TOOL_MOVE_EXERCISE_BETWEEN_DAYS, msg, targetDay, "SAME_DAY");
+        }
+
+        WorkoutPlan plan = planOpt.get().plan();
+        List<WorkoutPlanDay> days = loadOrderedDays(plan);
+        WorkoutPlanDay sourceDayEntity = findDay(days, sourceDay);
+        WorkoutPlanDay targetDayEntity = findDay(days, targetDay);
+        if (sourceDayEntity == null || targetDayEntity == null) {
+            return buildNonMutatingFailureResult(TOOL_MOVE_EXERCISE_BETWEEN_DAYS,
+                    isVn ? "Không tìm thấy ngày tập nguồn hoặc đích." : "Could not locate the source or destination workout day.",
+                    targetDay, "DAY_NOT_FOUND");
+        }
+
+        String effectiveQuery = resolveEffectiveExerciseQuery(prompt, explicitExerciseName, history);
+        Optional<WorkoutPlanExercise> sourceMatchOpt = findBestMatchingPlanExercise(
+                loadOrderedExercises(sourceDayEntity), effectiveQuery);
+        if (sourceMatchOpt.isEmpty()) {
+            String msg = isVn
+                    ? "Không tìm thấy bài tập cần chuyển trong **" + formatDayLabel(sourceDay, true) + "**. Không có thay đổi nào được thực hiện."
+                    : "That exercise was not found on **" + formatDayLabel(sourceDay, false) + "**. No changes were made to your workout plan.";
+            return buildNonMutatingFailureResult(TOOL_MOVE_EXERCISE_BETWEEN_DAYS, msg, sourceDay, "EXERCISE_NOT_FOUND");
+        }
+
+        WorkoutPlanExercise sourceEx = sourceMatchOpt.get();
+        Exercise exercise = sourceEx.getExercise();
+        Long removedSourceId = sourceEx.getId();
+
+        Map<WorkoutDayOfWeek, List<Long>> preSnapshot = captureDayExerciseIdsSnapshot(days);
+
+        boolean targetAlreadyHas = loadOrderedExercises(targetDayEntity).stream()
+                .anyMatch(pe -> pe.getExercise() != null && Objects.equals(pe.getExercise().getId(), exercise.getId()));
+
+        WorkoutPlanExerciseRequest moveAddReq = null;
+        if (!targetAlreadyHas) {
+            moveAddReq = new WorkoutPlanExerciseRequest();
+            moveAddReq.setExerciseId(exercise.getId());
+            moveAddReq.setSets(sourceEx.getSets() != null ? sourceEx.getSets() : 3);
+            moveAddReq.setReps(sourceEx.getReps());
+            moveAddReq.setDurationSeconds(sourceEx.getDurationSeconds());
+            moveAddReq.setRestSeconds(sourceEx.getRestSeconds() != null ? sourceEx.getRestSeconds() : 90);
+            moveAddReq.setNotes(sourceEx.getNotes());
+        }
+
+        workoutPlanExerciseService.remove(userId, plan.getId(), sourceDayEntity.getId(), removedSourceId);
+        resequenceDayExercises(sourceDayEntity.getId());
+
+        List<Long> expectedTargetAddedIds = new ArrayList<>();
+        if (moveAddReq != null) {
+            if (targetDayEntity.isRestDay()) {
+                targetDayEntity.setRestDay(false);
+                if (targetDayEntity.getName() == null || targetDayEntity.getName().isBlank()
+                        || targetDayEntity.getName().toLowerCase(Locale.US).contains("rest")) {
+                    targetDayEntity.setName(exercise.getCategory() != null
+                            ? exercise.getCategory().name() + " Day" : "Custom Training");
+                }
+                if (targetDayEntity.getSessionType() == null || targetDayEntity.getSessionType() == WorkoutSessionType.REST) {
+                    targetDayEntity.setSessionType(inferSessionTypeFromCategory(exercise.getCategory()));
+                }
+                workoutPlanDayRepository.save(targetDayEntity);
+            }
+            var created = workoutPlanExerciseService.add(userId, plan.getId(), targetDayEntity.getId(), moveAddReq);
+            if (created != null && created.getId() != null) {
+                expectedTargetAddedIds.add(created.getId());
+            }
+        }
+
+        Map<WorkoutDayOfWeek, WorkoutPlanDay> verifiedDays = reloadAndVerifyMutation(
+                plan.getId(),
+                preSnapshot,
+                Set.of(sourceDay, targetDay),
+                expectedTargetAddedIds.isEmpty() ? Map.of() : Map.of(targetDay, expectedTargetAddedIds),
+                Map.of(sourceDay, List.of(removedSourceId))
         );
-        return new WorkoutToolResult(TOOL_REMOVE_EXERCISE_FROM_WORKOUT, false, "WORKOUT_PLAN_UPDATE", true, msg, safeToJson(meta));
+
+        WorkoutPlan reloaded = workoutPlanRepository.findWithDetailsById(plan.getId()).orElse(plan);
+        WorkoutPlanDay verifiedSource = verifiedDays.getOrDefault(sourceDay, sourceDayEntity);
+        WorkoutPlanDay verifiedTarget = verifiedDays.getOrDefault(targetDay, targetDayEntity);
+
+        StringBuilder sb = new StringBuilder();
+        if (isVn) {
+            sb.append("✅ Đã chuyển **").append(exercise.getName()).append("** từ **")
+                    .append(formatDayLabel(sourceDay, true)).append("** sang **")
+                    .append(formatDayLabel(targetDay, true)).append("**");
+            if (targetAlreadyHas) {
+                sb.append(" (bài tập đã có sẵn ở ").append(formatDayLabel(targetDay, true)).append(")");
+            }
+            sb.append(".\n\n");
+        } else {
+            sb.append("✅ Moved **").append(exercise.getName()).append("** from **")
+                    .append(formatDayLabel(sourceDay, false)).append("** to **")
+                    .append(formatDayLabel(targetDay, false)).append("**");
+            if (targetAlreadyHas) {
+                sb.append(" (kept existing entry on ").append(formatDayLabel(targetDay, false)).append(")");
+            }
+            sb.append(".\n\n");
+        }
+        appendDaySection(sb, sourceDay, verifiedSource, false, isVn);
+        appendDaySection(sb, targetDay, verifiedTarget, false, isVn);
+
+        Map<String, Object> meta = new LinkedHashMap<>();
+        meta.put("type", "WORKOUT_PLAN_UPDATED");
+        meta.put("toolName", TOOL_MOVE_EXERCISE_BETWEEN_DAYS);
+        meta.put("readOnly", false);
+        meta.put("mutated", true);
+        meta.put("movedExercise", exercise.getName());
+        meta.put("sourceDayOfWeek", sourceDay.name());
+        meta.put("dayOfWeek", targetDay.name());
+        return new WorkoutToolResult(TOOL_MOVE_EXERCISE_BETWEEN_DAYS, false, "WORKOUT_PLAN_UPDATE", true, sb.toString().trim(), safeToJson(meta));
     }
 
     @Transactional
@@ -924,73 +1231,477 @@ public class UserAiWorkoutToolService {
         return new WorkoutToolResult(toolName, true, intent, false, msg, safeToJson(meta));
     }
 
+    private List<Exercise> loadPublishedCatalog() {
+        return exerciseRepository.findAll().stream()
+                .filter(e -> e.isActive() && e.getStatus() != ExerciseStatus.DRAFT)
+                .toList();
+    }
+
+    private WorkoutPlanDay findDay(List<WorkoutPlanDay> days, WorkoutDayOfWeek targetDay) {
+        if (days == null || targetDay == null) {
+            return null;
+        }
+        return days.stream()
+                .filter(d -> d.getDayOfWeek() == targetDay)
+                .findFirst()
+                .orElse(null);
+    }
+
+    private WorkoutDayOfWeek resolveTargetDay(
+            WorkoutDayOfWeek explicitFromPrompt,
+            WorkoutDayOfWeek explicitDay,
+            WorkoutDayOfWeek selectedDayOfWeek
+    ) {
+        // Explicit weekday in the user's message ALWAYS takes priority over everything else.
+        if (explicitFromPrompt != null) {
+            return explicitFromPrompt;
+        }
+        if (explicitDay != null) {
+            return explicitDay;
+        }
+        return selectedDayOfWeek;
+    }
+
+    private WorkoutToolResult buildNonMutatingFailureResult(
+            String toolName,
+            String message,
+            WorkoutDayOfWeek dayOfWeek,
+            String errorCode
+    ) {
+        Map<String, Object> meta = new LinkedHashMap<>();
+        meta.put("type", "WORKOUT_PLAN_UPDATED");
+        meta.put("toolName", toolName);
+        meta.put("readOnly", false);
+        meta.put("mutated", false);
+        meta.put("success", false);
+        if (dayOfWeek != null) {
+            meta.put("dayOfWeek", dayOfWeek.name());
+        }
+        if (errorCode != null) {
+            meta.put("error", errorCode);
+        }
+        return new WorkoutToolResult(toolName, false, "WORKOUT_PLAN_UPDATE", false, message, safeToJson(meta));
+    }
+
+    private Map<WorkoutDayOfWeek, List<Long>> captureDayExerciseIdsSnapshot(List<WorkoutPlanDay> days) {
+        Map<WorkoutDayOfWeek, List<Long>> snapshot = new EnumMap<>(WorkoutDayOfWeek.class);
+        if (days == null) {
+            return snapshot;
+        }
+        for (WorkoutPlanDay d : days) {
+            if (d.getDayOfWeek() != null) {
+                List<Long> ids = loadOrderedExercises(d).stream()
+                        .map(WorkoutPlanExercise::getId)
+                        .toList();
+                snapshot.put(d.getDayOfWeek(), ids);
+            }
+        }
+        return snapshot;
+    }
+
+    private void resequenceDayExercises(Long dayId) {
+        workoutPlanExerciseRepository.flush();
+        List<WorkoutPlanExercise> remaining = workoutPlanExerciseRepository
+                .findByWorkoutPlanDayIdOrderByDisplayOrderAsc(dayId);
+        if (!remaining.isEmpty()) {
+            int maxOrder = remaining.stream().mapToInt(WorkoutPlanExercise::getDisplayOrder).max().orElse(0);
+            int offset = maxOrder + remaining.size() + 1;
+            for (int i = 0; i < remaining.size(); i++) {
+                remaining.get(i).setDisplayOrder(offset + i);
+            }
+            workoutPlanExerciseRepository.saveAllAndFlush(remaining);
+            for (int i = 0; i < remaining.size(); i++) {
+                remaining.get(i).setDisplayOrder(i + 1);
+            }
+            workoutPlanExerciseRepository.saveAllAndFlush(remaining);
+        }
+    }
+
+    private Map<WorkoutDayOfWeek, WorkoutPlanDay> reloadAndVerifyMutation(
+            Long planId,
+            Map<WorkoutDayOfWeek, List<Long>> preSnapshot,
+            Set<WorkoutDayOfWeek> allowedModifiedDays,
+            Map<WorkoutDayOfWeek, List<Long>> expectedPresentAssignmentIds,
+            Map<WorkoutDayOfWeek, List<Long>> expectedAbsentAssignmentIds
+    ) {
+        workoutPlanExerciseRepository.flush();
+        workoutPlanDayRepository.flush();
+
+        List<WorkoutPlanDay> reloadedDays = workoutPlanDayRepository.findByWorkoutPlanIdOrderByDisplayOrderAsc(planId);
+        Map<WorkoutDayOfWeek, WorkoutPlanDay> byDow = new EnumMap<>(WorkoutDayOfWeek.class);
+        for (WorkoutPlanDay d : reloadedDays) {
+            if (d.getDayOfWeek() == null) {
+                continue;
+            }
+            byDow.put(d.getDayOfWeek(), d);
+            List<Long> persistedIds = workoutPlanExerciseRepository
+                    .findByWorkoutPlanDayIdOrderByDisplayOrderAsc(d.getId())
+                    .stream()
+                    .map(WorkoutPlanExercise::getId)
+                    .toList();
+
+            if (!allowedModifiedDays.contains(d.getDayOfWeek())) {
+                List<Long> beforeIds = preSnapshot.getOrDefault(d.getDayOfWeek(), List.of());
+                if (!Objects.equals(beforeIds, persistedIds)) {
+                    throw new IllegalStateException("Unexpected mutation detected on non-target day " + d.getDayOfWeek());
+                }
+            }
+
+            List<Long> mustBePresent = expectedPresentAssignmentIds.getOrDefault(d.getDayOfWeek(), List.of());
+            for (Long expectedId : mustBePresent) {
+                if (!persistedIds.contains(expectedId)) {
+                    throw new IllegalStateException("Expected persisted assignment " + expectedId + " missing on " + d.getDayOfWeek());
+                }
+            }
+
+            List<Long> mustBeAbsent = expectedAbsentAssignmentIds.getOrDefault(d.getDayOfWeek(), List.of());
+            for (Long absentId : mustBeAbsent) {
+                if (persistedIds.contains(absentId)) {
+                    throw new IllegalStateException("Expected removed assignment " + absentId + " still persisted on " + d.getDayOfWeek());
+                }
+            }
+        }
+        return byDow;
+    }
+
+    private Optional<Exercise> findRequestedExercise(
+            List<Exercise> catalog,
+            String prompt,
+            String explicitExerciseName,
+            List<AiMessage> history
+    ) {
+        Optional<Exercise> directFromPrompt = findBestMatchingExercise(catalog, prompt);
+        if (directFromPrompt.isPresent()) {
+            return directFromPrompt;
+        }
+        if (explicitExerciseName != null && !explicitExerciseName.isBlank()) {
+            Optional<Exercise> fromExplicit = findBestMatchingExercise(catalog, explicitExerciseName);
+            if (fromExplicit.isPresent() && isFollowUpOrExplicitCompatible(prompt, fromExplicit.get())) {
+                return fromExplicit;
+            }
+        }
+        if (isFollowUpReference(prompt) && history != null && !history.isEmpty()) {
+            String fromHistoryName = extractRecentExerciseNameFromHistory(catalog, prompt, history);
+            if (fromHistoryName != null) {
+                return findBestMatchingExercise(catalog, fromHistoryName);
+            }
+        }
+        return Optional.empty();
+    }
+
+    private boolean isFollowUpOrExplicitCompatible(String prompt, Exercise candidate) {
+        if (prompt == null || prompt.isBlank()) {
+            return true;
+        }
+        List<String> queryTokens = tokenizeNormalized(prompt);
+        List<String> candidateTokens = tokenizeNormalized(candidate.getName());
+        if (containsSublist(queryTokens, candidateTokens) >= 0) {
+            return true;
+        }
+        return isFollowUpReference(prompt);
+    }
+
+    private String resolveEffectiveExerciseQuery(String prompt, String explicitExerciseName, List<AiMessage> history) {
+        if (explicitExerciseName != null && !explicitExerciseName.isBlank()) {
+            return explicitExerciseName;
+        }
+        return resolveExerciseQueryWithContext(prompt, history);
+    }
+
     private Optional<Exercise> findBestMatchingExercise(List<Exercise> catalog, String query) {
-        if (catalog == null || catalog.isEmpty() || query == null || query.isBlank()) {
+        return findBestMatchByName(catalog, Exercise::getName, query);
+    }
+
+    private Optional<WorkoutPlanExercise> findBestMatchingPlanExercise(List<WorkoutPlanExercise> dayExercises, String query) {
+        return findBestMatchByName(dayExercises, pe -> pe.getExercise() != null ? pe.getExercise().getName() : null, query);
+    }
+
+    private <T> Optional<T> findBestMatchByName(
+            List<T> candidates,
+            java.util.function.Function<T, String> nameExtractor,
+            String query
+    ) {
+        if (candidates == null || candidates.isEmpty() || query == null || query.isBlank()) {
             return Optional.empty();
         }
-        String lower = query.toLowerCase(Locale.US);
-        // Prefer longest matching exercise name first (e.g. "Pike Push-Up" over "Push-Up")
-        return catalog.stream()
-                .filter(e -> e.getName() != null && lower.contains(e.getName().toLowerCase(Locale.US)))
-                .max(Comparator.comparingInt(e -> e.getName().length()));
+        List<String> queryTokens = tokenizeNormalized(query);
+        if (queryTokens.isEmpty()) {
+            return Optional.empty();
+        }
+        T best = null;
+        int bestScore = Integer.MIN_VALUE;
+        for (T candidate : candidates) {
+            if (candidate == null) {
+                continue;
+            }
+            String name = nameExtractor.apply(candidate);
+            if (name == null || name.isBlank()) {
+                continue;
+            }
+            int score = scoreExerciseMatch(name, queryTokens);
+            if (score > bestScore) {
+                bestScore = score;
+                best = candidate;
+            }
+        }
+        return Optional.ofNullable(best);
+    }
+
+    private int scoreExerciseMatch(String exerciseName, List<String> queryTokens) {
+        List<String> exTokens = tokenizeNormalized(exerciseName);
+        if (exTokens.isEmpty()) {
+            return Integer.MIN_VALUE;
+        }
+        int matchStart = containsSublist(queryTokens, exTokens);
+        if (matchStart < 0) {
+            return Integer.MIN_VALUE;
+        }
+        int afterIdx = matchStart + exTokens.size();
+        if (afterIdx < queryTokens.size()) {
+            String nextToken = queryTokens.get(afterIdx);
+            if (MOVEMENT_VARIANT_MODIFIERS.contains(nextToken) && !exTokens.contains(nextToken)) {
+                // Reject partial prefix matches such as "Front Lever" when the user asked for "Front Lever Raises".
+                return Integer.MIN_VALUE;
+            }
+        }
+        int exactBonus = queryTokens.size() == exTokens.size() ? 10_000 : 0;
+        return exactBonus + (exTokens.size() * 1000) + exerciseName.length();
+    }
+
+    private static int containsSublist(List<String> haystack, List<String> needle) {
+        if (needle.isEmpty() || haystack.size() < needle.size()) {
+            return -1;
+        }
+        for (int i = 0; i <= haystack.size() - needle.size(); i++) {
+            boolean allMatch = true;
+            for (int j = 0; j < needle.size(); j++) {
+                if (!haystack.get(i + j).equals(needle.get(j))) {
+                    allMatch = false;
+                    break;
+                }
+            }
+            if (allMatch) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static List<String> tokenizeNormalized(String text) {
+        if (text == null || text.isBlank()) {
+            return List.of();
+        }
+        String cleaned = text.toLowerCase(Locale.US)
+                .replaceAll("[-_/(),.:;!?]+", " ")
+                .trim();
+        if (cleaned.isEmpty()) {
+            return List.of();
+        }
+        String[] rawTokens = cleaned.split("\\s+");
+        List<String> normalized = new ArrayList<>(rawTokens.length);
+        for (String tok : rawTokens) {
+            if (!tok.isBlank()) {
+                normalized.add(singularizeToken(tok));
+            }
+        }
+        return normalized;
+    }
+
+    private static String singularizeToken(String token) {
+        if (token.length() <= 3) {
+            return token;
+        }
+        if (token.endsWith("ies") && token.length() > 4) {
+            return token.substring(0, token.length() - 3) + "y";
+        }
+        if (token.endsWith("ches") || token.endsWith("shes") || token.endsWith("xes")
+                || token.endsWith("sses") || token.endsWith("zes")) {
+            return token.substring(0, token.length() - 2);
+        }
+        if (token.endsWith("s") && !token.endsWith("ss")) {
+            return token.substring(0, token.length() - 1);
+        }
+        return token;
     }
 
     private String resolveExerciseQueryWithContext(String prompt, List<AiMessage> history) {
-        String lower = prompt != null ? prompt.toLowerCase(Locale.US) : "";
-        if ((lower.contains("this exercise") || lower.contains("bài tập này") || lower.contains("that exercise"))
-                && history != null) {
-            for (int i = history.size() - 1; i >= 0; i--) {
-                AiMessage prev = history.get(i);
-                if (prev.getContent() != null && !Objects.equals(prev.getContent(), prompt)) {
-                    Optional<Exercise> fromHistory = findBestMatchingExercise(exerciseRepository.findAll(), prev.getContent());
-                    if (fromHistory.isPresent()) {
-                        return fromHistory.get().getName();
-                    }
-                }
+        if (isFollowUpReference(prompt) && history != null) {
+            String fromHistory = extractRecentExerciseNameFromHistory(exerciseRepository.findAll(), prompt, history);
+            if (fromHistory != null) {
+                return fromHistory;
             }
         }
         return prompt;
     }
 
-    private boolean matchesExerciseQuery(String exerciseName, String query) {
-        if (exerciseName == null || query == null || query.isBlank()) {
+    private boolean isFollowUpReference(String prompt) {
+        if (prompt == null || prompt.isBlank()) {
             return false;
         }
-        String nameLower = exerciseName.toLowerCase(Locale.US);
-        String queryLower = query.toLowerCase(Locale.US);
-        if (queryLower.contains(nameLower) || nameLower.equals(queryLower)) {
+        String lower = prompt.toLowerCase(Locale.US).trim();
+        if (lower.contains("this exercise") || lower.contains("that exercise")
+                || lower.contains("bài tập này") || lower.contains("bài này")
+                || lower.matches(".*\\b(it|that|them)\\b.*")) {
             return true;
         }
-        // Handle plural vs singular (e.g. "push ups" vs "Push-Up")
-        String normName = nameLower.replaceAll("[^a-z0-9]", "");
-        String normQuery = queryLower.replaceAll("[^a-z0-9]", "");
-        return normQuery.contains(normName);
+        // Day-only or correction follow-ups (e.g. "no, add to Tuesday not monday", "Tuesday")
+        boolean hasWeekday = extractWeekday(prompt) != null;
+        boolean hasNoSpecificWords = tokenizeNormalized(prompt).stream()
+                .allMatch(tok -> isFillerOrDayOrActionToken(tok));
+        return hasWeekday && hasNoSpecificWords;
+    }
+
+    private static boolean isFillerOrDayOrActionToken(String tok) {
+        return Set.of(
+                "no", "yes", "ok", "okay", "please", "add", "put", "remove", "delete",
+                "to", "on", "in", "into", "for", "from", "not", "instead", "of", "rather", "than",
+                "monday", "mon", "tuesday", "tue", "wednesday", "wed", "thursday", "thu",
+                "friday", "fri", "saturday", "sat", "sunday", "sun",
+                "thứ", "hai", "ba", "tư", "năm", "sáu", "bảy", "chủ", "nhật", "vào", "không", "phải",
+                "thêm", "xóa", "bỏ", "chuyển", "sang", "từ", "2", "3", "4", "5", "6", "7"
+        ).contains(tok);
+    }
+
+    private String extractRecentExerciseNameFromHistory(List<Exercise> catalog, String currentPrompt, List<AiMessage> history) {
+        for (int i = history.size() - 1; i >= 0; i--) {
+            AiMessage prev = history.get(i);
+            if (prev == null) {
+                continue;
+            }
+            if ("assistant".equalsIgnoreCase(prev.getRole()) && prev.getMetadata() != null) {
+                try {
+                    var node = objectMapper.readTree(prev.getMetadata());
+                    if (node.hasNonNull("exerciseName")) {
+                        return node.get("exerciseName").asText();
+                    }
+                    if (node.has("addedExercises") && node.get("addedExercises").isArray()
+                            && node.get("addedExercises").size() == 1) {
+                        return node.get("addedExercises").get(0).asText();
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+            if ("user".equalsIgnoreCase(prev.getRole()) && prev.getContent() != null
+                    && !Objects.equals(prev.getContent(), currentPrompt)) {
+                Optional<Exercise> matched = findBestMatchingExercise(catalog, prev.getContent());
+                if (matched.isPresent()) {
+                    return matched.get().getName();
+                }
+            }
+        }
+        return null;
     }
 
     public static WorkoutDayOfWeek extractWeekday(String prompt) {
-        if (prompt == null || prompt.isBlank()) {
+        List<WeekdayMatch> matches = findWeekdayMatches(prompt);
+        if (matches.isEmpty()) {
             return null;
         }
-        String lower = prompt.toLowerCase(Locale.US);
-        if (lower.contains("monday") || lower.contains("mon ") || lower.contains("mon's") || lower.contains("thứ 2") || lower.contains("thứ hai")) {
+        List<WeekdayMatch> nonNegated = matches.stream()
+                .filter(m -> !m.negated())
+                .toList();
+        if (nonNegated.isEmpty()) {
+            return null;
+        }
+        // Prefer the last explicit target preposition match (e.g. "no, add to Tuesday not monday")
+        for (int i = nonNegated.size() - 1; i >= 0; i--) {
+            if (nonNegated.get(i).targetPrep()) {
+                return nonNegated.get(i).day();
+            }
+        }
+        return nonNegated.get(0).day();
+    }
+
+    public static MoveDays extractMoveDays(String prompt) {
+        List<WeekdayMatch> matches = findWeekdayMatches(prompt);
+        if (matches.isEmpty()) {
+            return new MoveDays(null, null);
+        }
+        List<WeekdayMatch> nonNegated = matches.stream()
+                .filter(m -> !m.negated())
+                .toList();
+        WorkoutDayOfWeek source = null;
+        WorkoutDayOfWeek target = null;
+        for (WeekdayMatch m : nonNegated) {
+            if (m.sourcePrep() && source == null) {
+                source = m.day();
+            } else if (m.targetPrep()) {
+                target = m.day();
+            }
+        }
+        if (source == null && target != null && nonNegated.size() >= 2) {
+            for (WeekdayMatch m : nonNegated) {
+                if (m.day() != target) {
+                    source = m.day();
+                    break;
+                }
+            }
+        }
+        if (source != null && target == null && nonNegated.size() >= 2) {
+            for (WeekdayMatch m : nonNegated) {
+                if (m.day() != source) {
+                    target = m.day();
+                    break;
+                }
+            }
+        }
+        return new MoveDays(source, target);
+    }
+
+    private static List<WeekdayMatch> findWeekdayMatches(String prompt) {
+        if (prompt == null || prompt.isBlank()) {
+            return List.of();
+        }
+        List<WeekdayMatch> matches = new ArrayList<>();
+        Matcher m = WEEKDAY_TOKEN_PATTERN.matcher(prompt);
+        while (m.find()) {
+            String raw = m.group(1);
+            int start = m.start(1);
+            int end = m.end(1);
+            String rawLower = raw.toLowerCase(Locale.US).replaceAll("\\s+", " ").trim();
+            String prefix = prompt.substring(Math.max(0, start - 35), start);
+            boolean negated = NEGATED_WEEKDAY_PREFIX_PATTERN.matcher(prefix).find();
+            boolean sourcePrep = SOURCE_WEEKDAY_PREFIX_PATTERN.matcher(prefix).find();
+            boolean targetPrep = TARGET_WEEKDAY_PREFIX_PATTERN.matcher(prefix).find();
+            if (!targetPrep && end < prompt.length() && prompt.substring(end).toLowerCase(Locale.US).startsWith("'s")) {
+                targetPrep = true;
+            }
+
+            // Guard lowercase English words "sat" and "sun" unless capitalized or in day-preposition context.
+            if (("sat".equals(rawLower) || "sun".equals(rawLower))
+                    && Character.isLowerCase(raw.charAt(0))
+                    && !sourcePrep && !targetPrep && !negated) {
+                continue;
+            }
+
+            WorkoutDayOfWeek dow = parseWeekdayToken(rawLower);
+            if (dow != null) {
+                matches.add(new WeekdayMatch(dow, start, end, negated, sourcePrep, targetPrep));
+            }
+        }
+        return matches;
+    }
+
+    private static WorkoutDayOfWeek parseWeekdayToken(String rawLower) {
+        if (rawLower.startsWith("mon") || rawLower.equals("thứ 2") || rawLower.equals("thứ hai") || rawLower.equals("t2")) {
             return WorkoutDayOfWeek.MONDAY;
         }
-        if (lower.contains("tuesday") || lower.contains("tue ") || lower.contains("tues") || lower.contains("thứ 3") || lower.contains("thứ ba")) {
+        if (rawLower.startsWith("tue") || rawLower.equals("thứ 3") || rawLower.equals("thứ ba") || rawLower.equals("t3")) {
             return WorkoutDayOfWeek.TUESDAY;
         }
-        if (lower.contains("wednesday") || lower.contains("wed ") || lower.contains("thứ 4") || lower.contains("thứ tư")) {
+        if (rawLower.startsWith("wed") || rawLower.equals("thứ 4") || rawLower.equals("thứ tư") || rawLower.equals("t4")) {
             return WorkoutDayOfWeek.WEDNESDAY;
         }
-        if (lower.contains("thursday") || lower.contains("thu ") || lower.contains("thurs") || lower.contains("thứ 5") || lower.contains("thứ năm")) {
+        if (rawLower.startsWith("thu") || rawLower.equals("thứ 5") || rawLower.equals("thứ năm") || rawLower.equals("t5")) {
             return WorkoutDayOfWeek.THURSDAY;
         }
-        if (lower.contains("friday") || lower.contains("fri ") || lower.contains("thứ 6") || lower.contains("thứ sáu")) {
+        if (rawLower.startsWith("fri") || rawLower.equals("thứ 6") || rawLower.equals("thứ sáu") || rawLower.equals("t6")) {
             return WorkoutDayOfWeek.FRIDAY;
         }
-        if (lower.contains("saturday") || lower.contains("sat ") || lower.contains("thứ 7") || lower.contains("thứ bảy")) {
+        if (rawLower.startsWith("sat") || rawLower.equals("thứ 7") || rawLower.equals("thứ bảy") || rawLower.equals("t7")) {
             return WorkoutDayOfWeek.SATURDAY;
         }
-        if (lower.contains("sunday") || lower.contains("sun ") || lower.contains("chủ nhật") || lower.contains("chu nhat")) {
+        if (rawLower.startsWith("sun") || rawLower.equals("chủ nhật") || rawLower.equals("chu nhat") || rawLower.equals("cn")) {
             return WorkoutDayOfWeek.SUNDAY;
         }
         return null;
@@ -1062,9 +1773,31 @@ public class UserAiWorkoutToolService {
         return null;
     }
 
-    private int parseCount(String prompt, int fallback) {
+    private WorkoutSessionType inferSessionTypeFromCategory(ExerciseCategory category) {
+        if (category == null) {
+            return WorkoutSessionType.CUSTOM;
+        }
+        return switch (category) {
+            case PUSH -> WorkoutSessionType.PUSH;
+            case PULL -> WorkoutSessionType.PULL;
+            case LEGS -> WorkoutSessionType.LEGS;
+            case SKILL -> WorkoutSessionType.SKILL_TRAINING;
+            case FLEXIBILITY -> WorkoutSessionType.MOBILITY;
+            default -> WorkoutSessionType.CUSTOM;
+        };
+    }
+
+    private boolean isGenericCategoryExerciseRequest(String prompt, ExerciseCategory requestedCategory) {
+        if (prompt == null || requestedCategory == null) {
+            return false;
+        }
+        String lower = prompt.toLowerCase(Locale.US);
+        return lower.contains("exercise") || lower.contains("bài tập");
+    }
+
+    private int parseRequestedGenericCount(String prompt, int fallback) {
         if (prompt == null) return fallback;
-        Matcher m = NUMBER_PATTERN.matcher(prompt);
+        Matcher m = GENERIC_COUNT_PATTERN.matcher(prompt);
         if (m.find()) {
             try {
                 int val = Integer.parseInt(m.group(1));
@@ -1073,6 +1806,87 @@ public class UserAiWorkoutToolService {
             }
         }
         return fallback;
+    }
+
+    private ExercisePrescription parseExercisePrescription(String prompt) {
+        if (prompt == null || prompt.isBlank()) {
+            return new ExercisePrescription(null, null, null, null);
+        }
+        Integer sets = parseIntMatch(SETS_PATTERN, prompt, 1, 20);
+        Integer reps = parseIntMatch(REPS_PATTERN, prompt, 1, 200);
+        if (reps == null) {
+            reps = parseIntMatch(TIMES_REPS_PATTERN, prompt, 1, 200);
+        }
+        Integer restSeconds = parseIntMatch(REST_AFTER_PATTERN, prompt, 0, 600);
+        if (restSeconds == null) {
+            restSeconds = parseIntMatch(REST_BEFORE_PATTERN, prompt, 0, 600);
+        }
+        Integer durationSeconds = null;
+        if (reps == null) {
+            durationSeconds = parseIntMatch(HOLD_PREFIX_PATTERN, prompt, 1, 600);
+            if (durationSeconds == null) {
+                Matcher holdMatcher = HOLD_PATTERN.matcher(prompt);
+                while (holdMatcher.find()) {
+                    Integer candidate = parseIntValue(holdMatcher.group(1), 1, 600);
+                    if (candidate != null && !Objects.equals(candidate, restSeconds)) {
+                        durationSeconds = candidate;
+                        break;
+                    }
+                }
+            }
+        }
+        return new ExercisePrescription(sets, reps, durationSeconds, restSeconds);
+    }
+
+    private static Integer parseIntMatch(Pattern pattern, String text, int min, int max) {
+        Matcher m = pattern.matcher(text);
+        if (m.find()) {
+            return parseIntValue(m.group(1), min, max);
+        }
+        return null;
+    }
+
+    private static Integer parseIntValue(String raw, int min, int max) {
+        try {
+            int val = Integer.parseInt(raw);
+            return (val >= min && val <= max) ? val : null;
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    private WorkoutPlanExerciseRequest buildAddExerciseRequest(Exercise ex, ExercisePrescription parsed) {
+        WorkoutPlanExerciseRequest addReq = new WorkoutPlanExerciseRequest();
+        addReq.setExerciseId(ex.getId());
+        addReq.setSets(parsed.sets() != null ? parsed.sets() : 3);
+        addReq.setRestSeconds(parsed.restSeconds() != null ? parsed.restSeconds() : 90);
+        if (parsed.reps() != null) {
+            addReq.setReps(parsed.reps());
+        } else if (parsed.durationSeconds() != null) {
+            addReq.setDurationSeconds(parsed.durationSeconds());
+        } else if (isStaticHoldExercise(ex)) {
+            addReq.setDurationSeconds(20);
+        } else {
+            addReq.setReps(10);
+        }
+        addReq.setNotes("Added via AI Assistant");
+        return addReq;
+    }
+
+    private boolean isStaticHoldExercise(Exercise ex) {
+        if (ex == null) return false;
+        if (ex.getCategory() == ExerciseCategory.ISOMETRIC) {
+            return true;
+        }
+        List<String> nameTokens = tokenizeNormalized(ex.getName());
+        boolean hasDynamicWord = nameTokens.stream().anyMatch(DYNAMIC_MOVEMENT_WORDS::contains);
+        if (hasDynamicWord) {
+            return false;
+        }
+        if (ex.getCategory() == ExerciseCategory.SKILL) {
+            return true;
+        }
+        return nameTokens.contains("hold") || nameTokens.contains("plank") || nameTokens.contains("handstand");
     }
 
     private ExerciseCategory detectCategory(String prompt) {

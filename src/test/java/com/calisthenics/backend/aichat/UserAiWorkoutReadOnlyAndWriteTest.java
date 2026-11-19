@@ -28,6 +28,8 @@ import com.calisthenics.backend.user.UserRepository;
 import com.calisthenics.backend.workoutplan.entity.WorkoutPlan;
 import com.calisthenics.backend.workoutplan.entity.WorkoutPlanDay;
 import com.calisthenics.backend.workoutplan.entity.WorkoutPlanExercise;
+import com.calisthenics.backend.workoutplan.repository.WorkoutPlanDayRepository;
+import com.calisthenics.backend.workoutplan.repository.WorkoutPlanExerciseRepository;
 import com.calisthenics.backend.workoutplan.repository.WorkoutPlanRepository;
 import com.calisthenics.backend.workoutplan.type.WorkoutDayOfWeek;
 import com.calisthenics.backend.workoutplan.type.WorkoutSessionType;
@@ -140,6 +142,8 @@ class UserAiWorkoutReadOnlyAndWriteTest {
     @Autowired private UserRepository userRepository;
     @Autowired private ExerciseRepository exerciseRepository;
     @Autowired private WorkoutPlanRepository workoutPlanRepository;
+    @Autowired private WorkoutPlanDayRepository workoutPlanDayRepository;
+    @Autowired private WorkoutPlanExerciseRepository workoutPlanExerciseRepository;
     @Autowired private CoachClientRelationshipRepository relationshipRepository;
     @Autowired private WorkoutPlanAssignmentRepository assignmentRepository;
 
@@ -481,5 +485,230 @@ class UserAiWorkoutReadOnlyAndWriteTest {
 
         verify(aiWorkoutPlanService, never()).generatePlan(any(), any(), any());
         assertThat(workoutPlanRepository.count()).isEqualTo(initialCount);
+    }
+
+    private AiMessageResponse sendMsgWithSelectedDay(
+            String token, Long convId, String msg, WorkoutDayOfWeek selectedDay) throws Exception {
+        MvcResult res = mockMvc.perform(post("/api/v1/ai/conversations/" + convId + "/messages")
+                        .header("Authorization", "Bearer " + token)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(new SendAiMessageRequest(msg, "UTC", selectedDay))))
+                .andExpect(status().isOk())
+                .andReturn();
+        return objectMapper.readValue(res.getResponse().getContentAsString(), AiMessageResponse.class);
+    }
+
+    private List<String> exerciseNamesForDay(Long planId, WorkoutDayOfWeek dow) {
+        WorkoutPlanDay day = workoutPlanDayRepository.findByWorkoutPlanIdOrderByDisplayOrderAsc(planId).stream()
+                .filter(d -> d.getDayOfWeek() == dow)
+                .findFirst()
+                .orElseThrow();
+        return workoutPlanExerciseRepository.findByWorkoutPlanDayIdOrderByDisplayOrderAsc(day.getId()).stream()
+                .map(pe -> pe.getExercise().getName())
+                .toList();
+    }
+
+    private WorkoutPlan setupPlancheFrontLeverPlan() {
+        Exercise straddlePlanche = exerciseRepository.save(Exercise.builder()
+                .name("Straddle Planche").code("STRADDLE_PLANCHE")
+                .category(ExerciseCategory.SKILL).difficulty(DifficultyLevel.ADVANCED)
+                .description("Straddle planche hold").instructions("Protract scapula and straddle legs.")
+                .status(ExerciseStatus.PUBLISHED).origin(ExerciseOrigin.MANUAL).active(true).build());
+        Exercise advTuckPlanche = exerciseRepository.save(Exercise.builder()
+                .name("Advanced Tuck Planche").code("ADV_TUCK_PLANCHE")
+                .category(ExerciseCategory.SKILL).difficulty(DifficultyLevel.ADVANCED)
+                .description("Adv tuck planche hold").instructions("Maintain flat back and 90 degree hip angle.")
+                .status(ExerciseStatus.PUBLISHED).origin(ExerciseOrigin.MANUAL).active(true).build());
+        Exercise frontLever = exerciseRepository.save(Exercise.builder()
+                .name("Front Lever").code("FRONT_LEVER")
+                .category(ExerciseCategory.SKILL).difficulty(DifficultyLevel.ADVANCED)
+                .description("Front lever hold").instructions("Depress scapula and hold horizontal.")
+                .status(ExerciseStatus.PUBLISHED).origin(ExerciseOrigin.MANUAL).active(true).build());
+        exerciseRepository.save(Exercise.builder()
+                .name("Front Lever Raises").code("FRONT_LEVER_RAISES")
+                .category(ExerciseCategory.PULL).difficulty(DifficultyLevel.INTERMEDIATE)
+                .description("Dynamic straight-arm pulling raise").instructions(
+                        "Start from an active hang with depressed shoulders and locked elbows. Raise your body toward horizontal or inverted position using controlled shoulder extension. Lower slowly with a 3-second eccentric.")
+                .status(ExerciseStatus.PUBLISHED).origin(ExerciseOrigin.MANUAL).active(true).build());
+
+        WorkoutPlan plan = WorkoutPlan.builder()
+                .user(athleteWithoutPlan)
+                .name("planche front lever focus")
+                .description("Planche and Front Lever specialization")
+                .splitType(WorkoutSplitType.PPL)
+                .active(true)
+                .build();
+        for (WorkoutDayOfWeek dow : WorkoutDayOfWeek.values()) {
+            WorkoutPlanDay day = WorkoutPlanDay.builder()
+                    .workoutPlan(plan)
+                    .dayOfWeek(dow)
+                    .displayOrder(dow.getOrder())
+                    .restDay(dow == WorkoutDayOfWeek.SUNDAY)
+                    .name(dow == WorkoutDayOfWeek.TUESDAY ? "Pull" : null)
+                    .description(dow == WorkoutDayOfWeek.TUESDAY ? "Front lever focus" : null)
+                    .sessionType(switch (dow) {
+                        case MONDAY, THURSDAY -> WorkoutSessionType.PUSH;
+                        case TUESDAY, FRIDAY -> WorkoutSessionType.PULL;
+                        case WEDNESDAY, SATURDAY -> WorkoutSessionType.LEGS;
+                        case SUNDAY -> WorkoutSessionType.REST;
+                    })
+                    .build();
+            if (dow == WorkoutDayOfWeek.MONDAY) {
+                day.getExercises().add(WorkoutPlanExercise.builder()
+                        .workoutPlanDay(day).exercise(advTuckPlanche)
+                        .sets(3).durationSeconds(15).restSeconds(60).displayOrder(1).build());
+            } else if (dow == WorkoutDayOfWeek.TUESDAY) {
+                day.getExercises().add(WorkoutPlanExercise.builder()
+                        .workoutPlanDay(day).exercise(frontLever)
+                        .sets(3).durationSeconds(15).restSeconds(90).displayOrder(1).build());
+                day.getExercises().add(WorkoutPlanExercise.builder()
+                        .workoutPlanDay(day).exercise(tuckPlanche)
+                        .sets(3).durationSeconds(15).restSeconds(90).displayOrder(2).build());
+            } else if (dow == WorkoutDayOfWeek.THURSDAY) {
+                day.getExercises().add(WorkoutPlanExercise.builder()
+                        .workoutPlanDay(day).exercise(straddlePlanche)
+                        .sets(3).durationSeconds(15).restSeconds(60).displayOrder(1).build());
+            } else if (dow == WorkoutDayOfWeek.FRIDAY) {
+                day.getExercises().add(WorkoutPlanExercise.builder()
+                        .workoutPlanDay(day).exercise(frontLever)
+                        .sets(3).durationSeconds(15).restSeconds(60).displayOrder(1).build());
+            }
+            plan.getDays().add(day);
+        }
+        return workoutPlanRepository.save(plan);
+    }
+
+    @Test
+    @DisplayName("Test cases 1-4 & Rules 1-7: Explicit weekday priority, strict exercise matching, no substitution, move between days, and verified persistence")
+    void weekdayAssignmentMoveAndNoSubstitutionWorkflow() throws Exception {
+        WorkoutPlan plan = setupPlancheFrontLeverPlan();
+        Long convId = createConv(tokenWithoutPlan);
+
+        // Even if Gemini hallucinates MONDAY, explicit Tuesday in user prompt MUST win (Rule 1 & 2)
+        when(geminiApiClient.callAssistant(anyString(), anyList())).thenReturn(Optional.of(
+                GeminiAssistantOutput.builder()
+                        .intent("WORKOUT_PLAN_UPDATE")
+                        .workoutPlanAction(GeminiAssistantOutput.WorkoutPlanAction.builder()
+                                .toolName("add_exercise_to_workout")
+                                .dayOfWeek("MONDAY")
+                                .build())
+                        .build()
+        ));
+
+        // Case 1: "Add Front Lever Raises to Tuesday" -> Tuesday only (even when selectedDayOfWeek = MONDAY)
+        AiMessageResponse addTue = sendMsgWithSelectedDay(
+                tokenWithoutPlan, convId, "Add Front Lever Raises (3 sets × 10 reps, 90s rest) to Tuesday", WorkoutDayOfWeek.MONDAY);
+        assertThat(addTue.getIntent()).isEqualTo("WORKOUT_PLAN_UPDATE");
+        assertThat(addTue.getMetadata()).contains("\"dayOfWeek\":\"TUESDAY\"");
+        assertThat(addTue.getMetadata()).contains("\"addedExercises\":[\"Front Lever Raises\"]");
+        assertThat(addTue.getContent()).contains("Tuesday");
+        assertThat(addTue.getContent()).contains("Front Lever Raises");
+        assertThat(exerciseNamesForDay(plan.getId(), WorkoutDayOfWeek.TUESDAY))
+                .containsExactly("Front Lever", "Tuck Planche", "Front Lever Raises");
+        assertThat(exerciseNamesForDay(plan.getId(), WorkoutDayOfWeek.MONDAY))
+                .containsExactly("Advanced Tuck Planche");
+        assertThat(exerciseNamesForDay(plan.getId(), WorkoutDayOfWeek.THURSDAY))
+                .containsExactly("Straddle Planche");
+        assertThat(exerciseNamesForDay(plan.getId(), WorkoutDayOfWeek.FRIDAY))
+                .containsExactly("Front Lever");
+
+        // Verify prescription persisted as 3 sets x 10 reps, 90s rest
+        WorkoutPlanDay tueDay = workoutPlanDayRepository.findByWorkoutPlanIdOrderByDisplayOrderAsc(plan.getId()).stream()
+                .filter(d -> d.getDayOfWeek() == WorkoutDayOfWeek.TUESDAY).findFirst().orElseThrow();
+        WorkoutPlanExercise flr = workoutPlanExerciseRepository.findByWorkoutPlanDayIdOrderByDisplayOrderAsc(tueDay.getId()).stream()
+                .filter(pe -> pe.getExercise().getName().equals("Front Lever Raises")).findFirst().orElseThrow();
+        assertThat(flr.getSets()).isEqualTo(3);
+        assertThat(flr.getReps()).isEqualTo(10);
+        assertThat(flr.getRestSeconds()).isEqualTo(90);
+
+        // Rule 5: Repeating "add to tuesday front lever  raise" (singular) must NOT substitute Tuck Planche or any other exercise
+        AiMessageResponse dupTue = sendMsg(tokenWithoutPlan, convId, "add to tuesday front lever  raise");
+        assertThat(dupTue.getMetadata()).contains("\"mutated\":false");
+        assertThat(dupTue.getContent()).contains("already scheduled on **Tuesday**");
+        assertThat(exerciseNamesForDay(plan.getId(), WorkoutDayOfWeek.TUESDAY))
+                .containsExactly("Front Lever", "Tuck Planche", "Front Lever Raises");
+
+        // Case 2: "Remove Tuck Planche from Tuesday" -> Tuesday only
+        AiMessageResponse remTue = sendMsgWithSelectedDay(
+                tokenWithoutPlan, convId, "Remove Tuck Planche from Tuesday", WorkoutDayOfWeek.MONDAY);
+        assertThat(remTue.getMetadata()).contains("\"dayOfWeek\":\"TUESDAY\"");
+        assertThat(remTue.getMetadata()).contains("\"removedExercise\":\"Tuck Planche\"");
+        assertThat(exerciseNamesForDay(plan.getId(), WorkoutDayOfWeek.TUESDAY))
+                .containsExactly("Front Lever", "Front Lever Raises");
+        assertThat(exerciseNamesForDay(plan.getId(), WorkoutDayOfWeek.MONDAY))
+                .containsExactly("Advanced Tuck Planche");
+
+        // Removing Tuck Planche from Tuesday again when not on Tuesday must NOT remove from another day
+        AiMessageResponse remTueAgain = sendMsg(tokenWithoutPlan, convId, "Remove Tuck Planche from Tuesday");
+        assertThat(remTueAgain.getMetadata()).contains("\"mutated\":false");
+        assertThat(remTueAgain.getContent()).contains("not found on **Tuesday**");
+
+        // Case 4: "Add Straddle Planche to Monday" -> Monday only
+        AiMessageResponse addMon = sendMsgWithSelectedDay(
+                tokenWithoutPlan, convId, "Add Straddle Planche to Monday", WorkoutDayOfWeek.TUESDAY);
+        assertThat(addMon.getMetadata()).contains("\"dayOfWeek\":\"MONDAY\"");
+        assertThat(addMon.getMetadata()).contains("\"addedExercises\":[\"Straddle Planche\"]");
+        assertThat(exerciseNamesForDay(plan.getId(), WorkoutDayOfWeek.MONDAY))
+                .containsExactly("Advanced Tuck Planche", "Straddle Planche");
+        assertThat(exerciseNamesForDay(plan.getId(), WorkoutDayOfWeek.TUESDAY))
+                .containsExactly("Front Lever", "Front Lever Raises");
+
+        // Case 3: Prepare Front Lever Raises on Monday (and remove from Tuesday), then "Move Front Lever Raises from Monday to Tuesday"
+        sendMsg(tokenWithoutPlan, convId, "Remove Front Lever Raises from Tuesday");
+        sendMsg(tokenWithoutPlan, convId, "Add Front Lever Raises (3 sets × 10 reps, 90s rest) to Monday");
+        assertThat(exerciseNamesForDay(plan.getId(), WorkoutDayOfWeek.MONDAY))
+                .containsExactly("Advanced Tuck Planche", "Straddle Planche", "Front Lever Raises");
+
+        AiMessageResponse moveResp = sendMsg(tokenWithoutPlan, convId, "Move Front Lever Raises from Monday to Tuesday");
+        assertThat(moveResp.getIntent()).isEqualTo("WORKOUT_PLAN_UPDATE");
+        assertThat(moveResp.getMetadata()).contains("\"toolName\":\"move_exercise_between_days\"");
+        assertThat(moveResp.getMetadata()).contains("\"sourceDayOfWeek\":\"MONDAY\"");
+        assertThat(moveResp.getMetadata()).contains("\"dayOfWeek\":\"TUESDAY\"");
+        assertThat(moveResp.getMetadata()).contains("\"movedExercise\":\"Front Lever Raises\"");
+        assertThat(exerciseNamesForDay(plan.getId(), WorkoutDayOfWeek.MONDAY))
+                .containsExactly("Advanced Tuck Planche", "Straddle Planche");
+        assertThat(exerciseNamesForDay(plan.getId(), WorkoutDayOfWeek.TUESDAY))
+                .containsExactly("Front Lever", "Front Lever Raises");
+        assertThat(exerciseNamesForDay(plan.getId(), WorkoutDayOfWeek.THURSDAY))
+                .containsExactly("Straddle Planche");
+        assertThat(exerciseNamesForDay(plan.getId(), WorkoutDayOfWeek.FRIDAY))
+                .containsExactly("Front Lever");
+    }
+
+    @Test
+    @DisplayName("Regression: Negated weekday 'no, add to Tuesday not monday', uncataloged exercises, and word-boundary safety")
+    void negatedWeekdayAndNoSubstitutionRegression() throws Exception {
+        WorkoutPlan plan = setupPlancheFrontLeverPlan();
+        Long convId = createConv(tokenWithoutPlan);
+
+        // Negated Monday must extract TUESDAY, never MONDAY, and never add Tuck Planche when no exercise is named
+        assertThat(UserAiWorkoutToolService.extractWeekday("no, add to Tuesday not monday"))
+                .isEqualTo(WorkoutDayOfWeek.TUESDAY);
+        assertThat(UserAiWorkoutToolService.extractWeekday("Add to Tuesday instead of Monday"))
+                .isEqualTo(WorkoutDayOfWeek.TUESDAY);
+        assertThat(UserAiWorkoutToolService.extractWeekday("What are common mistakes in Push-Up?")).isNull();
+        assertThat(UserAiWorkoutToolService.extractWeekday("I sat down and showed progress")).isNull();
+
+        // Turn 1 without weekday asks clarification instead of corrupting Monday
+        AiMessageResponse askDay = sendMsg(tokenWithoutPlan, convId, "Add Front Lever Raises");
+        assertThat(askDay.getMetadata()).contains("\"type\":\"WORKOUT_PLAN_CLARIFICATION\"");
+        assertThat(askDay.getMetadata()).contains("\"mutated\":false");
+        assertThat(exerciseNamesForDay(plan.getId(), WorkoutDayOfWeek.MONDAY))
+                .containsExactly("Advanced Tuck Planche");
+
+        // Turn 2 "no, add to Tuesday not monday" completes adding Front Lever Raises to TUESDAY only!
+        AiMessageResponse followUpTue = sendMsg(tokenWithoutPlan, convId, "no, add to Tuesday not monday");
+        assertThat(followUpTue.getMetadata()).contains("\"dayOfWeek\":\"TUESDAY\"");
+        assertThat(followUpTue.getMetadata()).contains("\"addedExercises\":[\"Front Lever Raises\"]");
+        assertThat(exerciseNamesForDay(plan.getId(), WorkoutDayOfWeek.TUESDAY))
+                .containsExactly("Front Lever", "Tuck Planche", "Front Lever Raises");
+        assertThat(exerciseNamesForDay(plan.getId(), WorkoutDayOfWeek.MONDAY))
+                .containsExactly("Advanced Tuck Planche");
+
+        // Uncataloged exercise must NOT substitute Front Lever or Tuck Planche
+        AiMessageResponse uncataloged = sendMsg(tokenWithoutPlan, convId, "Add Front Lever Negative Pulls to Tuesday");
+        assertThat(uncataloged.getMetadata()).contains("\"mutated\":false");
+        assertThat(exerciseNamesForDay(plan.getId(), WorkoutDayOfWeek.TUESDAY))
+                .containsExactly("Front Lever", "Tuck Planche", "Front Lever Raises");
     }
 }
