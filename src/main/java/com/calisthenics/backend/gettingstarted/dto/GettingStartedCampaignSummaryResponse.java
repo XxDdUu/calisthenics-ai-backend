@@ -7,6 +7,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.time.ZonedDateTime;
+import java.util.ArrayList;
 import java.util.List;
 
 @Data
@@ -25,5 +26,6 @@ public class GettingStartedCampaignSummaryResponse {
     private long enrollments;
     private ZonedDateTime publishedAt;
     private ZonedDateTime updatedAt;
-    private List<GettingStartedDayResponse> days;
+    @Builder.Default
+    private List<GettingStartedDayResponse> days = new ArrayList<>();
 }

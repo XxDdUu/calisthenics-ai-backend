@@ -1,6 +1,7 @@
 package com.calisthenics.backend.aichat.controller;
 
 import com.calisthenics.backend.aichat.dto.*;
+import com.calisthenics.backend.aichat.dto.preview.CreateRecommendationPreviewRequest;
 import com.calisthenics.backend.aichat.dto.preview.WorkoutPlanChangePreviewActionResponse;
 import com.calisthenics.backend.aichat.dto.preview.WorkoutPlanChangePreviewResponse;
 import com.calisthenics.backend.aichat.service.AiAssistantService;
@@ -127,5 +128,16 @@ public class AiAssistantController {
         WorkoutPlanChangePreviewService.PreviewActionOutcome outcome =
                 aiAssistantService.cancelWorkoutPreview(currentUser.getId(), id, previewId);
         return ResponseEntity.status(outcome.httpStatus()).body(outcome.response());
+    }
+
+    @PostMapping("/{id}/recommendations/preview")
+    @Operation(summary = "Generate a workout plan change preview from selected exercise recommendations")
+    public ResponseEntity<AiMessageResponse> createRecommendationsPreview(
+            @AuthenticationPrincipal UserPrincipal currentUser,
+            @PathVariable Long id,
+            @Valid @RequestBody CreateRecommendationPreviewRequest request
+    ) {
+        return ResponseEntity.ok(
+                aiAssistantService.createRecommendationsPreview(currentUser.getId(), id, request));
     }
 }

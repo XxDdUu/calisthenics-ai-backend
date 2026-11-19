@@ -6,6 +6,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.time.ZonedDateTime;
+import java.util.ArrayList;
 import java.util.List;
 
 @Data
@@ -35,7 +36,9 @@ public class AdminUserActivityResponse {
     private long liveAnalysisSessionsInRange;
     private long videoAnalysesInRange;
     private long prRecordsLoggedInRange;
-    private List<BucketCountDto> topAiIntents;
+    @Builder.Default
+    private List<BucketCountDto> topAiIntents = new ArrayList<>();
     private String privacyNotice;
-    private List<String> missingDataNotes;
+    @Builder.Default
+    private List<String> missingDataNotes = new ArrayList<>();
 }

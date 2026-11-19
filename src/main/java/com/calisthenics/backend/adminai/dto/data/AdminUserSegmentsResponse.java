@@ -5,6 +5,7 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.util.ArrayList;
 import java.util.List;
 
 @Data
@@ -20,10 +21,16 @@ public class AdminUserSegmentsResponse {
     private int page;
     private int size;
     private int totalPages;
-    private List<AdminGlobalUserSummaryDto> users;
-    private List<BucketCountDto> experienceBreakdown;
-    private List<BucketCountDto> activityBreakdown;
-    private List<BucketCountDto> goalBreakdown;
-    private List<BucketCountDto> coachStatusBreakdown;
-    private List<String> missingDataNotes;
+    @Builder.Default
+    private List<AdminGlobalUserSummaryDto> users = new ArrayList<>();
+    @Builder.Default
+    private List<BucketCountDto> experienceBreakdown = new ArrayList<>();
+    @Builder.Default
+    private List<BucketCountDto> activityBreakdown = new ArrayList<>();
+    @Builder.Default
+    private List<BucketCountDto> goalBreakdown = new ArrayList<>();
+    @Builder.Default
+    private List<BucketCountDto> coachStatusBreakdown = new ArrayList<>();
+    @Builder.Default
+    private List<String> missingDataNotes = new ArrayList<>();
 }

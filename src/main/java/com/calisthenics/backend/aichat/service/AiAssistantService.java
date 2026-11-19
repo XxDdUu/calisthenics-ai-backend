@@ -1,6 +1,7 @@
 package com.calisthenics.backend.aichat.service;
 
 import com.calisthenics.backend.aichat.dto.*;
+import com.calisthenics.backend.aichat.dto.preview.CreateRecommendationPreviewRequest;
 import com.calisthenics.backend.aichat.dto.preview.WorkoutPlanChangePreviewResponse;
 
 import java.util.List;
@@ -28,4 +29,7 @@ public interface AiAssistantService {
 
     WorkoutPlanChangePreviewService.PreviewActionOutcome cancelWorkoutPreview(
             Long userId, Long conversationId, String previewId);
+
+    AiMessageResponse createRecommendationsPreview(
+            Long userId, Long conversationId, CreateRecommendationPreviewRequest request);
 }

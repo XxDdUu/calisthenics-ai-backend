@@ -5,6 +5,7 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.util.ArrayList;
 import java.util.List;
 
 @Data
@@ -30,9 +31,12 @@ public class AdminCoachClientStatisticsResponse {
     private long totalSharedPrs;
     private long sharedPrsWithFeedback;
     private double feedbackResponseRate;
-    private List<CoachPerformanceItem> topCoaches;
-    private List<AdminGlobalUserSummaryDto> unassignedCoachCandidates;
-    private List<String> missingDataNotes;
+    @Builder.Default
+    private List<CoachPerformanceItem> topCoaches = new ArrayList<>();
+    @Builder.Default
+    private List<AdminGlobalUserSummaryDto> unassignedCoachCandidates = new ArrayList<>();
+    @Builder.Default
+    private List<String> missingDataNotes = new ArrayList<>();
 
     @Data
     @Builder

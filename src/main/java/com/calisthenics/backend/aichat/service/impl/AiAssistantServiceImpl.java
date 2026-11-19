@@ -1,6 +1,7 @@
 package com.calisthenics.backend.aichat.service.impl;
 
 import com.calisthenics.backend.aichat.dto.*;
+import com.calisthenics.backend.aichat.dto.preview.CreateRecommendationPreviewRequest;
 import com.calisthenics.backend.aichat.dto.preview.WorkoutPlanChangePreviewResponse;
 import com.calisthenics.backend.aichat.entity.AiConversation;
 import com.calisthenics.backend.aichat.entity.AiMessage;
@@ -8,6 +9,7 @@ import com.calisthenics.backend.aichat.entity.AiWorkoutPlanChangePreview;
 import com.calisthenics.backend.aichat.repository.AiConversationRepository;
 import com.calisthenics.backend.aichat.repository.AiMessageRepository;
 import com.calisthenics.backend.aichat.service.AiAssistantService;
+import com.calisthenics.backend.aichat.service.AiWorkoutRecommendationService;
 import com.calisthenics.backend.aichat.service.UserAiWorkoutToolService;
 import com.calisthenics.backend.aichat.service.WorkoutPlanChangePreviewService;
 import com.calisthenics.backend.aiworkout.dto.AiWorkoutPlanPreviewResponse;
@@ -72,6 +74,12 @@ public class AiAssistantServiceImpl implements AiAssistantService {
     private final CoachProfileRepository coachProfileRepository;
     private final UserAiWorkoutToolService userAiWorkoutToolService;
     private final WorkoutPlanChangePreviewService workoutPlanChangePreviewService;
+    private final AiWorkoutRecommendationService aiWorkoutRecommendationService;
+
+    private static final String TOOL_RECOMMEND_EXERCISES = "recommend_exercises";
+    private static final String TOOL_CONSULT_WORKOUT_PLAN = "consult_workout_plan";
+    private static final String TOOL_STORE_RECOMMENDATION_SELECTION = "store_recommendation_selection";
+    private static final String TOOL_APPLY_SELECTED_RECOMMENDATIONS = "apply_selected_recommendations";
 
     @Override
     @Transactional(readOnly = true)
@@ -184,6 +192,54 @@ public class AiAssistantServiceImpl implements AiAssistantService {
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Authentication required");
         }
         return workoutPlanChangePreviewService.cancelPreview(userId, conversationId, previewId, false, true);
+    }
+
+    @Override
+    @Transactional
+    public AiMessageResponse createRecommendationsPreview(
+            Long userId, Long conversationId, CreateRecommendationPreviewRequest request
+    ) {
+        if (userId == null) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Authentication required");
+        }
+        if (request == null || request.getExerciseIds() == null || request.getExerciseIds().isEmpty()
+                || request.getDayOfWeek() == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Exercise IDs and target weekday are required");
+        }
+        AiConversation conversation = aiConversationRepository.findByIdAndUserId(conversationId, userId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "AI Conversation not found"));
+
+        WorkoutPlanChangePreviewService.PrescriptionInput prescription =
+                new WorkoutPlanChangePreviewService.PrescriptionInput(
+                        request.getSets(),
+                        request.getReps(),
+                        request.getDurationSeconds(),
+                        request.getRestSeconds()
+                );
+
+        UserAiWorkoutToolService.WorkoutToolResult res = workoutPlanChangePreviewService.proposeAddExercisesBatch(
+                userId,
+                conversationId,
+                request.getExerciseIds(),
+                request.getDayOfWeek(),
+                prescription,
+                "Add selected recommendations to " + request.getDayOfWeek().name(),
+                false
+        );
+
+        String replyIntent = res.intent() != null ? res.intent() : "WORKOUT_PLAN_PREVIEW";
+        AiMessage assistantMsg = aiMessageRepository.save(AiMessage.builder()
+                .conversation(conversation)
+                .role("assistant")
+                .content(res.reply())
+                .intent(replyIntent)
+                .metadata(res.metadataJson())
+                .build());
+        attachPreviewAssistantMessageIfPresent(userId, res.metadataJson(), assistantMsg.getId());
+
+        conversation.setUpdatedAt(ZonedDateTime.now());
+        aiConversationRepository.save(conversation);
+        return mapToMessageResponse(assistantMsg, userId);
     }
 
     @Override
@@ -460,16 +516,18 @@ public class AiAssistantServiceImpl implements AiAssistantService {
         sb.append("   - If unambiguous (exercise, value, and type are clear), populate 'pr_action' with 'is_ambiguous=false'.\n");
         sb.append("   - If ambiguous (e.g. missing value, missing exercise), set 'is_ambiguous=true' and ask a clarifying question in 'reply'.\n");
         sb.append("2. 'WORKOUT_PLAN_VIEW' / 'WORKOUT_DAY_VIEW' / 'EXERCISE_DETAILS_VIEW' (STRICTLY READ-ONLY): The user asks to view, show, list, or explain their existing workout plan, weekly schedule, today's workout, or a specific day's workout (e.g., 'Show my workout plan', 'What am I training today?', 'Show Wednesday', 'Lịch tập của tôi thế nào?'). NEVER create or modify a workout plan for these queries.\n");
-        sb.append("3. 'WORKOUT_PLAN' / 'WORKOUT_PLAN_UPDATE' (WRITE ONLY ON EXPLICIT REQUEST): The user explicitly asks to create, generate, replace, regenerate, change, add exercises to, remove exercises from, or move exercises between days in a workout plan.\n");
+        sb.append("3. 'EXERCISE_RECOMMENDATION' (READ-ONLY ADVISORY): The user asks for exercise recommendations, suggestions, ideas for undertrained muscles, or what to add to a training day/skill (e.g., 'Recommend some leg exercises to add to my leg day', 'Suggest exercises to improve my planche', 'What exercises am I missing in my current routine?'). NEVER require a specific exercise name or weekday or create a workout modification preview automatically unless user explicitly commands adding named exercises.\n");
+        sb.append("4. 'WORKOUT_CONSULTATION' (READ-ONLY COACHING): The user asks to evaluate, review, check recovery, muscle balance, or training volume of their workout routine or day (e.g., 'Is my leg day balanced?', 'Am I training my hamstrings enough?', 'Does my weekly routine have enough recovery?', 'Is my current planche training volume too high?'). NEVER modify the schedule.\n");
+        sb.append("5. 'WORKOUT_PLAN' / 'WORKOUT_PLAN_UPDATE' (WRITE ONLY ON EXPLICIT REQUEST): The user explicitly commands creating, generating, replacing, regenerating, updating, adding specific exercises to, removing exercises from, or moving exercises between days in a workout plan.\n");
         sb.append("   - Populate 'workout_plan_action' with tool_name, prompt, fitness_level, duration_weeks, day_of_week, source_day_of_week (when moving), exercise_name, and detailed.\n");
         sb.append("   - CRITICAL RULES: Explicit weekday requests ALWAYS take priority over any selected day. Never infer a different weekday when one is explicitly stated (e.g. 'to Tuesday not Monday' means TUESDAY). Never substitute or add unrelated exercises.\n");
-        sb.append("4. 'PROGRESS_ANALYSIS': The user asks about their progress, plateaus, improvements, or training trends (e.g., 'How is my pull up progress?', 'Am I plateauing on dips?').\n");
+        sb.append("6. 'PROGRESS_ANALYSIS': The user asks about their progress, plateaus, improvements, or training trends (e.g., 'How is my pull up progress?', 'Am I plateauing on dips?').\n");
         sb.append("   - Populate 'progress_analysis_action'. Provide data-backed insights.\n");
-        sb.append("5. 'PROFILE_UPDATE': The user requests to update their personal/athlete profile details (e.g. 'Cập nhật cân nặng của tôi thành 76kg', 'Đổi mục tiêu tập luyện thành Straddle Planche', 'My height is 178 cm', 'Update my bio to Calisthenics athlete', 'Change display name to Alex').\n");
+        sb.append("7. 'PROFILE_UPDATE': The user requests to update their personal/athlete profile details (e.g. 'Cập nhật cân nặng của tôi thành 76kg', 'Đổi mục tiêu tập luyện thành Straddle Planche', 'My height is 178 cm', 'Update my bio to Calisthenics athlete', 'Change display name to Alex').\n");
         sb.append("   - Supported editable fields: display_name, full_name, bio, height_cm, weight_kg, experience_level, training_experience, primary_goals, training_interests, preferred_frequency, coaching_language, gender.\n");
         sb.append("   - If unambiguous and has specific field and value, set 'is_ambiguous=false' and populate 'profile_update_action'.\n");
         sb.append("   - If ambiguous or missing specific values (e.g. 'update my profile' without specifying what), set 'is_ambiguous=true' and ask what they want to change in 'clarification_question'.\n");
-        sb.append("6. 'GENERAL_CHAT': Form tips, exercise breakdowns, mobility advice, recovery, or motivation.\n");
+        sb.append("8. 'GENERAL_CHAT': Form tips, exercise breakdowns, mobility advice, recovery, or motivation.\n");
         sb.append("   - Provide structured, rich Markdown responses (headers, bold, bullet points).\n");
         return sb.toString();
     }
@@ -944,7 +1002,15 @@ public class AiAssistantServiceImpl implements AiAssistantService {
     private record PendingWorkoutClarification(
             String pendingAction,
             String exerciseName,
-            WorkoutDayOfWeek targetDayOfWeek
+            WorkoutDayOfWeek targetDayOfWeek,
+            List<Long> selectedExerciseIds,
+            List<String> selectedExerciseNames
+    ) {}
+
+    private record RecommendedSelectionContext(
+            List<Long> selectedIds,
+            List<String> selectedNames,
+            WorkoutDayOfWeek suggestedDay
     ) {}
 
     private static boolean isDeterministicWorkoutTool(String toolName) {
@@ -954,7 +1020,9 @@ public class AiAssistantServiceImpl implements AiAssistantService {
                 || WorkoutPlanChangePreviewService.TOOL_UPDATE_EXERCISE_IN_WORKOUT.equals(toolName)
                 || WorkoutPlanChangePreviewService.TOOL_REORDER_EXERCISES_IN_WORKOUT.equals(toolName)
                 || UserAiWorkoutToolService.TOOL_UPDATE_WORKOUT_PLAN.equals(toolName)
-                || UserAiWorkoutToolService.TOOL_ASSIGN_WORKOUT_PLAN.equals(toolName);
+                || UserAiWorkoutToolService.TOOL_ASSIGN_WORKOUT_PLAN.equals(toolName)
+                || TOOL_STORE_RECOMMENDATION_SELECTION.equals(toolName)
+                || TOOL_APPLY_SELECTED_RECOMMENDATIONS.equals(toolName);
     }
 
     private ActionResult tryHandlePendingPreviewFollowUp(
@@ -1121,6 +1189,14 @@ public class AiAssistantServiceImpl implements AiAssistantService {
             return new WorkoutIntentClassification("EXERCISE_DETAILS_VIEW",
                     UserAiWorkoutToolService.TOOL_GET_EXERCISE_DETAILS, true, null, null, exerciseName, false, false, true);
         }
+        if ("EXERCISE_RECOMMENDATION".equals(intent)) {
+            return new WorkoutIntentClassification("EXERCISE_RECOMMENDATION",
+                    TOOL_RECOMMEND_EXERCISES, true, null, day, exerciseName, false, false, true);
+        }
+        if ("WORKOUT_CONSULTATION".equals(intent)) {
+            return new WorkoutIntentClassification("WORKOUT_CONSULTATION",
+                    TOOL_CONSULT_WORKOUT_PLAN, true, null, day, exerciseName, false, false, true);
+        }
         if ("WORKOUT_PLAN_UPDATE".equals(intent)) {
             String tool = (declaredTool != null && !UserAiWorkoutToolService.isReadOnlyTool(declaredTool))
                     ? declaredTool
@@ -1161,6 +1237,30 @@ public class AiAssistantServiceImpl implements AiAssistantService {
                         ? decision.targetDay()
                         : ((decision.isToday() || decision.nextSession()) ? null : selectedDayOfWeek);
                 UserAiWorkoutToolService.WorkoutToolResult result = switch (decision.toolName()) {
+                    case TOOL_RECOMMEND_EXERCISES -> {
+                        if (aiWorkoutRecommendationService != null) {
+                            WorkoutDayOfWeek focusDay = decision.targetDay() != null ? decision.targetDay() : selectedDayOfWeek;
+                            AiWorkoutRecommendationService.RecommendationOutcome recOut =
+                                    aiWorkoutRecommendationService.recommendExercises(userId, userContent, focusDay, isVn);
+                            yield new UserAiWorkoutToolService.WorkoutToolResult(
+                                    TOOL_RECOMMEND_EXERCISES, true, recOut.intent(), true, recOut.reply(), recOut.metadataJson());
+                        }
+                        yield new UserAiWorkoutToolService.WorkoutToolResult(
+                                TOOL_RECOMMEND_EXERCISES, true, "EXERCISE_RECOMMENDATION", false,
+                                "Recommendation engine is currently unavailable.", null);
+                    }
+                    case TOOL_CONSULT_WORKOUT_PLAN -> {
+                        if (aiWorkoutRecommendationService != null) {
+                            WorkoutDayOfWeek focusDay = decision.targetDay() != null ? decision.targetDay() : selectedDayOfWeek;
+                            AiWorkoutRecommendationService.ConsultationOutcome conOut =
+                                    aiWorkoutRecommendationService.consultWorkoutPlan(userId, userContent, focusDay, isVn);
+                            yield new UserAiWorkoutToolService.WorkoutToolResult(
+                                    TOOL_CONSULT_WORKOUT_PLAN, true, conOut.intent(), true, conOut.reply(), conOut.metadataJson());
+                        }
+                        yield new UserAiWorkoutToolService.WorkoutToolResult(
+                                TOOL_CONSULT_WORKOUT_PLAN, true, "WORKOUT_CONSULTATION", false,
+                                "Workout consultation is currently unavailable.", null);
+                    }
                     case UserAiWorkoutToolService.TOOL_GET_WEEKLY_WORKOUT_SCHEDULE ->
                             userAiWorkoutToolService.getWeeklyWorkoutSchedule(userId, decision.detailed(), isVn);
                     case UserAiWorkoutToolService.TOOL_GET_WORKOUT_DAY_DETAILS ->
@@ -1193,6 +1293,53 @@ public class AiAssistantServiceImpl implements AiAssistantService {
         String actionExerciseName = decision.exerciseName() != null
                 ? decision.exerciseName()
                 : (planAction != null ? planAction.getExerciseName() : null);
+        if (TOOL_STORE_RECOMMENDATION_SELECTION.equals(decision.toolName())) {
+            RecommendedSelectionContext selection = extractRecommendationSelectionFromMessage(userContent, priorHistory);
+            if (selection == null || selection.selectedIds().isEmpty()) {
+                String fallbackMsg = isVn
+                        ? "Bạn muốn chọn bài tập nào từ danh sách gợi ý ở trên và thêm vào thứ mấy?"
+                        : "Which recommended exercises would you like to select, and which weekday should I add them to?";
+                return new ActionResult(fallbackMsg, null, "EXERCISE_RECOMMENDATION");
+            }
+            String namesJoined = selection.selectedNames().stream()
+                    .map(n -> "**" + n + "**")
+                    .collect(Collectors.joining(", "));
+            String dayHint = selection.suggestedDay() != null
+                    ? formatDayNameEnglish(selection.suggestedDay())
+                    : "Wednesday";
+            String msg = isVn
+                    ? "Tuyệt vời! Tôi đã ghi nhận lựa chọn của bạn: " + namesJoined + ". Bạn muốn thêm các bài tập này vào thứ mấy (ví dụ: " + dayHint + ")?"
+                    : "Great picks! I've noted " + namesJoined + ". Which weekday would you like to add them to (for example: " + dayHint + ")?";
+            Map<String, Object> clarMeta = new LinkedHashMap<>();
+            clarMeta.put("type", WorkoutPlanChangePreviewService.METADATA_TYPE_CLARIFICATION);
+            clarMeta.put("pendingAction", "ADD_MULTI");
+            clarMeta.put("selectedExerciseIds", selection.selectedIds());
+            clarMeta.put("selectedExerciseNames", selection.selectedNames());
+            if (selection.suggestedDay() != null) {
+                clarMeta.put("targetDayOfWeek", selection.suggestedDay().name());
+            }
+            clarMeta.put("mutated", false);
+            return new ActionResult(msg, safeToJson(clarMeta), "WORKOUT_PLAN_UPDATE");
+        }
+
+        if (TOOL_APPLY_SELECTED_RECOMMENDATIONS.equals(decision.toolName()) && workoutPlanChangePreviewService != null) {
+            PendingWorkoutClarification pendingClar = findPendingWorkoutClarification(priorHistory);
+            RecommendedSelectionContext selection = extractRecommendationSelectionFromMessage(userContent, priorHistory);
+            List<Long> targetIds = (pendingClar != null && pendingClar.selectedExerciseIds() != null && !pendingClar.selectedExerciseIds().isEmpty())
+                    ? pendingClar.selectedExerciseIds()
+                    : (selection != null ? selection.selectedIds() : List.of());
+            WorkoutDayOfWeek targetDay = decision.targetDay() != null
+                    ? decision.targetDay()
+                    : (pendingClar != null && pendingClar.targetDayOfWeek() != null
+                        ? pendingClar.targetDayOfWeek()
+                        : (selection != null && selection.suggestedDay() != null ? selection.suggestedDay() : selectedDayOfWeek));
+            WorkoutPlanChangePreviewService.PrescriptionInput prescription =
+                    WorkoutPlanChangePreviewService.parseExercisePrescription(userContent);
+            UserAiWorkoutToolService.WorkoutToolResult res = workoutPlanChangePreviewService.proposeAddExercisesBatch(
+                    userId, conversationId, targetIds, targetDay, prescription, userContent, isVn);
+            return new ActionResult(res.reply(), res.metadataJson(), res.intent());
+        }
+
         if (UserAiWorkoutToolService.TOOL_CREATE_WORKOUT_PLAN.equals(decision.toolName())) {
             return executeWorkoutPlanAction(userId, userContent, planAction, timezone);
         }
@@ -1299,9 +1446,17 @@ public class AiAssistantServiceImpl implements AiAssistantService {
                 || containsWord(lower, "list") || containsWord(lower, "explain")
                 || lower.contains("xem ");
 
-        // Pending clarification follow-up (e.g. Turn 1: "Add Front Lever Raises", Turn 2: "Tuesday" / "no, add to Tuesday not monday")
+        // Pending clarification follow-up (e.g. Turn 1: "Add Front Lever Raises" or "I like Squat and RDL", Turn 2: "Tuesday" / "Add them to Wednesday")
         PendingWorkoutClarification pendingClarification = findPendingWorkoutClarification(priorHistory);
-        if (pendingClarification != null && weekday != null && !isViewVerb) {
+        if (pendingClarification != null && weekday != null && !isViewVerb
+                && !isExerciseRecommendationRequest(lower) && !isWorkoutConsultationRequest(lower)) {
+            if ("ADD_MULTI".equalsIgnoreCase(pendingClarification.pendingAction())
+                    && pendingClarification.selectedExerciseIds() != null
+                    && !pendingClarification.selectedExerciseIds().isEmpty()
+                    && (isAnaphoraSelection(lower) || !mentionsAnyPublishedExercise(lower))) {
+                return new WorkoutIntentClassification("WORKOUT_PLAN_UPDATE",
+                        TOOL_APPLY_SELECTED_RECOMMENDATIONS, false, null, weekday, null, false, false, true);
+            }
             if ("ADD".equalsIgnoreCase(pendingClarification.pendingAction())
                     && !containsWord(lower, "remove") && !containsWord(lower, "delete")) {
                 return new WorkoutIntentClassification("WORKOUT_PLAN_UPDATE",
@@ -1327,6 +1482,34 @@ public class AiAssistantServiceImpl implements AiAssistantService {
                         WorkoutPlanChangePreviewService.TOOL_UPDATE_EXERCISE_IN_WORKOUT, false, null, weekday,
                         pendingClarification.exerciseName(), false, false, true);
             }
+        }
+
+        // 0. Check multi-turn selection follow-up from a recent EXERCISE_RECOMMENDATIONS card
+        boolean hasOtherWriteVerb = containsWord(lower, "remove") || containsWord(lower, "delete")
+                || containsWord(lower, "move") || containsWord(lower, "update")
+                || containsWord(lower, "change") || containsWord(lower, "modify")
+                || containsWord(lower, "reorder") || containsWord(lower, "replace");
+        if (!isExerciseRecommendationRequest(lower) && !isWorkoutConsultationRequest(lower)
+                && !isViewVerb && !hasOtherWriteVerb) {
+            RecommendedSelectionContext recFollowUp = extractRecommendationSelectionFromMessage(userMessage, priorHistory);
+            if (recFollowUp != null && !recFollowUp.selectedIds().isEmpty()) {
+                if (weekday != null) {
+                    return new WorkoutIntentClassification("WORKOUT_PLAN_UPDATE",
+                            TOOL_APPLY_SELECTED_RECOMMENDATIONS, false, null, weekday, null, false, false, true);
+                }
+                return new WorkoutIntentClassification("WORKOUT_PLAN_UPDATE",
+                        TOOL_STORE_RECOMMENDATION_SELECTION, false, null, recFollowUp.suggestedDay(), null, false, false, true);
+            }
+        }
+
+        // 0b. Check EXERCISE_RECOMMENDATION & WORKOUT_CONSULTATION BEFORE explicit ADD/CREATE verbs
+        if (isExerciseRecommendationRequest(lower)) {
+            return new WorkoutIntentClassification("EXERCISE_RECOMMENDATION",
+                    TOOL_RECOMMEND_EXERCISES, true, null, weekday, null, false, false, true);
+        }
+        if (isWorkoutConsultationRequest(lower)) {
+            return new WorkoutIntentClassification("WORKOUT_CONSULTATION",
+                    TOOL_CONSULT_WORKOUT_PLAN, true, null, weekday, null, false, false, true);
         }
 
         // 1. Check EXPLICIT WRITE intents first
@@ -1469,6 +1652,163 @@ public class AiAssistantServiceImpl implements AiAssistantService {
         return null;
     }
 
+    private boolean isExerciseRecommendationRequest(String lower) {
+        if (lower == null || lower.isBlank()) {
+            return false;
+        }
+        // Full weekly plan generation queries belong to WORKOUT_PLAN
+        boolean isWholePlanCreation = (lower.contains("workout plan") || lower.contains("training plan")
+                || lower.contains("workout split") || lower.contains("new split") || lower.contains("new plan"))
+                && !lower.contains("exercise") && !lower.contains("exercises") && !lower.contains("missing");
+        if (isWholePlanCreation) {
+            return false;
+        }
+
+        boolean mentionsExerciseNoun = lower.contains("exercise") || lower.contains("exercises")
+                || lower.contains("movements") || lower.contains("bài tập");
+        boolean hasRecommendCue = containsWord(lower, "recommend") || containsWord(lower, "recommendation")
+                || containsWord(lower, "recommendations") || containsWord(lower, "suggest")
+                || containsWord(lower, "suggestion") || containsWord(lower, "suggestions")
+                || lower.contains("gợi ý") || lower.contains("đề xuất")
+                || lower.contains("nên tập bài") || lower.contains("nên thêm bài");
+        if (hasRecommendCue && (mentionsExerciseNoun || !lower.contains("plan"))) {
+            return true;
+        }
+        if ((lower.contains("what exercises") || lower.contains("which exercises") || lower.contains("any exercises")
+                || lower.contains("give me some") || lower.contains("give me a few"))
+                && mentionsExerciseNoun) {
+            return true;
+        }
+        if ((lower.contains("missing in my") || lower.contains("what am i missing") || lower.contains("what's missing"))
+                && (mentionsExerciseNoun || lower.contains("routine") || lower.contains("plan") || lower.contains("split"))) {
+            return true;
+        }
+        return lower.contains("exercises to improve") || lower.contains("exercises to help")
+                || lower.contains("exercises for my");
+    }
+
+    private boolean isWorkoutConsultationRequest(String lower) {
+        if (lower == null || lower.isBlank()) {
+            return false;
+        }
+        boolean hasExplicitPlanBalance = lower.contains("balanced")
+                || lower.contains("imbalance")
+                || (containsWord(lower, "balance") && (lower.contains("routine") || lower.contains("plan")
+                    || lower.contains("split") || lower.contains("muscle") || lower.contains("workout")
+                    || lower.contains("push") || lower.contains("pull") || lower.contains("leg")));
+        boolean isTrainingAdequacyQuestion = !lower.contains("what am i training")
+                && (lower.contains("am i training") || lower.contains("am i working") || lower.contains("am i hitting"))
+                && (lower.contains("enough") || lower.contains("too much") || lower.contains("too little") || lower.contains("properly"));
+        boolean hasConsultationCue = hasExplicitPlanBalance
+                || isTrainingAdequacyQuestion
+                || lower.contains("enough recovery")
+                || lower.contains("enough rest") || lower.contains("too high")
+                || lower.contains("too much volume") || lower.contains("overtraining")
+                || lower.contains("overloaded") || lower.contains("undertrained")
+                || lower.contains("does my weekly")
+                || lower.contains("does my routine") || lower.contains("evaluate my")
+                || lower.contains("critique my") || lower.contains("review my")
+                || lower.contains("có cân bằng") || lower.contains("đủ phục hồi")
+                || lower.contains("quá tải") || lower.contains("đánh giá lịch");
+        if (hasConsultationCue) {
+            return true;
+        }
+        return (lower.contains("is my ") || lower.contains("are my "))
+                && (lower.contains("enough") || lower.contains("balanced") || lower.contains("too much") || lower.contains("too high"));
+    }
+
+    private static boolean isAnaphoraSelection(String lower) {
+        if (lower == null) return false;
+        return containsWord(lower, "them") || containsWord(lower, "those") || containsWord(lower, "these")
+                || containsWord(lower, "both") || containsWord(lower, "all")
+                || lower.contains("first two") || lower.contains("first three") || lower.contains("first one")
+                || lower.contains("top 2") || lower.contains("top 3") || lower.contains("selected");
+    }
+
+    private RecommendedSelectionContext extractRecommendationSelectionFromMessage(
+            String userMessage,
+            List<AiMessage> priorHistory
+    ) {
+        if (userMessage == null || userMessage.isBlank() || priorHistory == null || priorHistory.isEmpty()) {
+            return null;
+        }
+        List<Long> recIds = new ArrayList<>();
+        List<String> recNames = new ArrayList<>();
+        WorkoutDayOfWeek suggestedDay = null;
+
+        for (int i = priorHistory.size() - 1; i >= 0; i--) {
+            AiMessage m = priorHistory.get(i);
+            if (!"assistant".equalsIgnoreCase(m.getRole()) || m.getMetadata() == null) {
+                continue;
+            }
+            try {
+                JsonNode root = objectMapper.readTree(m.getMetadata());
+                if ("EXERCISE_RECOMMENDATIONS".equals(root.path("type").asText())) {
+                    if (root.hasNonNull("suggestedDayOfWeek")) {
+                        suggestedDay = parseOptionalEnumDay(root.get("suggestedDayOfWeek").asText());
+                    }
+                    if (root.has("recommendations") && root.get("recommendations").isArray()) {
+                        for (JsonNode item : root.get("recommendations")) {
+                            if (item.hasNonNull("exerciseId") && item.hasNonNull("name")) {
+                                recIds.add(item.get("exerciseId").asLong());
+                                recNames.add(item.get("name").asText());
+                            }
+                        }
+                    }
+                    break;
+                }
+            } catch (Exception ignored) {
+            }
+        }
+
+        if (recIds.isEmpty()) {
+            return null;
+        }
+
+        String lower = userMessage.toLowerCase(Locale.US);
+        List<Long> matchedIds = new ArrayList<>();
+        List<String> matchedNames = new ArrayList<>();
+
+        for (int i = 0; i < recIds.size(); i++) {
+            String name = recNames.get(i);
+            if (name != null && !name.isBlank() && lower.contains(name.toLowerCase(Locale.US))) {
+                matchedIds.add(recIds.get(i));
+                matchedNames.add(name);
+            }
+        }
+
+        if (matchedIds.isEmpty() && isAnaphoraSelection(lower)) {
+            int takeCount;
+            if (lower.contains("first two") || lower.contains("top 2") || containsWord(lower, "both")) {
+                takeCount = Math.min(2, recIds.size());
+            } else if (lower.contains("first three") || lower.contains("top 3")) {
+                takeCount = Math.min(3, recIds.size());
+            } else if (lower.contains("first one") || lower.contains("the first")) {
+                takeCount = 1;
+            } else {
+                // "them", "those", "all" -> default up to 2 most recent or pending CLARIFICATION selection if present
+                PendingWorkoutClarification clar = findPendingWorkoutClarification(priorHistory);
+                if (clar != null && clar.selectedExerciseIds() != null && !clar.selectedExerciseIds().isEmpty()) {
+                    return new RecommendedSelectionContext(clar.selectedExerciseIds(), clar.selectedExerciseNames(),
+                            clar.targetDayOfWeek() != null ? clar.targetDayOfWeek() : suggestedDay);
+                }
+                takeCount = recIds.size();
+            }
+            for (int i = 0; i < takeCount; i++) {
+                matchedIds.add(recIds.get(i));
+                matchedNames.add(recNames.get(i));
+            }
+        }
+
+        return matchedIds.isEmpty() ? null : new RecommendedSelectionContext(matchedIds, matchedNames, suggestedDay);
+    }
+
+    private static String formatDayNameEnglish(WorkoutDayOfWeek dow) {
+        if (dow == null) return "Wednesday";
+        String n = dow.name();
+        return n.charAt(0) + n.substring(1).toLowerCase(Locale.US);
+    }
+
     private static boolean containsWord(String lowerText, String word) {
         if (lowerText == null || word == null || word.isBlank()) {
             return false;
@@ -1505,16 +1845,28 @@ public class AiAssistantServiceImpl implements AiAssistantService {
             }
             try {
                 JsonNode root = objectMapper.readTree(m.getMetadata());
-                if ("WORKOUT_PLAN_CLARIFICATION".equals(root.path("type").asText())) {
-                    String action = root.path("pendingAction").asText(null);
-                    String exName = root.hasNonNull("exerciseName") ? root.get("exerciseName").asText() : null;
-                    WorkoutDayOfWeek targetDay = root.hasNonNull("targetDayOfWeek")
-                            ? parseOptionalEnumDay(root.get("targetDayOfWeek").asText())
-                            : null;
-                    if (action != null && !action.isBlank()) {
-                        return new PendingWorkoutClarification(action, exName, targetDay);
+                    if ("WORKOUT_PLAN_CLARIFICATION".equals(root.path("type").asText())) {
+                        String action = root.path("pendingAction").asText(null);
+                        String exName = root.hasNonNull("exerciseName") ? root.get("exerciseName").asText() : null;
+                        WorkoutDayOfWeek targetDay = root.hasNonNull("targetDayOfWeek")
+                                ? parseOptionalEnumDay(root.get("targetDayOfWeek").asText())
+                                : null;
+                        List<Long> selectedIds = new ArrayList<>();
+                        if (root.has("selectedExerciseIds") && root.get("selectedExerciseIds").isArray()) {
+                            for (JsonNode n : root.get("selectedExerciseIds")) {
+                                if (n.canConvertToLong()) selectedIds.add(n.asLong());
+                            }
+                        }
+                        List<String> selectedNames = new ArrayList<>();
+                        if (root.has("selectedExerciseNames") && root.get("selectedExerciseNames").isArray()) {
+                            for (JsonNode n : root.get("selectedExerciseNames")) {
+                                if (n.isTextual() && !n.asText().isBlank()) selectedNames.add(n.asText());
+                            }
+                        }
+                        if (action != null && !action.isBlank()) {
+                            return new PendingWorkoutClarification(action, exName, targetDay, selectedIds, selectedNames);
+                        }
                     }
-                }
             } catch (Exception ignored) {
             }
             return null;
@@ -1849,6 +2201,8 @@ public class AiAssistantServiceImpl implements AiAssistantService {
         if (userMessage == null || userMessage.isBlank()) {
             return switch (intent) {
                 case "PR_RECORD" -> "PR Record Log";
+                case "EXERCISE_RECOMMENDATION" -> "Exercise Recommendations";
+                case "WORKOUT_CONSULTATION" -> "Routine Consultation";
                 case "WORKOUT_PLAN", "WORKOUT_PLAN_VIEW", "WORKOUT_DAY_VIEW", "WORKOUT_PLAN_UPDATE", "WORKOUT_PLAN_PREVIEW" -> "Workout Plan Session";
                 case "PROGRESS_ANALYSIS" -> "Progress Analysis";
                 case "PROFILE_UPDATE" -> "Profile Update";

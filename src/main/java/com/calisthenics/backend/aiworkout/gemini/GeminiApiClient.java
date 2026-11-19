@@ -431,9 +431,11 @@ public class GeminiApiClient {
                         "add_exercise_to_workout",
                         "remove_exercise_from_workout",
                         "move_exercise_between_days",
-                        "regenerate_workout_plan"
+                        "regenerate_workout_plan",
+                        "recommend_exercises",
+                        "consult_workout_plan"
                 ),
-                "description", "Read-only tools for view/show/list/explain requests; write tools only for explicit create/modify/replace requests"
+                "description", "Read-only/advisory tools for view, recommendation, and consultation requests; write tools only for explicit create/modify/replace requests"
         ));
         planProperties.put("day_of_week", Map.of(
                 "type", "STRING",
@@ -491,6 +493,8 @@ public class GeminiApiClient {
                         "WORKOUT_DAY_VIEW",
                         "EXERCISE_DETAILS_VIEW",
                         "WORKOUT_PLAN_UPDATE",
+                        "EXERCISE_RECOMMENDATION",
+                        "WORKOUT_CONSULTATION",
                         "PR_RECORD",
                         "PROGRESS_ANALYSIS",
                         "PROFILE_UPDATE",

@@ -371,6 +371,7 @@ public class AdminToolRouter {
         List<AdminContextService.OperationalInsightCandidate> dataRecommendations = new ArrayList<>();
         GettingStartedProgramResponse gettingStartedProgram = null;
         GettingStartedProgramPreviewResponse gettingStartedPreview = null;
+        // Null sentinel indicates no campaign tool executed (checked by AdminAIService.resolveIntentAfterTools)
         List<GettingStartedCampaignSummaryResponse> activeCampaigns = null;
         GettingStartedCampaignAnalyticsResponse campaignAnalytics = null;
         AdminPendingConfirmationResponse pendingConfirmation = null;

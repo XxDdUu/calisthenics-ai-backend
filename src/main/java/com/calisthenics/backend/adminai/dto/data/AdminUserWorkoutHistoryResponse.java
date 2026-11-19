@@ -7,6 +7,7 @@ import lombok.NoArgsConstructor;
 
 import java.time.LocalDate;
 import java.time.ZonedDateTime;
+import java.util.ArrayList;
 import java.util.List;
 
 @Data
@@ -29,11 +30,16 @@ public class AdminUserWorkoutHistoryResponse {
     private String consistencyTrend;
     private long completedExercisesCount;
     private long pendingOrIncompleteExercisesCount;
-    private List<AssignedPlanItem> assignedPlans;
-    private List<PersonalPlanItem> personalPlans;
-    private List<WorkoutSessionItem> recentSessions;
-    private List<WorkoutSessionItem> abandonedOrIncompleteWorkouts;
-    private List<String> missingDataNotes;
+    @Builder.Default
+    private List<AssignedPlanItem> assignedPlans = new ArrayList<>();
+    @Builder.Default
+    private List<PersonalPlanItem> personalPlans = new ArrayList<>();
+    @Builder.Default
+    private List<WorkoutSessionItem> recentSessions = new ArrayList<>();
+    @Builder.Default
+    private List<WorkoutSessionItem> abandonedOrIncompleteWorkouts = new ArrayList<>();
+    @Builder.Default
+    private List<String> missingDataNotes = new ArrayList<>();
 
     @Data
     @Builder

@@ -7,6 +7,7 @@ import lombok.NoArgsConstructor;
 
 import java.math.BigDecimal;
 import java.time.ZonedDateTime;
+import java.util.ArrayList;
 import java.util.List;
 
 @Data
@@ -19,13 +20,19 @@ public class AdminPlatformEngagementResponse {
     private long wauCount;
     private long mauCount;
     private double stickinessDauToMauPercent;
-    private List<ExperienceComparisonItem> experienceComparisons;
-    private List<ExerciseUsageItem> topPerformedExercises;
-    private List<SkillImproverItem> topSkillImprovers;
-    private List<AdminGlobalUserSummaryDto> decliningConsistencyUsers;
-    private List<AdminGlobalUserSummaryDto> stalePrUsers;
+    @Builder.Default
+    private List<ExperienceComparisonItem> experienceComparisons = new ArrayList<>();
+    @Builder.Default
+    private List<ExerciseUsageItem> topPerformedExercises = new ArrayList<>();
+    @Builder.Default
+    private List<SkillImproverItem> topSkillImprovers = new ArrayList<>();
+    @Builder.Default
+    private List<AdminGlobalUserSummaryDto> decliningConsistencyUsers = new ArrayList<>();
+    @Builder.Default
+    private List<AdminGlobalUserSummaryDto> stalePrUsers = new ArrayList<>();
     private ChatAiUsageSummary chatAndAiUsageSummary;
-    private List<String> missingDataNotes;
+    @Builder.Default
+    private List<String> missingDataNotes = new ArrayList<>();
 
     @Data
     @Builder
@@ -90,6 +97,7 @@ public class AdminPlatformEngagementResponse {
         private long prRecordsInRange;
         private long liveAnalysisSessionsInRange;
         private long videoAnalysesInRange;
-        private List<BucketCountDto> topAiIntents;
+        @Builder.Default
+        private List<BucketCountDto> topAiIntents = new ArrayList<>();
     }
 }

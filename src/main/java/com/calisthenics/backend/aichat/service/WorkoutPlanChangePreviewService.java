@@ -14,6 +14,8 @@ import com.calisthenics.backend.exercise.Exercise;
 import com.calisthenics.backend.exercise.ExerciseCategory;
 import com.calisthenics.backend.exercise.ExerciseRepository;
 import com.calisthenics.backend.exercise.ExerciseStatus;
+import com.calisthenics.backend.exercise.muscle.MuscleId;
+import com.calisthenics.backend.exercise.muscle.MuscleTaxonomyService;
 import com.calisthenics.backend.workoutplan.entity.WorkoutPlan;
 import com.calisthenics.backend.workoutplan.entity.WorkoutPlanDay;
 import com.calisthenics.backend.workoutplan.entity.WorkoutPlanExercise;
@@ -94,6 +96,7 @@ public class WorkoutPlanChangePreviewService {
             "raise", "row", "pull", "push", "press", "curl", "dip", "fly",
             "squat", "lunge", "crunch", "jump", "walk", "kick", "muscle", "extension"
     );
+    private static final MuscleTaxonomyService MUSCLE_TAXONOMY_SERVICE = new MuscleTaxonomyService();
 
     private final AiWorkoutPlanChangePreviewRepository previewRepository;
     private final AiConversationRepository aiConversationRepository;
@@ -187,6 +190,173 @@ public class WorkoutPlanChangePreviewService {
 
         return new UserAiWorkoutToolService.WorkoutToolResult(
                 toolName,
+                false,
+                "WORKOUT_PLAN_PREVIEW",
+                true,
+                markdown,
+                metadataJson
+        );
+    }
+
+    @Transactional
+    public UserAiWorkoutToolService.WorkoutToolResult proposeAddExercisesBatch(
+            Long userId,
+            Long conversationId,
+            List<Long> exerciseIds,
+            WorkoutDayOfWeek targetDayOfWeek,
+            PrescriptionInput overridePrescription,
+            String sourcePrompt,
+            boolean isVn
+    ) {
+        if (exerciseIds == null || exerciseIds.isEmpty()) {
+            String msg = isVn ? "Vui lòng chọn ít nhất một bài tập để thêm vào lịch tập."
+                    : "Please select at least one exercise to add to your workout plan.";
+            return buildNonMutatingResult(UserAiWorkoutToolService.TOOL_ADD_EXERCISE_TO_WORKOUT, msg, targetDayOfWeek, "EMPTY_SELECTION");
+        }
+        if (targetDayOfWeek == null) {
+            String msg = isVn ? "Vui lòng chọn ngày tập bạn muốn thêm các bài tập đã chọn."
+                    : "Which weekday would you like to add these selected exercises to?";
+            return buildClarificationResult(UserAiWorkoutToolService.TOOL_ADD_EXERCISE_TO_WORKOUT, "ADD_MULTI", null, null, msg);
+        }
+
+        Optional<WorkoutPlan> planOpt = resolveOwnedPersonalPlan(userId);
+        if (planOpt.isEmpty()) {
+            String msg = isVn
+                    ? "Bạn chưa có lịch tập cá nhân đang hoạt động để chỉnh sửa (lịch tập do huấn luyện viên giao chỉ có huấn luyện viên mới chỉnh sửa được)."
+                    : "You don't currently have an active personal workout plan to modify (coach-assigned plans can only be edited by your coach).";
+            return buildNonMutatingResult(UserAiWorkoutToolService.TOOL_ADD_EXERCISE_TO_WORKOUT, msg, targetDayOfWeek, "NO_PERSONAL_PLAN");
+        }
+
+        WorkoutPlan plan = planOpt.get();
+        List<WorkoutPlanDay> days = loadOrderedDays(plan);
+        WorkoutPlanDay destDay = findDay(days, targetDayOfWeek);
+        if (destDay == null) {
+            return buildNonMutatingResult(
+                    UserAiWorkoutToolService.TOOL_ADD_EXERCISE_TO_WORKOUT,
+                    isVn ? "Không tìm thấy ngày tập đã chọn trong lịch tập của bạn." : "Could not locate that workout day in your plan.",
+                    targetDayOfWeek,
+                    "DAY_NOT_FOUND"
+            );
+        }
+
+        List<WorkoutPlanExercise> destDayExercises = loadOrderedExercises(destDay);
+        Set<Long> destExistingIds = destDayExercises.stream()
+                .map(pe -> pe.getExercise() != null ? pe.getExercise().getId() : null)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+
+        Map<Long, List<String>> existingOtherDaysByExId = new LinkedHashMap<>();
+        Map<MuscleId, Double> weeklyMuscleSets = new EnumMap<>(MuscleId.class);
+        for (WorkoutPlanDay d : days) {
+            for (WorkoutPlanExercise pe : loadOrderedExercises(d)) {
+                if (pe.getExercise() == null) continue;
+                Long exId = pe.getExercise().getId();
+                if (!Objects.equals(d.getId(), destDay.getId()) && exId != null) {
+                    existingOtherDaysByExId.computeIfAbsent(exId, k -> new ArrayList<>())
+                            .add(formatDayLabel(d.getDayOfWeek(), isVn));
+                }
+                double sets = pe.getSets() != null && pe.getSets() > 0 ? pe.getSets() : 3.0;
+                MuscleTaxonomyService.ResolvedMuscleTargets resolved = MUSCLE_TAXONOMY_SERVICE.resolveTargets(pe.getExercise());
+                for (String pId : resolved.primaryMuscleIds()) {
+                    MuscleId.fromId(pId).ifPresent(m -> weeklyMuscleSets.merge(m, sets, Double::sum));
+                }
+                for (String sId : resolved.secondaryMuscleIds()) {
+                    MuscleId.fromId(sId).ifPresent(m -> weeklyMuscleSets.merge(m, sets * 0.5, Double::sum));
+                }
+            }
+        }
+
+        Map<Long, Exercise> catalogById = loadPublishedCatalog().stream()
+                .collect(Collectors.toMap(Exercise::getId, e -> e, (a, b) -> a));
+        PrescriptionInput effectiveOverride = overridePrescription != null
+                ? overridePrescription : new PrescriptionInput(null, null, null, null);
+
+        List<WorkoutPlanChangeOperation> ops = new ArrayList<>();
+        List<String> warnings = new ArrayList<>();
+        List<String> missingOrInvalid = new ArrayList<>();
+        Set<Long> dedupSelectedIds = new LinkedHashSet<>(exerciseIds);
+
+        for (Long exId : dedupSelectedIds) {
+            Exercise ex = exId != null ? catalogById.get(exId) : null;
+            if (ex == null) {
+                missingOrInvalid.add(String.valueOf(exId));
+                continue;
+            }
+            if (destExistingIds.contains(ex.getId())) {
+                warnings.add(ex.getName() + " is already scheduled on " + formatDayLabel(targetDayOfWeek, false) + " (skipped duplicate).");
+                continue;
+            }
+            List<String> otherDays = existingOtherDaysByExId.getOrDefault(ex.getId(), List.of());
+            if (!otherDays.isEmpty()) {
+                warnings.add(ex.getName() + " is already trained on " + String.join(", ", otherDays) + ".");
+            }
+            WorkoutPlanChangeOperation op = buildAddExerciseOp(destDay, ex, effectiveOverride, isVn);
+            int addedSets = op.getProposedValues() != null && op.getProposedValues().getSets() != null
+                    ? op.getProposedValues().getSets() : 3;
+            MuscleTaxonomyService.ResolvedMuscleTargets targets = MUSCLE_TAXONOMY_SERVICE.resolveTargets(ex);
+            for (String pId : targets.primaryMuscleIds()) {
+                Optional<MuscleId> mid = MuscleId.fromId(pId);
+                if (mid.isPresent()) {
+                    double nextTotal = weeklyMuscleSets.merge(mid.get(), (double) addedSets, Double::sum);
+                    if (nextTotal > 18.0) {
+                        warnings.add("High weekly volume warning: " + mid.get().getDisplayName()
+                                + " would reach " + Math.round(nextTotal) + " effective sets/week.");
+                        break;
+                    }
+                }
+            }
+            ops.add(op);
+        }
+
+        if (ops.isEmpty()) {
+            String msg;
+            String code;
+            if (!warnings.isEmpty()) {
+                msg = String.join(" ", warnings) + " No duplicate exercises were added.";
+                code = "ALREADY_EXISTS";
+            } else {
+                msg = "None of the selected exercises were found in the published exercise catalog (" + String.join(", ", missingOrInvalid) + ").";
+                code = "EXERCISE_NOT_FOUND";
+            }
+            return buildNonMutatingResult(UserAiWorkoutToolService.TOOL_ADD_EXERCISE_TO_WORKOUT, msg, targetDayOfWeek, code);
+        }
+
+        int resultingDayCount = destDayExercises.size() + ops.size();
+        if (resultingDayCount > 6) {
+            warnings.add(formatDayLabel(targetDayOfWeek, false) + " would have " + resultingDayCount
+                    + " exercises after this update — consider splitting volume if fatigue accumulates.");
+        }
+        if (destDay.isRestDay()) {
+            warnings.add(formatDayLabel(targetDayOfWeek, false) + " is currently a Rest Day and will become active if confirmed.");
+        }
+
+        StringBuilder explanationSb = new StringBuilder(buildBatchExplanation(ops, isVn));
+        if (!warnings.isEmpty()) {
+            List<String> distinctWarnings = warnings.stream().distinct().toList();
+            explanationSb.append("\n\n⚠️ **Heads-up**: ").append(String.join(" ", distinctWarnings));
+        }
+
+        String supersededId = supersedeActivePendingPreviews(
+                userId, conversationId, "Superseded by newer workout plan preview");
+        AiWorkoutPlanChangePreview saved = persistPendingPreview(
+                userId,
+                conversationId,
+                plan,
+                days,
+                ops,
+                explanationSb.toString(),
+                sourcePrompt != null ? sourcePrompt : ("Add selected exercises to " + targetDayOfWeek.name()),
+                1,
+                supersededId,
+                isVn
+        );
+
+        WorkoutPlanChangePreviewResponse previewDto = toPreviewResponse(saved, plan.getName(), supersededId, false);
+        String markdown = formatPreviewMarkdown(previewDto, isVn);
+        String metadataJson = buildPreviewMetadataJson(previewDto, UserAiWorkoutToolService.TOOL_ADD_EXERCISE_TO_WORKOUT);
+
+        return new UserAiWorkoutToolService.WorkoutToolResult(
+                UserAiWorkoutToolService.TOOL_ADD_EXERCISE_TO_WORKOUT,
                 false,
                 "WORKOUT_PLAN_PREVIEW",
                 true,
@@ -1360,6 +1530,32 @@ public class WorkoutPlanChangePreviewService {
         }
 
         PrescriptionInput parsedPrescription = parseExercisePrescription(prompt);
+
+        List<Exercise> multiListMatches = (explicitExerciseName == null || explicitExerciseName.isBlank())
+                ? extractMultipleExercisesFromList(publishedCatalog, prompt)
+                : List.of();
+        if (multiListMatches.size() > 1) {
+            List<WorkoutPlanChangeOperation> ops = new ArrayList<>();
+            List<String> skippedDupNames = new ArrayList<>();
+            for (Exercise ex : multiListMatches) {
+                if (existingByExerciseId.containsKey(ex.getId())) {
+                    skippedDupNames.add(ex.getName());
+                } else {
+                    ops.add(buildAddExerciseOp(destDay, ex, parsedPrescription, isVn));
+                }
+            }
+            if (ops.isEmpty()) {
+                String msg = "**" + String.join("**, **", skippedDupNames) + "** are already scheduled on **"
+                        + formatDayLabel(dayToModify, false) + "**. No duplicates were added.";
+                return errorBatch(UserAiWorkoutToolService.TOOL_ADD_EXERCISE_TO_WORKOUT, msg, dayToModify, "ALREADY_EXISTS");
+            }
+            String explanation = buildBatchExplanation(ops, isVn);
+            if (!skippedDupNames.isEmpty()) {
+                explanation += "\n\n⚠️ **Heads-up**: Skipped " + String.join(", ", skippedDupNames)
+                        + " (already scheduled on " + formatDayLabel(dayToModify, false) + ").";
+            }
+            return new PlannedBatch(true, ops, explanation, null, null);
+        }
 
         // Scenario D: Duplicate prevention (offer UPDATE only when user requested changes!)
         if (matchedExercise.isPresent()) {
@@ -3026,6 +3222,30 @@ public class WorkoutPlanChangePreviewService {
             }
         }
         return best != null ? Optional.of(best) : Optional.empty();
+    }
+
+    private List<Exercise> extractMultipleExercisesFromList(List<Exercise> catalog, String prompt) {
+        if (catalog == null || catalog.isEmpty() || prompt == null || prompt.isBlank()) {
+            return List.of();
+        }
+        if (!prompt.contains(",") && !prompt.toLowerCase(Locale.US).contains(" and ")
+                && !prompt.toLowerCase(Locale.US).contains(" và ")) {
+            return List.of();
+        }
+        String[] parts = prompt.split("(?i)(?:\\s*,\\s*|\\s+and\\s+|\\s+và\\s+)");
+        if (parts.length < 2) {
+            return List.of();
+        }
+        List<Exercise> matches = new ArrayList<>();
+        Set<Long> seenIds = new HashSet<>();
+        for (String part : parts) {
+            findBestMatchingExercise(catalog, part.trim()).ifPresent(ex -> {
+                if (seenIds.add(ex.getId())) {
+                    matches.add(ex);
+                }
+            });
+        }
+        return matches.size() > 1 ? matches : List.of();
     }
 
     private Optional<WorkoutPlanExercise> findBestMatchingPlanExercise(List<WorkoutPlanExercise> dayExercises, String query) {

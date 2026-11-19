@@ -7,6 +7,7 @@ import lombok.NoArgsConstructor;
 
 import java.math.BigDecimal;
 import java.time.ZonedDateTime;
+import java.util.ArrayList;
 import java.util.List;
 
 @Data
@@ -34,15 +35,18 @@ public class AdminUserDetailDossierResponse {
     private BigDecimal latestWeightKg;
     private BigDecimal latestBodyFatPercentage;
     private ZonedDateTime latestMeasurementAt;
-    private List<String> inferredAvailableEquipment;
+    @Builder.Default
+    private List<String> inferredAvailableEquipment = new ArrayList<>();
     private ZonedDateTime registeredAt;
     private CoachProfileSummary coachProfile;
     private AdminUserWorkoutHistoryResponse workoutSummary;
     private AdminUserPersonalRecordsResponse personalRecordsSummary;
     private AdminUserProgressResponse progressSummary;
     private AdminUserActivityResponse activitySummary;
-    private List<CoachRelationshipItem> coachRelationships;
-    private List<String> missingDataFields;
+    @Builder.Default
+    private List<CoachRelationshipItem> coachRelationships = new ArrayList<>();
+    @Builder.Default
+    private List<String> missingDataFields = new ArrayList<>();
 
     @Data
     @Builder

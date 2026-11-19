@@ -5,6 +5,7 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.util.ArrayList;
 import java.util.List;
 
 @Data
@@ -36,8 +37,12 @@ public class AdminGlobalUserStatisticsResponse {
     private long totalPersonalRecordsAllTime;
     private long newPersonalRecordsInRange;
     private long usersWithStalePrs30PlusDays;
-    private List<BucketCountDto> experienceLevelDistribution;
-    private List<BucketCountDto> activityStatusDistribution;
-    private List<BucketCountDto> topFitnessGoals;
-    private List<String> missingDataNotes;
+    @Builder.Default
+    private List<BucketCountDto> experienceLevelDistribution = new ArrayList<>();
+    @Builder.Default
+    private List<BucketCountDto> activityStatusDistribution = new ArrayList<>();
+    @Builder.Default
+    private List<BucketCountDto> topFitnessGoals = new ArrayList<>();
+    @Builder.Default
+    private List<String> missingDataNotes = new ArrayList<>();
 }

@@ -228,9 +228,15 @@ public class AdminAIService {
                 .intent(AdminAiIntent.BULK_EXERCISE_GENERATION.name())
                 .recommendations(Collections.emptyList())
                 .executedTools(List.of(execRecord))
+                .matchedUsers(Collections.emptyList())
+                .activeCampaigns(Collections.emptyList())
+                .proCandidates(Collections.emptyList())
+                .createdExercises(Collections.emptyList())
                 .bulkGenerationJob(latestJob)
+                .missingDataNotes(Collections.emptyList())
                 .suggestedFollowUps(buildSuggestedFollowUps(AdminAiIntent.BULK_EXERCISE_GENERATION, null))
-                .build();
+                .build()
+                .normalizeCollections();
 
         if (cleanIdempotencyKey != null) {
             requiresNewTx.executeWithoutResult(status -> persistIdempotencyRecord(admin, cleanIdempotencyKey, response));
@@ -458,10 +464,11 @@ public class AdminAIService {
         conversationService.updateTitleIfDefault(conversation, generateConversationTitle(userPrompt, intent));
 
         List<AdminExerciseResponse> createdDrafts = routedTools.exerciseDraftResult() != null
+                && routedTools.exerciseDraftResult().getCreatedExercises() != null
                 ? routedTools.exerciseDraftResult().getCreatedExercises()
-                : null;
+                : Collections.emptyList();
 
-        return returnAndCacheIdempotency(admin, cleanIdempotencyKey, AdminChatResponse.builder()
+        AdminChatResponse standardResponse = AdminChatResponse.builder()
                 .conversationId(conversation.getId())
                 .conversationTitle(conversation.getTitle())
                 .userMessage(conversationService.mapToMessageResponse(savedUserMsg))
@@ -486,15 +493,18 @@ public class AdminAIService {
                 .updatedProUser(routedTools.proToolResult() != null && routedTools.proToolResult().isExecuted()
                         ? routedTools.proToolResult().getTargetUser()
                         : null)
-                .proCandidates(routedTools.proToolResult() != null
+                .proCandidates(routedTools.proToolResult() != null && routedTools.proToolResult().getCandidates() != null
                         ? routedTools.proToolResult().getCandidates()
-                        : null)
+                        : Collections.emptyList())
                 .createdExercises(createdDrafts)
                 .exerciseDraftResult(routedTools.exerciseDraftResult())
                 .bulkGenerationJob(routedTools.bulkGenerationJob())
                 .missingDataNotes(routedTools.missingDataNotes())
                 .suggestedFollowUps(followUps)
-                .build());
+                .build()
+                .normalizeCollections();
+
+        return returnAndCacheIdempotency(admin, cleanIdempotencyKey, standardResponse);
     }
 
     private AdminChatResponse returnAndCacheIdempotency(
@@ -512,7 +522,8 @@ public class AdminAIService {
         return idempotencyRepository.findByAdminUserIdAndIdempotencyKey(adminUserId, cleanKey)
                 .flatMap(entry -> {
                     try {
-                        AdminChatResponse parsed = objectMapper.readValue(entry.getResponseJson(), AdminChatResponse.class);
+                        AdminChatResponse parsed = objectMapper.readValue(entry.getResponseJson(), AdminChatResponse.class)
+                                .normalizeCollections();
                         if (parsed.getBulkGenerationJob() != null && parsed.getBulkGenerationJob().getId() != null) {
                             conversationService.requireAdminUser(adminUserId);
                             User admin = conversationService.requireAdminUser(adminUserId);

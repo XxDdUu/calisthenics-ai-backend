@@ -6,6 +6,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.time.ZonedDateTime;
+import java.util.ArrayList;
 import java.util.List;
 
 @Data
@@ -33,7 +34,8 @@ public class BulkExerciseGenerationJobResponse {
     private boolean summaryPosted;
     private boolean canResume;
     private String statusMessage;
-    private List<String> skippedDuplicateSamples;
+    @Builder.Default
+    private List<String> skippedDuplicateSamples = new ArrayList<>();
     private ZonedDateTime createdAt;
     private ZonedDateTime startedAt;
     private ZonedDateTime completedAt;

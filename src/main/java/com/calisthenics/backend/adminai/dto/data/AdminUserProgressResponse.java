@@ -8,6 +8,7 @@ import lombok.NoArgsConstructor;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.ZonedDateTime;
+import java.util.ArrayList;
 import java.util.List;
 
 @Data
@@ -23,11 +24,16 @@ public class AdminUserProgressResponse {
     private long previousPeriodWorkouts;
     private Double workoutVolumeDeltaPercent;
     private String consistencyTrend;
-    private List<PeriodPointDto> weeklySessionCounts;
-    private List<ExercisePerformanceItem> exercisePerformance;
-    private List<StrengthProgressionItem> strengthProgression;
-    private List<BodyMeasurementPointDto> bodyMetricTrends;
-    private List<String> missingDataNotes;
+    @Builder.Default
+    private List<PeriodPointDto> weeklySessionCounts = new ArrayList<>();
+    @Builder.Default
+    private List<ExercisePerformanceItem> exercisePerformance = new ArrayList<>();
+    @Builder.Default
+    private List<StrengthProgressionItem> strengthProgression = new ArrayList<>();
+    @Builder.Default
+    private List<BodyMeasurementPointDto> bodyMetricTrends = new ArrayList<>();
+    @Builder.Default
+    private List<String> missingDataNotes = new ArrayList<>();
 
     @Data
     @Builder

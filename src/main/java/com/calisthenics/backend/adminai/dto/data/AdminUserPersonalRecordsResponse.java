@@ -7,6 +7,7 @@ import lombok.NoArgsConstructor;
 
 import java.math.BigDecimal;
 import java.time.ZonedDateTime;
+import java.util.ArrayList;
 import java.util.List;
 
 @Data
@@ -25,9 +26,12 @@ public class AdminUserPersonalRecordsResponse {
     private Long daysSinceLastPr;
     private long sharedPrCount;
     private long coachFeedbackCount;
-    private List<PersonalRecordItem> records;
-    private List<SharedPrItem> sharingAndFeedbackHistory;
-    private List<String> missingDataNotes;
+    @Builder.Default
+    private List<PersonalRecordItem> records = new ArrayList<>();
+    @Builder.Default
+    private List<SharedPrItem> sharingAndFeedbackHistory = new ArrayList<>();
+    @Builder.Default
+    private List<String> missingDataNotes = new ArrayList<>();
 
     @Data
     @Builder

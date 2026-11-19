@@ -22,6 +22,8 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 @Data
@@ -34,27 +36,48 @@ public class AdminChatResponse {
     private AdminMessageResponse userMessage;
     private AdminMessageResponse assistantMessage;
     private String intent;
-    private List<AdminRecommendationResponse> recommendations;
+    @Builder.Default
+    private List<AdminRecommendationResponse> recommendations = new ArrayList<>();
     private AdminPlatformOverviewResponse platformOverview;
     private AdminTrainingAnalyticsResponse trainingAnalytics;
-    private List<AdminToolExecutionRecord> executedTools;
+    @Builder.Default
+    private List<AdminToolExecutionRecord> executedTools = new ArrayList<>();
     private AdminTimeRangeMetadata timeRangeUsed;
     private AdminGlobalUserStatisticsResponse userStatistics;
-    private List<AdminGlobalUserSummaryDto> matchedUsers;
+    @Builder.Default
+    private List<AdminGlobalUserSummaryDto> matchedUsers = new ArrayList<>();
     private AdminUserDetailDossierResponse inspectedUserDetail;
     private AdminUserSegmentsResponse segmentAnalysis;
     private AdminPlatformEngagementResponse platformEngagement;
     private AdminCoachClientStatisticsResponse coachClientStatistics;
     private GettingStartedProgramResponse gettingStartedProgram;
     private GettingStartedProgramPreviewResponse gettingStartedPreview;
-    private List<GettingStartedCampaignSummaryResponse> activeCampaigns;
+    @Builder.Default
+    private List<GettingStartedCampaignSummaryResponse> activeCampaigns = new ArrayList<>();
     private GettingStartedCampaignAnalyticsResponse campaignAnalytics;
     private AdminPendingConfirmationResponse pendingConfirmation;
     private AdminUserResponse updatedProUser;
-    private List<AdminUserResponse> proCandidates;
-    private List<AdminExerciseResponse> createdExercises;
+    @Builder.Default
+    private List<AdminUserResponse> proCandidates = new ArrayList<>();
+    @Builder.Default
+    private List<AdminExerciseResponse> createdExercises = new ArrayList<>();
     private ExerciseDraftBatchResultResponse exerciseDraftResult;
     private BulkExerciseGenerationJobResponse bulkGenerationJob;
-    private List<String> missingDataNotes;
-    private List<String> suggestedFollowUps;
+    @Builder.Default
+    private List<String> missingDataNotes = new ArrayList<>();
+    @Builder.Default
+    private List<String> suggestedFollowUps = new ArrayList<>();
+
+    /** Ensures collection fields are never null on serialization even when built from partial tool state or cached JSON. */
+    public AdminChatResponse normalizeCollections() {
+        if (recommendations == null) recommendations = Collections.emptyList();
+        if (executedTools == null) executedTools = Collections.emptyList();
+        if (matchedUsers == null) matchedUsers = Collections.emptyList();
+        if (activeCampaigns == null) activeCampaigns = Collections.emptyList();
+        if (proCandidates == null) proCandidates = Collections.emptyList();
+        if (createdExercises == null) createdExercises = Collections.emptyList();
+        if (missingDataNotes == null) missingDataNotes = Collections.emptyList();
+        if (suggestedFollowUps == null) suggestedFollowUps = Collections.emptyList();
+        return this;
+    }
 }

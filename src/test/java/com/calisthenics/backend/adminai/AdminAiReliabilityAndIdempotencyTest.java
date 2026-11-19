@@ -260,4 +260,45 @@ class AdminAiReliabilityAndIdempotencyTest {
                         .content(objectMapper.writeValueAsString(bulkReq)))
                 .andExpect(status().isForbidden());
     }
+
+    @Test
+    @DisplayName("Exercise generation prompts serialize non-null JSON arrays across all AdminChatResponse collection fields")
+    void exerciseGenerationPrompts_neverEmitNullCollectionFields() throws Exception {
+        List<String> prompts = List.of(
+                "generate 10 exercise for handstand push up",
+                "generate 5 exercises for planche",
+                "generate 10 exercises for front lever",
+                "generate exercises for handstand push up",
+                "generate 5 exercises with gymnastic rings"
+        );
+
+        for (int i = 0; i < prompts.size(); i++) {
+            String prompt = prompts.get(i);
+            AdminChatRequest req = AdminChatRequest.builder()
+                    .message(prompt)
+                    .idempotencyKey("prompt-regression-" + i)
+                    .build();
+
+            MvcResult res = mockMvc.perform(post("/api/v1/admin/ai/chat")
+                            .header("Authorization", "Bearer " + adminToken)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(objectMapper.writeValueAsString(req)))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.recommendations").isArray())
+                    .andExpect(jsonPath("$.executedTools").isArray())
+                    .andExpect(jsonPath("$.matchedUsers").isArray())
+                    .andExpect(jsonPath("$.activeCampaigns").isArray())
+                    .andExpect(jsonPath("$.proCandidates").isArray())
+                    .andExpect(jsonPath("$.createdExercises").isArray())
+                    .andExpect(jsonPath("$.missingDataNotes").isArray())
+                    .andExpect(jsonPath("$.suggestedFollowUps").isArray())
+                    .andReturn();
+
+            JsonNode root = objectMapper.readTree(res.getResponse().getContentAsString());
+            assertThat(root.get("assistantMessage").get("content").asText()).isNotBlank();
+            assertThat(root.get("activeCampaigns").isArray()).isTrue();
+            assertThat(root.get("proCandidates").isArray()).isTrue();
+            assertThat(root.get("createdExercises").isArray()).isTrue();
+        }
+    }
 }

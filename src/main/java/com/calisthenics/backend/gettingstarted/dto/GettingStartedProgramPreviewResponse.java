@@ -6,6 +6,7 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.util.ArrayList;
 import java.util.List;
 
 @Data
@@ -15,7 +16,8 @@ import java.util.List;
 public class GettingStartedProgramPreviewResponse {
     private GettingStartedProgramResponse program;
     private boolean valid;
-    private List<String> validationErrors;
+    @Builder.Default
+    private List<String> validationErrors = new ArrayList<>();
     private TargetAudience targetAudience;
     private String audienceLabel;
     private long eligibleAthleteCount;

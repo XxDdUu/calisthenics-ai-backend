@@ -7,6 +7,8 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -20,15 +22,22 @@ public class AdminTrainingAnalyticsResponse {
     private LocalDate startDate;
     private LocalDate endDate;
 
-    private List<ExerciseUsageStatDto> mostPerformedExercises;
-    private List<ExerciseUsageStatDto> highestCompletionRateExercises;
-    private List<SkillFocusStatDto> skillFocusBreakdown;
-    private List<GoalStatDto> commonTrainingGoals;
+    @Builder.Default
+    private List<ExerciseUsageStatDto> mostPerformedExercises = new ArrayList<>();
+    @Builder.Default
+    private List<ExerciseUsageStatDto> highestCompletionRateExercises = new ArrayList<>();
+    @Builder.Default
+    private List<SkillFocusStatDto> skillFocusBreakdown = new ArrayList<>();
+    @Builder.Default
+    private List<GoalStatDto> commonTrainingGoals = new ArrayList<>();
     private InactiveUsersSummaryDto inactiveUsersSummary;
     private PlanAdherenceSummaryDto planAdherenceSummary;
-    private List<ProgramEngagementStatDto> topEngagedPrograms;
-    private Map<String, Long> exerciseLibraryByCategory;
-    private Map<String, Long> exerciseLibraryByDifficulty;
+    @Builder.Default
+    private List<ProgramEngagementStatDto> topEngagedPrograms = new ArrayList<>();
+    @Builder.Default
+    private Map<String, Long> exerciseLibraryByCategory = new LinkedHashMap<>();
+    @Builder.Default
+    private Map<String, Long> exerciseLibraryByDifficulty = new LinkedHashMap<>();
 
     @Data
     @Builder
@@ -57,7 +66,8 @@ public class AdminTrainingAnalyticsResponse {
         private long sessionPerformancesCount;
         private long prCount;
         private long interestedUsersCount;
-        private List<String> missingProgressions;
+        @Builder.Default
+        private List<String> missingProgressions = new ArrayList<>();
     }
 
     @Data
@@ -80,7 +90,8 @@ public class AdminTrainingAnalyticsResponse {
         private long inactiveOver30DaysCount;
         private long neverCompletedWorkoutCount;
         private double inactiveRatePercent;
-        private List<InactiveUserItemDto> inactiveUserSamples;
+        @Builder.Default
+        private List<InactiveUserItemDto> inactiveUserSamples = new ArrayList<>();
     }
 
     @Data

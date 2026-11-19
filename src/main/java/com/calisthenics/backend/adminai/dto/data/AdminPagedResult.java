@@ -5,6 +5,7 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.util.ArrayList;
 import java.util.List;
 
 @Data
@@ -12,7 +13,8 @@ import java.util.List;
 @NoArgsConstructor
 @AllArgsConstructor
 public class AdminPagedResult<T> {
-    private List<T> items;
+    @Builder.Default
+    private List<T> items = new ArrayList<>();
     private int page;
     private int size;
     private long totalElements;
@@ -20,5 +22,6 @@ public class AdminPagedResult<T> {
     private boolean hasNext;
     private boolean hasPrevious;
     private AdminTimeRangeMetadata timeRange;
-    private List<String> missingDataNotes;
+    @Builder.Default
+    private List<String> missingDataNotes = new ArrayList<>();
 }

@@ -10,6 +10,7 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.util.ArrayList;
 import java.util.List;
 
 @Data
@@ -24,6 +25,7 @@ public class AdminConfirmationDecisionResponse {
     private String reply;
     private AdminToolExecutionRecord execution;
     private GettingStartedProgramResponse gettingStartedProgram;
-    private List<GettingStartedCampaignSummaryResponse> activeCampaigns;
+    @Builder.Default
+    private List<GettingStartedCampaignSummaryResponse> activeCampaigns = new ArrayList<>();
     private AdminUserResponse updatedUser;
 }
