@@ -1,0 +1,588 @@
+{
+  "schemaVersion": "1.0.0",
+  "viewBox": "0 0 400 840",
+  "canvasWidth": 400,
+  "canvasHeight": 840,
+  "centerAxisX": 200,
+  "lateralOrientation": "VIEWER_PERSPECTIVE",
+  "views": {
+    "FRONT": {
+      "assetFile": "anatomy_front.svg",
+      "viewBox": "0 0 400 840",
+      "muscleCount": 13,
+      "pathCount": 26,
+      "muscleIds": [
+        "chest",
+        "front_deltoids",
+        "lateral_deltoids",
+        "biceps",
+        "forearms",
+        "upper_trapezius",
+        "latissimus_dorsi",
+        "rectus_abdominis",
+        "obliques",
+        "transverse_abdominis",
+        "quadriceps",
+        "adductors",
+        "calves"
+      ]
+    },
+    "BACK": {
+      "assetFile": "anatomy_back.svg",
+      "viewBox": "0 0 400 840",
+      "muscleCount": 14,
+      "pathCount": 28,
+      "muscleIds": [
+        "lateral_deltoids",
+        "rear_deltoids",
+        "triceps",
+        "forearms",
+        "upper_trapezius",
+        "middle_trapezius",
+        "lower_trapezius",
+        "latissimus_dorsi",
+        "teres_major",
+        "rhomboids",
+        "erector_spinae",
+        "glutes",
+        "hamstrings",
+        "calves"
+      ]
+    }
+  },
+  "muscles": [
+    {
+      "id": "chest",
+      "displayName": "Chest",
+      "scientificName": "Pectoralis major",
+      "region": "UPPER_BODY",
+      "primaryView": "FRONT",
+      "views": [
+        "FRONT"
+      ],
+      "svgGroupId": "muscle_chest",
+      "svgElementIds": [
+        "chest_left",
+        "chest_right"
+      ],
+      "aliases": [
+        "chest",
+        "pectorals",
+        "pecs",
+        "pec",
+        "pectoralis major",
+        "upper chest",
+        "lower chest",
+        "inner chest"
+      ],
+      "displayOrder": 1
+    },
+    {
+      "id": "front_deltoids",
+      "displayName": "Front Deltoids",
+      "scientificName": "Deltoideus (pars clavicularis)",
+      "region": "UPPER_BODY",
+      "primaryView": "FRONT",
+      "views": [
+        "FRONT"
+      ],
+      "svgGroupId": "muscle_front_deltoids",
+      "svgElementIds": [
+        "front_deltoids_left",
+        "front_deltoids_right"
+      ],
+      "aliases": [
+        "front_deltoids",
+        "front deltoids",
+        "front delts",
+        "anterior deltoids",
+        "anterior delts",
+        "anterior deltoid",
+        "front shoulder",
+        "shoulders"
+      ],
+      "displayOrder": 2
+    },
+    {
+      "id": "lateral_deltoids",
+      "displayName": "Lateral Deltoids",
+      "scientificName": "Deltoideus (pars acromialis)",
+      "region": "UPPER_BODY",
+      "primaryView": "FRONT",
+      "views": [
+        "FRONT",
+        "BACK"
+      ],
+      "svgGroupId": "muscle_lateral_deltoids",
+      "svgElementIds": [
+        "lateral_deltoids_left",
+        "lateral_deltoids_right"
+      ],
+      "aliases": [
+        "lateral_deltoids",
+        "lateral deltoids",
+        "lateral delts",
+        "side deltoids",
+        "side delts",
+        "medial deltoids",
+        "medial delts",
+        "middle deltoids"
+      ],
+      "displayOrder": 3
+    },
+    {
+      "id": "rear_deltoids",
+      "displayName": "Rear Deltoids",
+      "scientificName": "Deltoideus (pars spinalis)",
+      "region": "UPPER_BODY",
+      "primaryView": "BACK",
+      "views": [
+        "BACK"
+      ],
+      "svgGroupId": "muscle_rear_deltoids",
+      "svgElementIds": [
+        "rear_deltoids_left",
+        "rear_deltoids_right"
+      ],
+      "aliases": [
+        "rear_deltoids",
+        "rear deltoids",
+        "rear delts",
+        "posterior deltoids",
+        "posterior delts",
+        "posterior deltoid",
+        "rear shoulder"
+      ],
+      "displayOrder": 4
+    },
+    {
+      "id": "biceps",
+      "displayName": "Biceps",
+      "scientificName": "Biceps brachii",
+      "region": "UPPER_BODY",
+      "primaryView": "FRONT",
+      "views": [
+        "FRONT"
+      ],
+      "svgGroupId": "muscle_biceps",
+      "svgElementIds": [
+        "biceps_left",
+        "biceps_right"
+      ],
+      "aliases": [
+        "biceps",
+        "biceps brachii",
+        "bicep",
+        "brachialis",
+        "arms"
+      ],
+      "displayOrder": 5
+    },
+    {
+      "id": "triceps",
+      "displayName": "Triceps",
+      "scientificName": "Triceps brachii",
+      "region": "UPPER_BODY",
+      "primaryView": "BACK",
+      "views": [
+        "BACK"
+      ],
+      "svgGroupId": "muscle_triceps",
+      "svgElementIds": [
+        "triceps_left",
+        "triceps_right"
+      ],
+      "aliases": [
+        "triceps",
+        "triceps brachii",
+        "tricep",
+        "back of arms"
+      ],
+      "displayOrder": 6
+    },
+    {
+      "id": "forearms",
+      "displayName": "Forearms",
+      "scientificName": "Antebrachial flexors and extensors",
+      "region": "UPPER_BODY",
+      "primaryView": "FRONT",
+      "views": [
+        "FRONT",
+        "BACK"
+      ],
+      "svgGroupId": "muscle_forearms",
+      "svgElementIds": [
+        "forearms_left",
+        "forearms_right"
+      ],
+      "aliases": [
+        "forearms",
+        "forearm",
+        "wrist extensors",
+        "wrist flexors",
+        "brachioradialis",
+        "grip",
+        "grips",
+        "wrists"
+      ],
+      "displayOrder": 7
+    },
+    {
+      "id": "upper_trapezius",
+      "displayName": "Upper Trapezius",
+      "scientificName": "Trapezius (pars descendens)",
+      "region": "UPPER_BODY",
+      "primaryView": "BACK",
+      "views": [
+        "FRONT",
+        "BACK"
+      ],
+      "svgGroupId": "muscle_upper_trapezius",
+      "svgElementIds": [
+        "upper_trapezius_left",
+        "upper_trapezius_right"
+      ],
+      "aliases": [
+        "upper_trapezius",
+        "upper trapezius",
+        "upper traps",
+        "traps",
+        "trapezius"
+      ],
+      "displayOrder": 8
+    },
+    {
+      "id": "middle_trapezius",
+      "displayName": "Middle Trapezius",
+      "scientificName": "Trapezius (pars transversa)",
+      "region": "UPPER_BODY",
+      "primaryView": "BACK",
+      "views": [
+        "BACK"
+      ],
+      "svgGroupId": "muscle_middle_trapezius",
+      "svgElementIds": [
+        "middle_trapezius_left",
+        "middle_trapezius_right"
+      ],
+      "aliases": [
+        "middle_trapezius",
+        "middle trapezius",
+        "middle traps",
+        "mid traps",
+        "mid trapezius"
+      ],
+      "displayOrder": 9
+    },
+    {
+      "id": "lower_trapezius",
+      "displayName": "Lower Trapezius",
+      "scientificName": "Trapezius (pars ascendens)",
+      "region": "UPPER_BODY",
+      "primaryView": "BACK",
+      "views": [
+        "BACK"
+      ],
+      "svgGroupId": "muscle_lower_trapezius",
+      "svgElementIds": [
+        "lower_trapezius_left",
+        "lower_trapezius_right"
+      ],
+      "aliases": [
+        "lower_trapezius",
+        "lower trapezius",
+        "lower traps",
+        "low traps"
+      ],
+      "displayOrder": 10
+    },
+    {
+      "id": "latissimus_dorsi",
+      "displayName": "Latissimus Dorsi",
+      "scientificName": "Latissimus dorsi",
+      "region": "UPPER_BODY",
+      "primaryView": "BACK",
+      "views": [
+        "FRONT",
+        "BACK"
+      ],
+      "svgGroupId": "muscle_latissimus_dorsi",
+      "svgElementIds": [
+        "latissimus_dorsi_left",
+        "latissimus_dorsi_right"
+      ],
+      "aliases": [
+        "latissimus_dorsi",
+        "latissimus dorsi",
+        "lats",
+        "lat",
+        "wings"
+      ],
+      "displayOrder": 11
+    },
+    {
+      "id": "teres_major",
+      "displayName": "Teres Major",
+      "scientificName": "Teres major",
+      "region": "UPPER_BODY",
+      "primaryView": "BACK",
+      "views": [
+        "BACK"
+      ],
+      "svgGroupId": "muscle_teres_major",
+      "svgElementIds": [
+        "teres_major_left",
+        "teres_major_right"
+      ],
+      "aliases": [
+        "teres_major",
+        "teres major",
+        "teres",
+        "upper lats"
+      ],
+      "displayOrder": 12
+    },
+    {
+      "id": "rhomboids",
+      "displayName": "Rhomboids",
+      "scientificName": "Rhomboideus major et minor",
+      "region": "UPPER_BODY",
+      "primaryView": "BACK",
+      "views": [
+        "BACK"
+      ],
+      "svgGroupId": "muscle_rhomboids",
+      "svgElementIds": [
+        "rhomboids_left",
+        "rhomboids_right"
+      ],
+      "aliases": [
+        "rhomboids",
+        "rhomboid",
+        "scapula",
+        "scapular retractors",
+        "upper back"
+      ],
+      "displayOrder": 13
+    },
+    {
+      "id": "erector_spinae",
+      "displayName": "Erector Spinae",
+      "scientificName": "Erector spinae",
+      "region": "CORE",
+      "primaryView": "BACK",
+      "views": [
+        "BACK"
+      ],
+      "svgGroupId": "muscle_erector_spinae",
+      "svgElementIds": [
+        "erector_spinae_left",
+        "erector_spinae_right"
+      ],
+      "aliases": [
+        "erector_spinae",
+        "erector spinae",
+        "erectors",
+        "lower back",
+        "spinal erectors",
+        "lumbar"
+      ],
+      "displayOrder": 14
+    },
+    {
+      "id": "rectus_abdominis",
+      "displayName": "Rectus Abdominis",
+      "scientificName": "Rectus abdominis",
+      "region": "CORE",
+      "primaryView": "FRONT",
+      "views": [
+        "FRONT"
+      ],
+      "svgGroupId": "muscle_rectus_abdominis",
+      "svgElementIds": [
+        "rectus_abdominis_left",
+        "rectus_abdominis_right"
+      ],
+      "aliases": [
+        "rectus_abdominis",
+        "rectus abdominis",
+        "abs",
+        "abdominals",
+        "six pack",
+        "core",
+        "upper abs",
+        "lower abs"
+      ],
+      "displayOrder": 15
+    },
+    {
+      "id": "obliques",
+      "displayName": "Obliques",
+      "scientificName": "Obliquus externus et internus abdominis",
+      "region": "CORE",
+      "primaryView": "FRONT",
+      "views": [
+        "FRONT"
+      ],
+      "svgGroupId": "muscle_obliques",
+      "svgElementIds": [
+        "obliques_left",
+        "obliques_right"
+      ],
+      "aliases": [
+        "obliques",
+        "oblique",
+        "side abs",
+        "external obliques",
+        "internal obliques"
+      ],
+      "displayOrder": 16
+    },
+    {
+      "id": "transverse_abdominis",
+      "displayName": "Transverse Abdominis",
+      "scientificName": "Transversus abdominis",
+      "region": "CORE",
+      "primaryView": "FRONT",
+      "views": [
+        "FRONT"
+      ],
+      "svgGroupId": "muscle_transverse_abdominis",
+      "svgElementIds": [
+        "transverse_abdominis_left",
+        "transverse_abdominis_right"
+      ],
+      "aliases": [
+        "transverse_abdominis",
+        "transverse abdominis",
+        "transversus abdominis",
+        "transverse abs",
+        "tva",
+        "deep core",
+        "lower core"
+      ],
+      "displayOrder": 17
+    },
+    {
+      "id": "glutes",
+      "displayName": "Glutes",
+      "scientificName": "Gluteus maximus et medius",
+      "region": "LOWER_BODY",
+      "primaryView": "BACK",
+      "views": [
+        "BACK"
+      ],
+      "svgGroupId": "muscle_glutes",
+      "svgElementIds": [
+        "glutes_left",
+        "glutes_right"
+      ],
+      "aliases": [
+        "glutes",
+        "glute",
+        "gluteus maximus",
+        "gluteus medius",
+        "buttocks",
+        "hips"
+      ],
+      "displayOrder": 18
+    },
+    {
+      "id": "quadriceps",
+      "displayName": "Quadriceps",
+      "scientificName": "Quadriceps femoris",
+      "region": "LOWER_BODY",
+      "primaryView": "FRONT",
+      "views": [
+        "FRONT"
+      ],
+      "svgGroupId": "muscle_quadriceps",
+      "svgElementIds": [
+        "quadriceps_left",
+        "quadriceps_right"
+      ],
+      "aliases": [
+        "quadriceps",
+        "quads",
+        "quad",
+        "quadriceps femoris",
+        "front thighs",
+        "thighs"
+      ],
+      "displayOrder": 19
+    },
+    {
+      "id": "hamstrings",
+      "displayName": "Hamstrings",
+      "scientificName": "Biceps femoris, semitendinosus, semimembranosus",
+      "region": "LOWER_BODY",
+      "primaryView": "BACK",
+      "views": [
+        "BACK"
+      ],
+      "svgGroupId": "muscle_hamstrings",
+      "svgElementIds": [
+        "hamstrings_left",
+        "hamstrings_right"
+      ],
+      "aliases": [
+        "hamstrings",
+        "hamstring",
+        "hams",
+        "posterior thigh",
+        "back thighs",
+        "biceps femoris"
+      ],
+      "displayOrder": 20
+    },
+    {
+      "id": "adductors",
+      "displayName": "Hip Adductors",
+      "scientificName": "Adductor longus, brevis, magnus, gracilis",
+      "region": "LOWER_BODY",
+      "primaryView": "FRONT",
+      "views": [
+        "FRONT"
+      ],
+      "svgGroupId": "muscle_adductors",
+      "svgElementIds": [
+        "adductors_left",
+        "adductors_right"
+      ],
+      "aliases": [
+        "adductors",
+        "adductor",
+        "hip adductors",
+        "inner thighs",
+        "inner thigh",
+        "groin"
+      ],
+      "displayOrder": 21
+    },
+    {
+      "id": "calves",
+      "displayName": "Calves",
+      "scientificName": "Gastrocnemius et soleus",
+      "region": "LOWER_BODY",
+      "primaryView": "BACK",
+      "views": [
+        "FRONT",
+        "BACK"
+      ],
+      "svgGroupId": "muscle_calves",
+      "svgElementIds": [
+        "calves_left",
+        "calves_right"
+      ],
+      "aliases": [
+        "calves",
+        "calf",
+        "gastrocnemius",
+        "soleus",
+        "lower legs",
+        "shins"
+      ],
+      "displayOrder": 22
+    }
+  ]
+}

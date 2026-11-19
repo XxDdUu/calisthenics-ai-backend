@@ -2,7 +2,8 @@ package com.calisthenics.backend.exercise;
 
 import com.calisthenics.backend.exercise.dto.CreateExerciseRequest;
 import com.calisthenics.backend.exercise.dto.ExerciseResponse;
-import lombok.RequiredArgsConstructor;
+import com.calisthenics.backend.exercise.muscle.MuscleTaxonomyService;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -12,10 +13,20 @@ import java.util.List;
 import java.util.stream.Collectors;
 
 @Service
-@RequiredArgsConstructor
 public class ExerciseService {
 
     private final ExerciseRepository exerciseRepository;
+    private final MuscleTaxonomyService muscleTaxonomyService;
+
+    public ExerciseService(ExerciseRepository exerciseRepository) {
+        this(exerciseRepository, new MuscleTaxonomyService());
+    }
+
+    @Autowired
+    public ExerciseService(ExerciseRepository exerciseRepository, MuscleTaxonomyService muscleTaxonomyService) {
+        this.exerciseRepository = exerciseRepository;
+        this.muscleTaxonomyService = muscleTaxonomyService != null ? muscleTaxonomyService : new MuscleTaxonomyService();
+    }
 
     @Transactional(readOnly = true)
     public List<ExerciseResponse> getAllExercises() {
@@ -64,11 +75,17 @@ public class ExerciseService {
                 .active(true)
                 .build();
 
+        if (request.getPrimaryMuscles() != null || request.getSecondaryMuscleIds() != null) {
+            muscleTaxonomyService.syncExerciseMuscleTargets(
+                    exercise, request.getPrimaryMuscles(), request.getSecondaryMuscleIds());
+        }
+
         Exercise saved = exerciseRepository.save(exercise);
         return mapToResponse(saved);
     }
 
     public ExerciseResponse mapToResponse(Exercise exercise) {
+        MuscleTaxonomyService.ResolvedMuscleTargets resolvedMuscles = muscleTaxonomyService.resolveTargets(exercise);
         return ExerciseResponse.builder()
                 .id(exercise.getId())
                 .name(exercise.getName())
@@ -94,6 +111,10 @@ public class ExerciseService {
                 .commonMistakes(exercise.getCommonMistakes())
                 .safetyConsiderations(exercise.getSafetyConsiderations())
                 .progressionNotes(exercise.getProgressionNotes())
+                .primaryMuscles(resolvedMuscles.primaryMuscleIds())
+                .primaryMuscleIds(resolvedMuscles.primaryMuscleIds())
+                .secondaryMuscleIds(resolvedMuscles.secondaryMuscleIds())
+                .muscleTargets(resolvedMuscles.muscleTargets())
                 .build();
     }
 }

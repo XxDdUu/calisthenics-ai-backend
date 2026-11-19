@@ -44,6 +44,8 @@ public class WeeklyAnalyticsResponse {
     @Builder.Default
     private Map<String, Integer> dailyWorkouts = new HashMap<>();
 
+    private WeeklyMuscleAnalyticsResponse muscleMap;
+
     @JsonProperty("totalWorkouts")
     public long getTotalWorkouts() {
         return currentWeekWorkouts;

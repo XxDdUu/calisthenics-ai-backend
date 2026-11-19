@@ -39,6 +39,15 @@ public class TrainingAnalyticsController {
         return ResponseEntity.ok(analyticsService.getWeeklyAnalytics(currentUser.getId(), timezone));
     }
 
+    @GetMapping("/api/v1/analytics/muscle-map")
+    @Operation(summary = "Get weekly muscle volume distribution and heatmap analytics")
+    public ResponseEntity<WeeklyMuscleAnalyticsResponse> getWeeklyMuscleAnalytics(
+            @AuthenticationPrincipal UserPrincipal currentUser,
+            @RequestParam(defaultValue = "0") int weekOffset,
+            @RequestHeader(value = "X-Timezone", required = false) String timezone) {
+        return ResponseEntity.ok(analyticsService.getWeeklyMuscleAnalytics(currentUser.getId(), weekOffset, timezone));
+    }
+
     @GetMapping("/api/v1/analytics/monthly")
     @Operation(summary = "Get current vs previous month training analytics")
     public ResponseEntity<MonthlyAnalyticsResponse> getMonthlyAnalytics(

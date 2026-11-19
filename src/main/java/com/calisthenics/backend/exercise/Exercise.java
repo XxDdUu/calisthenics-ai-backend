@@ -1,7 +1,9 @@
 package com.calisthenics.backend.exercise;
 
+import com.calisthenics.backend.exercise.muscle.ExerciseMuscleTarget;
 import jakarta.persistence.*;
 import lombok.*;
+import org.hibernate.annotations.BatchSize;
 import org.hibernate.annotations.CreationTimestamp;
 
 import java.time.ZonedDateTime;
@@ -102,6 +104,12 @@ public class Exercise {
     @OrderBy("displayOrder ASC, id ASC")
     @Builder.Default
     private List<ExerciseMediaItem> mediaItems = new ArrayList<>();
+
+    @OneToMany(mappedBy = "exercise", cascade = CascadeType.ALL, orphanRemoval = true)
+    @OrderBy("displayOrder ASC, id ASC")
+    @BatchSize(size = 50)
+    @Builder.Default
+    private List<ExerciseMuscleTarget> muscleTargetMappings = new ArrayList<>();
 
     @CreationTimestamp
     @Column(name = "created_at", updatable = false)

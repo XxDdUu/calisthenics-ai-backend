@@ -5,6 +5,7 @@ import com.calisthenics.backend.exercise.ExerciseCategory;
 import com.calisthenics.backend.exercise.ExerciseOrigin;
 import com.calisthenics.backend.exercise.ExerciseStatus;
 import com.calisthenics.backend.exercise.ExerciseTrainingType;
+import com.calisthenics.backend.exercise.muscle.ExerciseMuscleTargetDto;
 import java.util.List;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -41,4 +42,8 @@ public class ExerciseResponse {
     private String commonMistakes;
     private String safetyConsiderations;
     private String progressionNotes;
+    private List<String> primaryMuscles;
+    private List<String> primaryMuscleIds;
+    private List<String> secondaryMuscleIds;
+    private List<ExerciseMuscleTargetDto> muscleTargets;
 }

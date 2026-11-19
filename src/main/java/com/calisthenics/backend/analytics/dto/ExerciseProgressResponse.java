@@ -1,5 +1,6 @@
 package com.calisthenics.backend.analytics.dto;
 
+import com.calisthenics.backend.exercise.muscle.ExerciseMuscleTargetDto;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -18,6 +19,19 @@ public class ExerciseProgressResponse {
     private Long exerciseId;
     private String exerciseName;
     private String category;
+    private String difficulty;
+    private String description;
+    private String instructions;
+    private String targetMuscles;
+    private String secondaryMuscles;
+    @Builder.Default
+    private List<String> primaryMuscles = new ArrayList<>();
+    @Builder.Default
+    private List<String> primaryMuscleIds = new ArrayList<>();
+    @Builder.Default
+    private List<String> secondaryMuscleIds = new ArrayList<>();
+    @Builder.Default
+    private List<ExerciseMuscleTargetDto> muscleTargets = new ArrayList<>();
     private int totalCompletedSessions;
     private int totalSets;
     private int totalReps;

@@ -43,6 +43,17 @@ public class CoachAnalyticsController {
         return ResponseEntity.ok(analyticsService.getCoachClientExerciseProgress(currentUser.getId(), clientId, exerciseId, filter));
     }
 
+    @GetMapping("/api/v1/coach/clients/{clientId}/analytics/muscle-map")
+    @Operation(summary = "Get authorized client's weekly muscle volume distribution and heatmap analytics")
+    public ResponseEntity<WeeklyMuscleAnalyticsResponse> getClientWeeklyMuscleAnalytics(
+            @AuthenticationPrincipal UserPrincipal currentUser,
+            @PathVariable Long clientId,
+            @RequestParam(defaultValue = "0") int weekOffset,
+            @RequestHeader(value = "X-Timezone", required = false) String timezone) {
+        return ResponseEntity.ok(analyticsService.getCoachClientWeeklyMuscleAnalytics(
+                currentUser.getId(), clientId, weekOffset, timezone));
+    }
+
     @GetMapping("/api/v1/coach/clients/{clientId}/prs")
     @Operation(summary = "Get shared PRs from an authorized client")
     public ResponseEntity<List<SharedPersonalRecordResponse>> getClientPRs(

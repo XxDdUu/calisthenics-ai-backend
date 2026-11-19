@@ -6,6 +6,7 @@ import com.calisthenics.backend.exercise.ExerciseOrigin;
 import com.calisthenics.backend.exercise.ExerciseStatus;
 import com.calisthenics.backend.exercise.ExerciseTrainingType;
 import com.calisthenics.backend.exercise.dto.ExerciseMediaResponse;
+import com.calisthenics.backend.exercise.muscle.ExerciseMuscleTargetDto;
 
 import java.time.ZonedDateTime;
 import java.util.List;
@@ -39,7 +40,11 @@ public record AdminExerciseResponse(
         String commonMistakes,
         String safetyConsiderations,
         String progressionNotes,
-        String aliases
+        String aliases,
+        List<String> primaryMuscles,
+        List<String> primaryMuscleIds,
+        List<String> secondaryMuscleIds,
+        List<ExerciseMuscleTargetDto> muscleTargets
 ) {
     public AdminExerciseResponse(
             Long id,
@@ -81,7 +86,8 @@ public record AdminExerciseResponse(
                 canDelete,
                 mediaItems,
                 ExerciseTrainingType.CALISTHENICS,
-                null, null, null, null, null, null, null, null, null
+                null, null, null, null, null, null, null, null, null,
+                List.of(), List.of(), List.of(), List.of()
         );
     }
 
@@ -127,7 +133,49 @@ public record AdminExerciseResponse(
                 canDelete,
                 mediaItems,
                 ExerciseTrainingType.CALISTHENICS,
-                null, null, null, null, null, null, null, null, null
+                null, null, null, null, null, null, null, null, null,
+                List.of(), List.of(), List.of(), List.of()
+        );
+    }
+
+    public AdminExerciseResponse(
+            Long id,
+            String name,
+            String code,
+            ExerciseCategory category,
+            DifficultyLevel difficulty,
+            String description,
+            String targetMuscles,
+            String instructions,
+            String imageUrl,
+            String videoUrl,
+            String equipment,
+            boolean active,
+            ExerciseStatus status,
+            ExerciseOrigin origin,
+            ZonedDateTime createdAt,
+            long planReferencesCount,
+            long sessionReferencesCount,
+            boolean canDelete,
+            List<ExerciseMediaResponse> mediaItems,
+            ExerciseTrainingType trainingType,
+            String secondaryMuscles,
+            String exerciseType,
+            Integer recommendedSets,
+            String recommendedReps,
+            Integer recommendedRestSeconds,
+            String commonMistakes,
+            String safetyConsiderations,
+            String progressionNotes,
+            String aliases
+    ) {
+        this(
+                id, name, code, category, difficulty, description, targetMuscles, instructions,
+                imageUrl, videoUrl, equipment, active, status, origin, createdAt,
+                planReferencesCount, sessionReferencesCount, canDelete, mediaItems,
+                trainingType, secondaryMuscles, exerciseType, recommendedSets, recommendedReps,
+                recommendedRestSeconds, commonMistakes, safetyConsiderations, progressionNotes, aliases,
+                List.of(), List.of(), List.of(), List.of()
         );
     }
 }

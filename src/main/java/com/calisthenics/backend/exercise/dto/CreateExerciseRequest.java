@@ -2,9 +2,12 @@ package com.calisthenics.backend.exercise.dto;
 
 import com.calisthenics.backend.exercise.DifficultyLevel;
 import com.calisthenics.backend.exercise.ExerciseCategory;
+import com.fasterxml.jackson.annotation.JsonAlias;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import lombok.Data;
+
+import java.util.List;
 
 @Data
 public class CreateExerciseRequest {
@@ -24,4 +27,8 @@ public class CreateExerciseRequest {
     private String description;
     private String targetMuscles;
     private String instructions;
+
+    @JsonAlias("primaryMuscleIds")
+    private List<String> primaryMuscles;
+    private List<String> secondaryMuscleIds;
 }

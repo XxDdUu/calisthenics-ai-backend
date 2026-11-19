@@ -19,10 +19,11 @@ import com.calisthenics.backend.exercise.ExerciseOrigin;
 import com.calisthenics.backend.exercise.ExerciseRepository;
 import com.calisthenics.backend.exercise.ExerciseStatus;
 import com.calisthenics.backend.exercise.ExerciseTrainingType;
+import com.calisthenics.backend.exercise.muscle.MuscleTaxonomyService;
 import com.calisthenics.backend.workout.WorkoutSessionExerciseRepository;
 import com.calisthenics.backend.workoutplan.repository.WorkoutPlanExerciseRepository;
 import jakarta.persistence.criteria.Predicate;
-import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
@@ -37,10 +38,10 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 @Service
-@RequiredArgsConstructor
 public class AdminExerciseService {
 
     private static final int MAX_PAGE_SIZE = 100;
@@ -51,6 +52,41 @@ public class AdminExerciseService {
     private final WorkoutSessionExerciseRepository workoutSessionExerciseRepository;
     private final PersonalRecordRepository personalRecordRepository;
     private final AnalysisRepository analysisRepository;
+    private final MuscleTaxonomyService muscleTaxonomyService;
+
+    public AdminExerciseService(
+            ExerciseRepository exerciseRepository,
+            WorkoutPlanExerciseRepository workoutPlanExerciseRepository,
+            WorkoutSessionExerciseRepository workoutSessionExerciseRepository,
+            PersonalRecordRepository personalRecordRepository,
+            AnalysisRepository analysisRepository
+    ) {
+        this(
+                exerciseRepository,
+                workoutPlanExerciseRepository,
+                workoutSessionExerciseRepository,
+                personalRecordRepository,
+                analysisRepository,
+                new MuscleTaxonomyService()
+        );
+    }
+
+    @Autowired
+    public AdminExerciseService(
+            ExerciseRepository exerciseRepository,
+            WorkoutPlanExerciseRepository workoutPlanExerciseRepository,
+            WorkoutSessionExerciseRepository workoutSessionExerciseRepository,
+            PersonalRecordRepository personalRecordRepository,
+            AnalysisRepository analysisRepository,
+            MuscleTaxonomyService muscleTaxonomyService
+    ) {
+        this.exerciseRepository = exerciseRepository;
+        this.workoutPlanExerciseRepository = workoutPlanExerciseRepository;
+        this.workoutSessionExerciseRepository = workoutSessionExerciseRepository;
+        this.personalRecordRepository = personalRecordRepository;
+        this.analysisRepository = analysisRepository;
+        this.muscleTaxonomyService = muscleTaxonomyService != null ? muscleTaxonomyService : new MuscleTaxonomyService();
+    }
 
     @Transactional(readOnly = true)
     public AdminPageResponse<AdminExerciseResponse> getExercises(
@@ -172,6 +208,10 @@ public class AdminExerciseService {
                 .build();
 
         normalizeMediaItems(exercise, request.imageUrl(), request.videoUrl(), request.mediaItems(), true);
+        if (request.primaryMuscles() != null || request.secondaryMuscleIds() != null) {
+            muscleTaxonomyService.syncExerciseMuscleTargets(
+                    exercise, request.primaryMuscles(), request.secondaryMuscleIds());
+        }
         Exercise saved = exerciseRepository.save(exercise);
         return mapToAdminResponse(saved);
     }
@@ -193,6 +233,9 @@ public class AdminExerciseService {
         if (exerciseRepository.existsByCodeAndIdNot(code, id)) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Another exercise already has code '" + code + "'");
         }
+
+        String previousTargetMuscles = exercise.getTargetMuscles();
+        String previousSecondaryMuscles = exercise.getSecondaryMuscles();
 
         exercise.setName(trimmedName);
         exercise.setCode(code);
@@ -231,6 +274,14 @@ public class AdminExerciseService {
         if (request.safetyConsiderations() != null) exercise.setSafetyConsiderations(request.safetyConsiderations());
         if (request.progressionNotes() != null) exercise.setProgressionNotes(request.progressionNotes());
         if (request.aliases() != null) exercise.setAliases(request.aliases());
+
+        if (request.primaryMuscles() != null || request.secondaryMuscleIds() != null) {
+            muscleTaxonomyService.syncExerciseMuscleTargets(
+                    exercise, request.primaryMuscles(), request.secondaryMuscleIds());
+        } else if (!Objects.equals(previousTargetMuscles, exercise.getTargetMuscles())
+                || !Objects.equals(previousSecondaryMuscles, exercise.getSecondaryMuscles())) {
+            muscleTaxonomyService.resyncFromLegacyTextIfPersisted(exercise);
+        }
 
         Exercise updated = exerciseRepository.save(exercise);
         return mapToAdminResponse(updated);
@@ -304,6 +355,7 @@ public class AdminExerciseService {
         long prRefs = personalRecordRepository.countByExerciseId(exercise.getId());
         long analysisRefs = analysisRepository.countByExerciseId(exercise.getId());
         boolean canDelete = (planRefs + sessionRefs + prRefs + analysisRefs) == 0;
+        MuscleTaxonomyService.ResolvedMuscleTargets resolvedMuscles = muscleTaxonomyService.resolveTargets(exercise);
 
         return new AdminExerciseResponse(
                 exercise.getId(),
@@ -334,7 +386,11 @@ public class AdminExerciseService {
                 exercise.getCommonMistakes(),
                 exercise.getSafetyConsiderations(),
                 exercise.getProgressionNotes(),
-                exercise.getAliases()
+                exercise.getAliases(),
+                resolvedMuscles.primaryMuscleIds(),
+                resolvedMuscles.primaryMuscleIds(),
+                resolvedMuscles.secondaryMuscleIds(),
+                resolvedMuscles.muscleTargets()
         );
     }
 

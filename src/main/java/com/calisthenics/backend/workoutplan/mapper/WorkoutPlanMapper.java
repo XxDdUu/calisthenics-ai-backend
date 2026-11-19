@@ -3,6 +3,7 @@ package com.calisthenics.backend.workoutplan.mapper;
 import com.calisthenics.backend.exercise.Exercise;
 import com.calisthenics.backend.exercise.ExerciseMediaMapper;
 import com.calisthenics.backend.exercise.dto.ExerciseResponse;
+import com.calisthenics.backend.exercise.muscle.MuscleTaxonomyService;
 import com.calisthenics.backend.workoutplan.dto.response.WorkoutPlanDayResponse;
 import com.calisthenics.backend.workoutplan.dto.response.WorkoutPlanExerciseResponse;
 import com.calisthenics.backend.workoutplan.dto.response.WorkoutPlanResponse;
@@ -11,15 +12,26 @@ import com.calisthenics.backend.workoutplan.entity.WorkoutPlanDay;
 import com.calisthenics.backend.workoutplan.entity.WorkoutPlanExercise;
 import com.calisthenics.backend.workoutplan.type.WorkoutDayOfWeek;
 import com.calisthenics.backend.workoutplan.type.WorkoutSessionType;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.stream.StreamSupport;
 
 @Component
 public class WorkoutPlanMapper {
+
+    private final MuscleTaxonomyService muscleTaxonomyService;
+
+    public WorkoutPlanMapper() {
+        this(new MuscleTaxonomyService());
+    }
+
+    @Autowired
+    public WorkoutPlanMapper(MuscleTaxonomyService muscleTaxonomyService) {
+        this.muscleTaxonomyService = muscleTaxonomyService != null ? muscleTaxonomyService : new MuscleTaxonomyService();
+    }
 
     public WorkoutPlanResponse toResponse(WorkoutPlan plan) {
         return toResponse(plan, plan.getDays());
@@ -95,6 +107,7 @@ public class WorkoutPlanMapper {
     }
 
     private ExerciseResponse toExerciseResponse(Exercise exercise) {
+        MuscleTaxonomyService.ResolvedMuscleTargets resolvedMuscles = muscleTaxonomyService.resolveTargets(exercise);
         return ExerciseResponse.builder()
                 .id(exercise.getId())
                 .name(exercise.getName())
@@ -103,12 +116,17 @@ public class WorkoutPlanMapper {
                 .difficulty(exercise.getDifficulty())
                 .description(exercise.getDescription())
                 .targetMuscles(exercise.getTargetMuscles())
+                .secondaryMuscles(exercise.getSecondaryMuscles())
                 .instructions(exercise.getInstructions())
                 .imageUrl(exercise.getImageUrl())
                 .videoUrl(exercise.getVideoUrl())
                 .equipment(exercise.getEquipment())
                 .active(exercise.isActive())
                 .mediaItems(ExerciseMediaMapper.toResponses(exercise))
+                .primaryMuscles(resolvedMuscles.primaryMuscleIds())
+                .primaryMuscleIds(resolvedMuscles.primaryMuscleIds())
+                .secondaryMuscleIds(resolvedMuscles.secondaryMuscleIds())
+                .muscleTargets(resolvedMuscles.muscleTargets())
                 .build();
     }
 }

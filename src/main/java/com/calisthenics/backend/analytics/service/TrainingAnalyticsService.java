@@ -9,6 +9,9 @@ import com.calisthenics.backend.config.UserTimeResolver;
 import com.calisthenics.backend.exercise.Exercise;
 import com.calisthenics.backend.exercise.ExerciseCategory;
 import com.calisthenics.backend.exercise.ExerciseRepository;
+import com.calisthenics.backend.exercise.muscle.MuscleId;
+import com.calisthenics.backend.exercise.muscle.MuscleRegion;
+import com.calisthenics.backend.exercise.muscle.MuscleTaxonomyService;
 import com.calisthenics.backend.workout.WorkoutSession;
 import com.calisthenics.backend.workout.WorkoutSessionExercise;
 import com.calisthenics.backend.workout.WorkoutSessionRepository;
@@ -42,6 +45,7 @@ public class TrainingAnalyticsService {
     private final CoachClientRelationshipRepository coachClientRelationshipRepository;
     private final PersonalRecordService personalRecordService;
     private final UserTimeResolver userTimeResolver;
+    private final MuscleTaxonomyService muscleTaxonomyService;
 
     public TrainingAnalyticsService(
             WorkoutSessionRepository workoutSessionRepository,
@@ -51,7 +55,21 @@ public class TrainingAnalyticsService {
             PersonalRecordService personalRecordService
     ) {
         this(workoutSessionRepository, personalRecordRepository, exerciseRepository,
-                coachClientRelationshipRepository, personalRecordService, new UserTimeResolver(new AppProperties()));
+                coachClientRelationshipRepository, personalRecordService,
+                new UserTimeResolver(new AppProperties()), new MuscleTaxonomyService());
+    }
+
+    public TrainingAnalyticsService(
+            WorkoutSessionRepository workoutSessionRepository,
+            PersonalRecordRepository personalRecordRepository,
+            ExerciseRepository exerciseRepository,
+            CoachClientRelationshipRepository coachClientRelationshipRepository,
+            PersonalRecordService personalRecordService,
+            UserTimeResolver userTimeResolver
+    ) {
+        this(workoutSessionRepository, personalRecordRepository, exerciseRepository,
+                coachClientRelationshipRepository, personalRecordService,
+                userTimeResolver, new MuscleTaxonomyService());
     }
 
     @Autowired
@@ -61,7 +79,8 @@ public class TrainingAnalyticsService {
             ExerciseRepository exerciseRepository,
             CoachClientRelationshipRepository coachClientRelationshipRepository,
             PersonalRecordService personalRecordService,
-            UserTimeResolver userTimeResolver
+            UserTimeResolver userTimeResolver,
+            MuscleTaxonomyService muscleTaxonomyService
     ) {
         this.workoutSessionRepository = workoutSessionRepository;
         this.personalRecordRepository = personalRecordRepository;
@@ -69,6 +88,7 @@ public class TrainingAnalyticsService {
         this.coachClientRelationshipRepository = coachClientRelationshipRepository;
         this.personalRecordService = personalRecordService;
         this.userTimeResolver = userTimeResolver;
+        this.muscleTaxonomyService = muscleTaxonomyService != null ? muscleTaxonomyService : new MuscleTaxonomyService();
     }
 
     @Transactional(readOnly = true)
@@ -213,10 +233,21 @@ public class TrainingAnalyticsService {
                 .map(personalRecordService::mapToResponse)
                 .toList();
 
+        MuscleTaxonomyService.ResolvedMuscleTargets resolvedMuscles = muscleTaxonomyService.resolveTargets(exercise);
+
         return ExerciseProgressResponse.builder()
                 .exerciseId(exercise.getId())
                 .exerciseName(exercise.getName())
                 .category(exercise.getCategory().name())
+                .difficulty(exercise.getDifficulty() != null ? exercise.getDifficulty().name() : null)
+                .description(exercise.getDescription())
+                .instructions(exercise.getInstructions())
+                .targetMuscles(exercise.getTargetMuscles())
+                .secondaryMuscles(exercise.getSecondaryMuscles())
+                .primaryMuscles(resolvedMuscles.primaryMuscleIds())
+                .primaryMuscleIds(resolvedMuscles.primaryMuscleIds())
+                .secondaryMuscleIds(resolvedMuscles.secondaryMuscleIds())
+                .muscleTargets(resolvedMuscles.muscleTargets())
                 .totalCompletedSessions(totalCompletedSessions)
                 .totalSets(totalSets)
                 .totalReps(totalReps)
@@ -487,7 +518,264 @@ public class TrainingAnalyticsService {
                 .durationChangePercentage(durationChange)
                 .exercisesPerformed(exercisesPerformed)
                 .dailyWorkouts(daily)
+                .muscleMap(buildWeeklyMuscleAnalytics(currentWeekSessions, currentWeekStart, currentWeekEnd))
                 .build();
+    }
+
+    @Transactional(readOnly = true)
+    public WeeklyMuscleAnalyticsResponse getWeeklyMuscleAnalytics(Long userId, int weekOffset, String timezone) {
+        LocalDate today = userTimeResolver.today(timezone);
+        LocalDate targetDate = today.plusWeeks(weekOffset);
+        LocalDate startDate = targetDate.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY));
+        LocalDate endDate = targetDate.with(TemporalAdjusters.nextOrSame(DayOfWeek.SUNDAY));
+
+        List<WorkoutSession> sessions = workoutSessionRepository.findCompletedSessionsBetweenDates(
+                userId, WorkoutSessionStatus.COMPLETED, startDate, endDate);
+
+        return buildWeeklyMuscleAnalytics(sessions, startDate, endDate);
+    }
+
+    @Transactional(readOnly = true)
+    public WeeklyMuscleAnalyticsResponse getCoachClientWeeklyMuscleAnalytics(
+            Long coachId, Long clientId, int weekOffset, String timezone) {
+        verifyCoachAccess(coachId, clientId);
+        return getWeeklyMuscleAnalytics(clientId, weekOffset, timezone);
+    }
+
+    private WeeklyMuscleAnalyticsResponse buildWeeklyMuscleAnalytics(
+            List<WorkoutSession> sessions, LocalDate startDate, LocalDate endDate) {
+        EnumMap<MuscleId, MuscleVolumeAccumulator> accumulators = new EnumMap<>(MuscleId.class);
+        for (MuscleId muscle : MuscleId.orderedValues()) {
+            accumulators.put(muscle, new MuscleVolumeAccumulator());
+        }
+
+        List<WorkoutSession> completedSessions = sessions == null ? List.of() : sessions.stream()
+                .filter(s -> s != null && s.getStatus() == WorkoutSessionStatus.COMPLETED)
+                .toList();
+
+        int totalCompletedWorkouts = completedSessions.size();
+        int totalCompletedSets = 0;
+        int unmappedCompletedSets = 0;
+        Map<Exercise, MuscleTaxonomyService.ResolvedMuscleTargets> resolvedCache = new IdentityHashMap<>();
+
+        for (WorkoutSession session : completedSessions) {
+            if (session.getExercises() == null) {
+                continue;
+            }
+            for (WorkoutSessionExercise exItem : session.getExercises()) {
+                if (exItem == null || exItem.getSets() == null) {
+                    continue;
+                }
+                List<WorkoutSessionSet> completedSets = exItem.getSets().stream()
+                        .filter(s -> s != null && s.isCompleted())
+                        .toList();
+                if (completedSets.isEmpty()) {
+                    continue;
+                }
+
+                Exercise exercise = exItem.getExercise();
+                MuscleTaxonomyService.ResolvedMuscleTargets resolved = exercise == null
+                        ? MuscleTaxonomyService.ResolvedMuscleTargets.empty()
+                        : resolvedCache.computeIfAbsent(exercise, muscleTaxonomyService::resolveTargets);
+
+                boolean hasTargets = !resolved.primaryMuscleIds().isEmpty() || !resolved.secondaryMuscleIds().isEmpty();
+
+                for (WorkoutSessionSet set : completedSets) {
+                    totalCompletedSets++;
+                    if (!hasTargets) {
+                        unmappedCompletedSets++;
+                        continue;
+                    }
+
+                    int reps = (set.getReps() != null && set.getReps() > 0) ? set.getReps() : 0;
+                    int holdSeconds = (set.getHoldDurationSeconds() != null && set.getHoldDurationSeconds() > 0)
+                            ? set.getHoldDurationSeconds()
+                            : 0;
+                    double volumeKg = (set.getWeightKg() != null
+                            && set.getWeightKg().compareTo(BigDecimal.ZERO) > 0
+                            && reps > 0)
+                            ? set.getWeightKg().doubleValue() * reps
+                            : 0.0;
+
+                    for (String primaryId : resolved.primaryMuscleIds()) {
+                        MuscleId.fromId(primaryId).ifPresent(muscle ->
+                                accumulators.get(muscle).addPrimary(reps, holdSeconds, volumeKg));
+                    }
+                    for (String secondaryId : resolved.secondaryMuscleIds()) {
+                        MuscleId.fromId(secondaryId).ifPresent(muscle ->
+                                accumulators.get(muscle).addSecondary(reps, holdSeconds, volumeKg));
+                    }
+                }
+            }
+        }
+
+        double totalEffectiveSetsRaw = 0.0;
+        EnumMap<MuscleRegion, Double> regionSets = new EnumMap<>(MuscleRegion.class);
+        for (MuscleRegion region : MuscleRegion.values()) {
+            regionSets.put(region, 0.0);
+        }
+
+        for (MuscleId muscle : MuscleId.orderedValues()) {
+            double eff = accumulators.get(muscle).effectiveSets();
+            totalEffectiveSetsRaw += eff;
+            regionSets.put(muscle.getRegion(), regionSets.get(muscle.getRegion()) + eff);
+        }
+        double totalEffectiveSets = round1(totalEffectiveSetsRaw);
+
+        List<MuscleVolumeDistributionDto> muscleDtos = new ArrayList<>(22);
+        List<String> undertrainedMuscles = new ArrayList<>();
+        List<String> optimalMuscles = new ArrayList<>();
+        List<String> overloadedMuscles = new ArrayList<>();
+
+        for (MuscleId muscle : MuscleId.orderedValues()) {
+            MuscleVolumeAccumulator acc = accumulators.get(muscle);
+            double effectiveSets = round1(acc.effectiveSets());
+            double distributionPct = totalEffectiveSets > 0.0
+                    ? round1((effectiveSets / totalEffectiveSets) * 100.0)
+                    : 0.0;
+            double activationIntensity = effectiveSets <= 0.0
+                    ? 0.0
+                    : Math.min(1.0, Math.max(0.18, round2(effectiveSets / 16.0)));
+            String status = resolveMuscleTrainingStatus(effectiveSets);
+
+            if ("UNDERTRAINED".equals(status)) {
+                undertrainedMuscles.add(muscle.getId());
+            } else if ("OPTIMAL".equals(status)) {
+                optimalMuscles.add(muscle.getId());
+            } else if ("OVERLOADED".equals(status)) {
+                overloadedMuscles.add(muscle.getId());
+            }
+
+            muscleDtos.add(MuscleVolumeDistributionDto.builder()
+                    .muscleId(muscle.getId())
+                    .displayName(muscle.getDisplayName())
+                    .region(muscle.getRegion())
+                    .primaryView(muscle.getPrimaryView())
+                    .views(muscle.getViews())
+                    .svgElementIds(muscle.getSvgElementIds())
+                    .displayOrder(muscle.getDisplayOrder())
+                    .primarySets(acc.primarySets)
+                    .secondarySets(acc.secondarySets)
+                    .effectiveSets(effectiveSets)
+                    .primaryReps(acc.primaryReps)
+                    .secondaryReps(acc.secondaryReps)
+                    .primaryHoldSeconds(acc.primaryHoldSeconds)
+                    .secondaryHoldSeconds(acc.secondaryHoldSeconds)
+                    .primaryVolumeKg(round2(acc.primaryVolumeKg))
+                    .secondaryVolumeKg(round2(acc.secondaryVolumeKg))
+                    .distributionPercentage(distributionPct)
+                    .activationIntensity(activationIntensity)
+                    .trainingStatus(status)
+                    .build());
+        }
+
+        Map<String, Double> regionDistribution = computeRegionDistribution(regionSets, totalEffectiveSets);
+
+        List<String> caveats = new ArrayList<>();
+        if (totalCompletedWorkouts == 0) {
+            caveats.add("No completed workouts recorded for this week yet.");
+        } else if (totalCompletedSets == 0) {
+            caveats.add("Completed workouts for this week have no completed sets recorded yet.");
+        }
+        caveats.add("Effective sets weight primary target muscles at 1.0x and secondary synergist muscles at 0.5x across completed sets only.");
+        caveats.add("Weekly hypertrophy thresholds (<3.0 undertrained, 3.0-5.9 low, 6.0-16.0 optimal, 16.1-22.0 high, >22.0 overloaded) are general guidelines and do not reflect isometric intensity or individual recovery.");
+        if (unmappedCompletedSets > 0) {
+            caveats.add(unmappedCompletedSets + " completed set(s) had no canonical muscle mapping and were excluded from muscle totals.");
+        }
+
+        return WeeklyMuscleAnalyticsResponse.builder()
+                .startDate(startDate.toString())
+                .endDate(endDate.toString())
+                .totalCompletedWorkouts(totalCompletedWorkouts)
+                .totalCompletedSets(totalCompletedSets)
+                .totalEffectiveSets(totalEffectiveSets)
+                .muscles(muscleDtos)
+                .regionDistribution(regionDistribution)
+                .undertrainedMuscles(undertrainedMuscles)
+                .optimalMuscles(optimalMuscles)
+                .overloadedMuscles(overloadedMuscles)
+                .caveats(caveats)
+                .build();
+    }
+
+    private Map<String, Double> computeRegionDistribution(EnumMap<MuscleRegion, Double> regionSets, double totalEffectiveSets) {
+        Map<String, Double> distribution = new LinkedHashMap<>();
+        if (totalEffectiveSets <= 0.0) {
+            distribution.put(MuscleRegion.UPPER_BODY.name(), 0.0);
+            distribution.put(MuscleRegion.CORE.name(), 0.0);
+            distribution.put(MuscleRegion.LOWER_BODY.name(), 0.0);
+            return distribution;
+        }
+        double upper = round1((regionSets.get(MuscleRegion.UPPER_BODY) / totalEffectiveSets) * 100.0);
+        double core = round1((regionSets.get(MuscleRegion.CORE) / totalEffectiveSets) * 100.0);
+        double lower = round1((regionSets.get(MuscleRegion.LOWER_BODY) / totalEffectiveSets) * 100.0);
+        double diff = round1(100.0 - round1(upper + core + lower));
+        if (diff != 0.0) {
+            if (upper >= core && upper >= lower) {
+                upper = round1(upper + diff);
+            } else if (core >= upper && core >= lower) {
+                core = round1(core + diff);
+            } else {
+                lower = round1(lower + diff);
+            }
+        }
+        distribution.put(MuscleRegion.UPPER_BODY.name(), upper);
+        distribution.put(MuscleRegion.CORE.name(), core);
+        distribution.put(MuscleRegion.LOWER_BODY.name(), lower);
+        return distribution;
+    }
+
+    private String resolveMuscleTrainingStatus(double effectiveSets) {
+        if (effectiveSets < 3.0) {
+            return "UNDERTRAINED";
+        }
+        if (effectiveSets < 6.0) {
+            return "LOW";
+        }
+        if (effectiveSets <= 16.0) {
+            return "OPTIMAL";
+        }
+        if (effectiveSets <= 22.0) {
+            return "HIGH";
+        }
+        return "OVERLOADED";
+    }
+
+    private double round1(double value) {
+        return Math.round(value * 10.0) / 10.0;
+    }
+
+    private double round2(double value) {
+        return Math.round(value * 100.0) / 100.0;
+    }
+
+    private static final class MuscleVolumeAccumulator {
+        private int primarySets;
+        private int secondarySets;
+        private int primaryReps;
+        private int secondaryReps;
+        private int primaryHoldSeconds;
+        private int secondaryHoldSeconds;
+        private double primaryVolumeKg;
+        private double secondaryVolumeKg;
+
+        void addPrimary(int reps, int holdSeconds, double volumeKg) {
+            primarySets++;
+            primaryReps += reps;
+            primaryHoldSeconds += holdSeconds;
+            primaryVolumeKg += volumeKg;
+        }
+
+        void addSecondary(int reps, int holdSeconds, double volumeKg) {
+            secondarySets++;
+            secondaryReps += reps;
+            secondaryHoldSeconds += holdSeconds;
+            secondaryVolumeKg += volumeKg;
+        }
+
+        double effectiveSets() {
+            return primarySets + (secondarySets * 0.5);
+        }
     }
 
     @Transactional(readOnly = true)

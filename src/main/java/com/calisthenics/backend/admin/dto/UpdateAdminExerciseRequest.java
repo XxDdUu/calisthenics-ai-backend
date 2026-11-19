@@ -5,6 +5,7 @@ import com.calisthenics.backend.exercise.ExerciseCategory;
 import com.calisthenics.backend.exercise.ExerciseOrigin;
 import com.calisthenics.backend.exercise.ExerciseStatus;
 import com.calisthenics.backend.exercise.ExerciseTrainingType;
+import com.fasterxml.jackson.annotation.JsonAlias;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
@@ -70,7 +71,12 @@ public record UpdateAdminExerciseRequest(
 
         String progressionNotes,
 
-        String aliases
+        String aliases,
+
+        @JsonAlias("primaryMuscleIds")
+        List<String> primaryMuscles,
+
+        List<String> secondaryMuscleIds
 ) {
     public UpdateAdminExerciseRequest(
             String name,
@@ -89,7 +95,8 @@ public record UpdateAdminExerciseRequest(
         this(
                 name, code, category, difficulty, description, targetMuscles, instructions,
                 imageUrl, videoUrl, equipment, active, mediaItems, null, null, null,
-                null, null, null, null, null, null, null, null, null, null
+                null, null, null, null, null, null, null, null, null, null,
+                null, null
         );
     }
 
@@ -111,7 +118,8 @@ public record UpdateAdminExerciseRequest(
         this(
                 name, code, category, difficulty, description, targetMuscles, instructions,
                 imageUrl, videoUrl, equipment, active, mediaItems, replaceMediaItems, null, null,
-                null, null, null, null, null, null, null, null, null, null
+                null, null, null, null, null, null, null, null, null, null,
+                null, null
         );
     }
 
@@ -135,7 +143,44 @@ public record UpdateAdminExerciseRequest(
         this(
                 name, code, category, difficulty, description, targetMuscles, instructions,
                 imageUrl, videoUrl, equipment, active, mediaItems, replaceMediaItems, status, origin,
-                null, null, null, null, null, null, null, null, null, null
+                null, null, null, null, null, null, null, null, null, null,
+                null, null
+        );
+    }
+
+    public UpdateAdminExerciseRequest(
+            String name,
+            String code,
+            ExerciseCategory category,
+            DifficultyLevel difficulty,
+            String description,
+            String targetMuscles,
+            String instructions,
+            String imageUrl,
+            String videoUrl,
+            String equipment,
+            Boolean active,
+            List<ExerciseMediaItemRequest> mediaItems,
+            Boolean replaceMediaItems,
+            ExerciseStatus status,
+            ExerciseOrigin origin,
+            ExerciseTrainingType trainingType,
+            String secondaryMuscles,
+            String exerciseType,
+            Integer recommendedSets,
+            String recommendedReps,
+            Integer recommendedRestSeconds,
+            String commonMistakes,
+            String safetyConsiderations,
+            String progressionNotes,
+            String aliases
+    ) {
+        this(
+                name, code, category, difficulty, description, targetMuscles, instructions,
+                imageUrl, videoUrl, equipment, active, mediaItems, replaceMediaItems, status, origin,
+                trainingType, secondaryMuscles, exerciseType, recommendedSets, recommendedReps,
+                recommendedRestSeconds, commonMistakes, safetyConsiderations, progressionNotes, aliases,
+                null, null
         );
     }
 }

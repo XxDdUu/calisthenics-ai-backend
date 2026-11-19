@@ -9,6 +9,7 @@ import com.calisthenics.backend.exercise.Exercise;
 import com.calisthenics.backend.exercise.ExerciseMediaMapper;
 import com.calisthenics.backend.exercise.ExerciseRepository;
 import com.calisthenics.backend.exercise.dto.ExerciseResponse;
+import com.calisthenics.backend.exercise.muscle.MuscleTaxonomyService;
 import com.calisthenics.backend.workoutplan.dto.request.WorkoutPlanExerciseRequest;
 import com.calisthenics.backend.workoutplan.dto.response.WorkoutPlanExerciseResponse;
 import com.calisthenics.backend.workoutplan.entity.WorkoutPlanDay;
@@ -21,14 +22,13 @@ import com.calisthenics.backend.workoutplan.repository.WorkoutPlanDayRepository;
 import com.calisthenics.backend.workoutplan.repository.WorkoutPlanExerciseRepository;
 import com.calisthenics.backend.workoutplan.repository.WorkoutPlanRepository;
 import com.calisthenics.backend.workoutplan.service.WorkoutPlanExerciseService;
-import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.*;
 
 @Service
-@RequiredArgsConstructor
 public class WorkoutPlanExerciseServiceImpl implements WorkoutPlanExerciseService {
 
     private final WorkoutPlanRepository workoutPlanRepository;
@@ -37,6 +37,45 @@ public class WorkoutPlanExerciseServiceImpl implements WorkoutPlanExerciseServic
     private final ExerciseRepository exerciseRepository;
     private final WorkoutPlanAssignmentRepository assignmentRepository;
     private final CoachClientRelationshipRepository relationshipRepository;
+    private final MuscleTaxonomyService muscleTaxonomyService;
+
+    public WorkoutPlanExerciseServiceImpl(
+            WorkoutPlanRepository workoutPlanRepository,
+            WorkoutPlanDayRepository workoutPlanDayRepository,
+            WorkoutPlanExerciseRepository workoutPlanExerciseRepository,
+            ExerciseRepository exerciseRepository,
+            WorkoutPlanAssignmentRepository assignmentRepository,
+            CoachClientRelationshipRepository relationshipRepository
+    ) {
+        this(
+                workoutPlanRepository,
+                workoutPlanDayRepository,
+                workoutPlanExerciseRepository,
+                exerciseRepository,
+                assignmentRepository,
+                relationshipRepository,
+                new MuscleTaxonomyService()
+        );
+    }
+
+    @Autowired
+    public WorkoutPlanExerciseServiceImpl(
+            WorkoutPlanRepository workoutPlanRepository,
+            WorkoutPlanDayRepository workoutPlanDayRepository,
+            WorkoutPlanExerciseRepository workoutPlanExerciseRepository,
+            ExerciseRepository exerciseRepository,
+            WorkoutPlanAssignmentRepository assignmentRepository,
+            CoachClientRelationshipRepository relationshipRepository,
+            MuscleTaxonomyService muscleTaxonomyService
+    ) {
+        this.workoutPlanRepository = workoutPlanRepository;
+        this.workoutPlanDayRepository = workoutPlanDayRepository;
+        this.workoutPlanExerciseRepository = workoutPlanExerciseRepository;
+        this.exerciseRepository = exerciseRepository;
+        this.assignmentRepository = assignmentRepository;
+        this.relationshipRepository = relationshipRepository;
+        this.muscleTaxonomyService = muscleTaxonomyService != null ? muscleTaxonomyService : new MuscleTaxonomyService();
+    }
 
     @Override
     @Transactional(readOnly = true)
@@ -315,6 +354,7 @@ public class WorkoutPlanExerciseServiceImpl implements WorkoutPlanExerciseServic
 
     private WorkoutPlanExerciseResponse toResponse(WorkoutPlanExercise association) {
         Exercise exercise = association.getExercise();
+        MuscleTaxonomyService.ResolvedMuscleTargets resolvedMuscles = muscleTaxonomyService.resolveTargets(exercise);
         ExerciseResponse exerciseResponse = ExerciseResponse.builder()
                 .id(exercise.getId())
                 .name(exercise.getName())
@@ -323,12 +363,17 @@ public class WorkoutPlanExerciseServiceImpl implements WorkoutPlanExerciseServic
                 .difficulty(exercise.getDifficulty())
                 .description(exercise.getDescription())
                 .targetMuscles(exercise.getTargetMuscles())
+                .secondaryMuscles(exercise.getSecondaryMuscles())
                 .instructions(exercise.getInstructions())
                 .imageUrl(exercise.getImageUrl())
                 .videoUrl(exercise.getVideoUrl())
                 .equipment(exercise.getEquipment())
                 .active(exercise.isActive())
                 .mediaItems(ExerciseMediaMapper.toResponses(exercise))
+                .primaryMuscles(resolvedMuscles.primaryMuscleIds())
+                .primaryMuscleIds(resolvedMuscles.primaryMuscleIds())
+                .secondaryMuscleIds(resolvedMuscles.secondaryMuscleIds())
+                .muscleTargets(resolvedMuscles.muscleTargets())
                 .build();
 
         return WorkoutPlanExerciseResponse.builder()
