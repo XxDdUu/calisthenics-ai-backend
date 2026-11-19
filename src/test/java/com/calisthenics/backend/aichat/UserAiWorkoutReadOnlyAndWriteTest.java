@@ -109,6 +109,7 @@ class UserAiWorkoutReadOnlyAndWriteTest {
             "chat_messages",
             "chat_conversations",
             "user_presence",
+            "ai_workout_plan_change_previews",
             "ai_messages",
             "ai_conversations",
             "ai_workout_plan_logs",
@@ -433,24 +434,35 @@ class UserAiWorkoutReadOnlyAndWriteTest {
         assertThat(replaceResp.getMetadata()).contains("regenerate_workout_plan");
         verify(aiWorkoutPlanService, times(2)).generatePlan(any(), any(), any());
 
-        // 7b. "Change Monday's workout to Push Day" -> update_workout_plan
-        AiMessageResponse updateDayResp = sendMsg(tokenWithPlan, convId, "Change Monday's workout to Push Day");
-        assertThat(updateDayResp.getIntent()).isEqualTo("WORKOUT_PLAN_UPDATE");
-        assertThat(updateDayResp.getMetadata()).contains("update_workout_plan");
-        assertThat(updateDayResp.getContent()).contains("Push Day");
+        // 7b. "Change Monday's workout to Push Day" -> generates preview first, then confirms
+        AiMessageResponse updateDayPreview = sendMsg(tokenWithPlan, convId, "Change Monday's workout to Push Day");
+        assertThat(updateDayPreview.getIntent()).isEqualTo("WORKOUT_PLAN_PREVIEW");
+        assertThat(updateDayPreview.getMetadata()).contains("WORKOUT_PLAN_CHANGE_PREVIEW");
+        assertThat(updateDayPreview.getMetadata()).contains("\"mutated\":false");
+        assertThat(updateDayPreview.getContent()).contains("Push Day");
+        AiMessageResponse updateDayConfirmed = sendMsg(tokenWithPlan, convId, "Confirm.");
+        assertThat(updateDayConfirmed.getIntent()).isEqualTo("WORKOUT_PLAN_UPDATE");
+        assertThat(updateDayConfirmed.getMetadata()).contains("\"mutated\":true");
+        assertThat(updateDayConfirmed.getContent()).contains("Push Day");
 
-        // 7c. "Add 2 leg exercises to Wednesday" -> add_exercise_to_workout
-        AiMessageResponse addLegResp = sendMsg(tokenWithPlan, convId, "Add 2 leg exercises to Wednesday");
-        assertThat(addLegResp.getIntent()).isEqualTo("WORKOUT_PLAN_UPDATE");
-        assertThat(addLegResp.getMetadata()).contains("add_exercise_to_workout");
-        assertThat(addLegResp.getContent()).contains("Pistol Squat");
-        assertThat(addLegResp.getContent()).contains("Bulgarian Split Squat");
+        // 7c. "Add 2 leg exercises to Wednesday" -> generates preview first, then confirms
+        AiMessageResponse addLegPreview = sendMsg(tokenWithPlan, convId, "Add 2 leg exercises to Wednesday");
+        assertThat(addLegPreview.getIntent()).isEqualTo("WORKOUT_PLAN_PREVIEW");
+        assertThat(addLegPreview.getMetadata()).contains("add_exercise_to_workout");
+        assertThat(addLegPreview.getContent()).contains("Pistol Squat");
+        assertThat(addLegPreview.getContent()).contains("Bulgarian Split Squat");
+        AiMessageResponse addLegConfirmed = sendMsg(tokenWithPlan, convId, "Confirm.");
+        assertThat(addLegConfirmed.getIntent()).isEqualTo("WORKOUT_PLAN_UPDATE");
+        assertThat(addLegConfirmed.getMetadata()).contains("\"mutated\":true");
 
-        // 7d. "Remove Push-Up from Monday" -> remove_exercise_from_workout
-        AiMessageResponse removeResp = sendMsg(tokenWithPlan, convId, "Remove Push-Up from Monday");
-        assertThat(removeResp.getIntent()).isEqualTo("WORKOUT_PLAN_UPDATE");
-        assertThat(removeResp.getMetadata()).contains("remove_exercise_from_workout");
-        assertThat(removeResp.getContent()).contains("Removed **Push-Up**");
+        // 7d. "Remove Push-Up from Monday" -> generates preview first, then confirms
+        AiMessageResponse removePreview = sendMsg(tokenWithPlan, convId, "Remove Push-Up from Monday");
+        assertThat(removePreview.getIntent()).isEqualTo("WORKOUT_PLAN_PREVIEW");
+        assertThat(removePreview.getMetadata()).contains("remove_exercise_from_workout");
+        assertThat(removePreview.getContent()).contains("REMOVE: Push-Up");
+        AiMessageResponse removeConfirmed = sendMsg(tokenWithPlan, convId, "Confirm.");
+        assertThat(removeConfirmed.getIntent()).isEqualTo("WORKOUT_PLAN_UPDATE");
+        assertThat(removeConfirmed.getMetadata()).contains("\"removedExercise\":\"Push-Up\"");
     }
 
     @Test
@@ -595,14 +607,21 @@ class UserAiWorkoutReadOnlyAndWriteTest {
                         .build()
         ));
 
-        // Case 1: "Add Front Lever Raises to Tuesday" -> Tuesday only (even when selectedDayOfWeek = MONDAY)
-        AiMessageResponse addTue = sendMsgWithSelectedDay(
+        // Case 1: "Add Front Lever Raises to Tuesday" -> preview first (ZERO DB change), then confirm -> Tuesday only (even when selectedDayOfWeek = MONDAY)
+        AiMessageResponse addTuePreview = sendMsgWithSelectedDay(
                 tokenWithoutPlan, convId, "Add Front Lever Raises (3 sets × 10 reps, 90s rest) to Tuesday", WorkoutDayOfWeek.MONDAY);
+        assertThat(addTuePreview.getIntent()).isEqualTo("WORKOUT_PLAN_PREVIEW");
+        assertThat(addTuePreview.getMetadata()).contains("\"mutated\":false");
+        assertThat(addTuePreview.getContent()).contains("Tuesday");
+        assertThat(addTuePreview.getContent()).contains("Front Lever Raises");
+        // Verify ZERO DB mutation before confirmation
+        assertThat(exerciseNamesForDay(plan.getId(), WorkoutDayOfWeek.TUESDAY))
+                .containsExactly("Front Lever", "Tuck Planche");
+
+        AiMessageResponse addTue = sendMsg(tokenWithoutPlan, convId, "Confirm.");
         assertThat(addTue.getIntent()).isEqualTo("WORKOUT_PLAN_UPDATE");
         assertThat(addTue.getMetadata()).contains("\"dayOfWeek\":\"TUESDAY\"");
         assertThat(addTue.getMetadata()).contains("\"addedExercises\":[\"Front Lever Raises\"]");
-        assertThat(addTue.getContent()).contains("Tuesday");
-        assertThat(addTue.getContent()).contains("Front Lever Raises");
         assertThat(exerciseNamesForDay(plan.getId(), WorkoutDayOfWeek.TUESDAY))
                 .containsExactly("Front Lever", "Tuck Planche", "Front Lever Raises");
         assertThat(exerciseNamesForDay(plan.getId(), WorkoutDayOfWeek.MONDAY))
@@ -628,9 +647,14 @@ class UserAiWorkoutReadOnlyAndWriteTest {
         assertThat(exerciseNamesForDay(plan.getId(), WorkoutDayOfWeek.TUESDAY))
                 .containsExactly("Front Lever", "Tuck Planche", "Front Lever Raises");
 
-        // Case 2: "Remove Tuck Planche from Tuesday" -> Tuesday only
-        AiMessageResponse remTue = sendMsgWithSelectedDay(
+        // Case 2: "Remove Tuck Planche from Tuesday" -> preview first, then confirm -> Tuesday only
+        AiMessageResponse remTuePreview = sendMsgWithSelectedDay(
                 tokenWithoutPlan, convId, "Remove Tuck Planche from Tuesday", WorkoutDayOfWeek.MONDAY);
+        assertThat(remTuePreview.getIntent()).isEqualTo("WORKOUT_PLAN_PREVIEW");
+        assertThat(exerciseNamesForDay(plan.getId(), WorkoutDayOfWeek.TUESDAY))
+                .containsExactly("Front Lever", "Tuck Planche", "Front Lever Raises");
+
+        AiMessageResponse remTue = sendMsg(tokenWithoutPlan, convId, "Confirm.");
         assertThat(remTue.getMetadata()).contains("\"dayOfWeek\":\"TUESDAY\"");
         assertThat(remTue.getMetadata()).contains("\"removedExercise\":\"Tuck Planche\"");
         assertThat(exerciseNamesForDay(plan.getId(), WorkoutDayOfWeek.TUESDAY))
@@ -643,9 +667,11 @@ class UserAiWorkoutReadOnlyAndWriteTest {
         assertThat(remTueAgain.getMetadata()).contains("\"mutated\":false");
         assertThat(remTueAgain.getContent()).contains("not found on **Tuesday**");
 
-        // Case 4: "Add Straddle Planche to Monday" -> Monday only
-        AiMessageResponse addMon = sendMsgWithSelectedDay(
+        // Case 4: "Add Straddle Planche to Monday" -> preview + confirm -> Monday only
+        AiMessageResponse addMonPreview = sendMsgWithSelectedDay(
                 tokenWithoutPlan, convId, "Add Straddle Planche to Monday", WorkoutDayOfWeek.TUESDAY);
+        assertThat(addMonPreview.getIntent()).isEqualTo("WORKOUT_PLAN_PREVIEW");
+        AiMessageResponse addMon = sendMsg(tokenWithoutPlan, convId, "Confirm.");
         assertThat(addMon.getMetadata()).contains("\"dayOfWeek\":\"MONDAY\"");
         assertThat(addMon.getMetadata()).contains("\"addedExercises\":[\"Straddle Planche\"]");
         assertThat(exerciseNamesForDay(plan.getId(), WorkoutDayOfWeek.MONDAY))
@@ -655,13 +681,21 @@ class UserAiWorkoutReadOnlyAndWriteTest {
 
         // Case 3: Prepare Front Lever Raises on Monday (and remove from Tuesday), then "Move Front Lever Raises from Monday to Tuesday"
         sendMsg(tokenWithoutPlan, convId, "Remove Front Lever Raises from Tuesday");
+        sendMsg(tokenWithoutPlan, convId, "Confirm.");
         sendMsg(tokenWithoutPlan, convId, "Add Front Lever Raises (3 sets × 10 reps, 90s rest) to Monday");
+        sendMsg(tokenWithoutPlan, convId, "Confirm.");
         assertThat(exerciseNamesForDay(plan.getId(), WorkoutDayOfWeek.MONDAY))
                 .containsExactly("Advanced Tuck Planche", "Straddle Planche", "Front Lever Raises");
 
-        AiMessageResponse moveResp = sendMsg(tokenWithoutPlan, convId, "Move Front Lever Raises from Monday to Tuesday");
+        AiMessageResponse movePreview = sendMsg(tokenWithoutPlan, convId, "Move Front Lever Raises from Monday to Tuesday");
+        assertThat(movePreview.getIntent()).isEqualTo("WORKOUT_PLAN_PREVIEW");
+        assertThat(movePreview.getMetadata()).contains("\"toolName\":\"move_exercise_between_days\"");
+        assertThat(movePreview.getMetadata()).contains("\"mutated\":false");
+        assertThat(exerciseNamesForDay(plan.getId(), WorkoutDayOfWeek.MONDAY))
+                .containsExactly("Advanced Tuck Planche", "Straddle Planche", "Front Lever Raises");
+
+        AiMessageResponse moveResp = sendMsg(tokenWithoutPlan, convId, "Confirm.");
         assertThat(moveResp.getIntent()).isEqualTo("WORKOUT_PLAN_UPDATE");
-        assertThat(moveResp.getMetadata()).contains("\"toolName\":\"move_exercise_between_days\"");
         assertThat(moveResp.getMetadata()).contains("\"sourceDayOfWeek\":\"MONDAY\"");
         assertThat(moveResp.getMetadata()).contains("\"dayOfWeek\":\"TUESDAY\"");
         assertThat(moveResp.getMetadata()).contains("\"movedExercise\":\"Front Lever Raises\"");
@@ -696,8 +730,14 @@ class UserAiWorkoutReadOnlyAndWriteTest {
         assertThat(exerciseNamesForDay(plan.getId(), WorkoutDayOfWeek.MONDAY))
                 .containsExactly("Advanced Tuck Planche");
 
-        // Turn 2 "no, add to Tuesday not monday" completes adding Front Lever Raises to TUESDAY only!
-        AiMessageResponse followUpTue = sendMsg(tokenWithoutPlan, convId, "no, add to Tuesday not monday");
+        // Turn 2 "no, add to Tuesday not monday" generates preview for TUESDAY only, then confirm applies!
+        AiMessageResponse followUpPreview = sendMsg(tokenWithoutPlan, convId, "no, add to Tuesday not monday");
+        assertThat(followUpPreview.getIntent()).isEqualTo("WORKOUT_PLAN_PREVIEW");
+        assertThat(followUpPreview.getMetadata()).contains("\"mutated\":false");
+        assertThat(exerciseNamesForDay(plan.getId(), WorkoutDayOfWeek.TUESDAY))
+                .containsExactly("Front Lever", "Tuck Planche");
+
+        AiMessageResponse followUpTue = sendMsg(tokenWithoutPlan, convId, "Confirm.");
         assertThat(followUpTue.getMetadata()).contains("\"dayOfWeek\":\"TUESDAY\"");
         assertThat(followUpTue.getMetadata()).contains("\"addedExercises\":[\"Front Lever Raises\"]");
         assertThat(exerciseNamesForDay(plan.getId(), WorkoutDayOfWeek.TUESDAY))

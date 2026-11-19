@@ -1,12 +1,15 @@
 package com.calisthenics.backend.aichat.service.impl;
 
 import com.calisthenics.backend.aichat.dto.*;
+import com.calisthenics.backend.aichat.dto.preview.WorkoutPlanChangePreviewResponse;
 import com.calisthenics.backend.aichat.entity.AiConversation;
 import com.calisthenics.backend.aichat.entity.AiMessage;
+import com.calisthenics.backend.aichat.entity.AiWorkoutPlanChangePreview;
 import com.calisthenics.backend.aichat.repository.AiConversationRepository;
 import com.calisthenics.backend.aichat.repository.AiMessageRepository;
 import com.calisthenics.backend.aichat.service.AiAssistantService;
 import com.calisthenics.backend.aichat.service.UserAiWorkoutToolService;
+import com.calisthenics.backend.aichat.service.WorkoutPlanChangePreviewService;
 import com.calisthenics.backend.aiworkout.dto.AiWorkoutPlanPreviewResponse;
 import com.calisthenics.backend.aiworkout.dto.GenerateAiWorkoutPlanRequest;
 import com.calisthenics.backend.aiworkout.gemini.GeminiApiClient;
@@ -68,6 +71,7 @@ public class AiAssistantServiceImpl implements AiAssistantService {
     private final ClientBodyMeasurementRepository measurementRepository;
     private final CoachProfileRepository coachProfileRepository;
     private final UserAiWorkoutToolService userAiWorkoutToolService;
+    private final WorkoutPlanChangePreviewService workoutPlanChangePreviewService;
 
     @Override
     @Transactional(readOnly = true)
@@ -101,7 +105,7 @@ public class AiAssistantServiceImpl implements AiAssistantService {
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "AI Conversation not found"));
 
         List<AiMessageResponse> messages = aiMessageRepository.findByConversationIdOrderByCreatedAtAsc(conversationId).stream()
-                .map(this::mapToMessageResponse)
+                .map(msg -> mapToMessageResponse(msg, userId))
                 .toList();
 
         return AiConversationDetailResponse.builder()
@@ -145,10 +149,41 @@ public class AiAssistantServiceImpl implements AiAssistantService {
         AiConversation conversation = aiConversationRepository.findByIdAndUserId(conversationId, userId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "AI Conversation not found"));
 
+        if (workoutPlanChangePreviewService != null) {
+            workoutPlanChangePreviewService.deleteConversationPreviews(conversationId);
+        }
         aiMessageRepository.deleteByConversationId(conversationId);
         aiConversationRepository.delete(conversation);
         aiConversationRepository.flush();
         log.info("Deleted AI Conversation id={} for user={}", conversationId, userId);
+    }
+
+    @Override
+    public WorkoutPlanChangePreviewResponse getPendingWorkoutPreview(Long userId, Long conversationId) {
+        if (userId == null) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Authentication required");
+        }
+        return workoutPlanChangePreviewService.getPendingPreviewResponse(userId, conversationId);
+    }
+
+    @Override
+    public WorkoutPlanChangePreviewService.PreviewActionOutcome confirmWorkoutPreview(
+            Long userId, Long conversationId, String previewId
+    ) {
+        if (userId == null) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Authentication required");
+        }
+        return workoutPlanChangePreviewService.confirmPreview(userId, conversationId, previewId, false, true);
+    }
+
+    @Override
+    public WorkoutPlanChangePreviewService.PreviewActionOutcome cancelWorkoutPreview(
+            Long userId, Long conversationId, String previewId
+    ) {
+        if (userId == null) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Authentication required");
+        }
+        return workoutPlanChangePreviewService.cancelPreview(userId, conversationId, previewId, false, true);
     }
 
     @Override
@@ -214,6 +249,59 @@ public class AiAssistantServiceImpl implements AiAssistantService {
                 .toList();
 
         WorkoutDayOfWeek selectedDayOfWeek = request.getSelectedDayOfWeek();
+        boolean isVn = isVietnamese(userContent);
+
+        // 3b. Check active PENDING workout plan preview context FIRST (Confirm / Cancel / Follow-up Revision)
+        Optional<AiWorkoutPlanChangePreview> activePendingPreview = workoutPlanChangePreviewService != null
+                ? workoutPlanChangePreviewService.findActivePendingPreview(userId, conversationId)
+                : Optional.empty();
+        if (activePendingPreview.isPresent()) {
+            ActionResult pendingFollowUpResult = tryHandlePendingPreviewFollowUp(
+                    userId, conversationId, activePendingPreview.get(), userContent, isVn);
+            if (pendingFollowUpResult != null) {
+                AiConversation managedConv = aiConversationRepository.findByIdAndUserId(conversationId, userId)
+                        .orElse(conversation);
+                String followUpIntent = pendingFollowUpResult.intentOverride() != null
+                        ? pendingFollowUpResult.intentOverride()
+                        : "WORKOUT_PLAN_PREVIEW";
+                AiMessage savedMsg = aiMessageRepository.save(AiMessage.builder()
+                        .conversation(managedConv)
+                        .role("assistant")
+                        .content(pendingFollowUpResult.replyOverride())
+                        .intent(followUpIntent)
+                        .metadata(pendingFollowUpResult.metadataJson())
+                        .build());
+                attachPreviewAssistantMessageIfPresent(userId, pendingFollowUpResult.metadataJson(), savedMsg.getId());
+                if ("New Conversation".equalsIgnoreCase(managedConv.getTitle())) {
+                    managedConv.setTitle(generateTitleFromMessage(userContent, followUpIntent));
+                }
+                managedConv.setUpdatedAt(ZonedDateTime.now());
+                aiConversationRepository.save(managedConv);
+                return mapToMessageResponse(savedMsg, userId);
+            }
+        } else if (isPureConfirmMessage(userContent) || isPureCancelMessage(userContent)) {
+            // If user tried to confirm/cancel after a preview expired or when none is pending, reply cleanly without mutating DB
+            String noPendingReply = isPureConfirmMessage(userContent)
+                    ? (isVn ? "Hiện không có bản xem trước thay đổi lịch tập nào đang chờ xác nhận (hoặc bản trước đó đã hết hạn). Hãy gửi yêu cầu chỉnh sửa để tôi tạo bản xem trước mới nhé."
+                            : "There is no active pending workout plan preview to confirm (it may have already been resolved or expired). Let me know what change you'd like to make and I'll generate a fresh preview.")
+                    : (isVn ? "Hiện không có bản xem trước thay đổi lịch tập nào đang chờ để hủy. Lịch tập của bạn vẫn được giữ nguyên."
+                            : "There is no pending workout plan preview to cancel. Your workout plan remains unchanged.");
+            AiMessage savedMsg = aiMessageRepository.save(AiMessage.builder()
+                    .conversation(conversation)
+                    .role("assistant")
+                    .content(noPendingReply)
+                    .intent("WORKOUT_PLAN_PREVIEW")
+                    .metadata(safeToJson(Map.of(
+                            "type", WorkoutPlanChangePreviewService.METADATA_TYPE_CANCELLED,
+                            "code", "NO_PENDING_PREVIEW",
+                            "mutated", false
+                    )))
+                    .build());
+            conversation.setUpdatedAt(ZonedDateTime.now());
+            aiConversationRepository.save(conversation);
+            return mapToMessageResponse(savedMsg, userId);
+        }
+
         WorkoutIntentClassification preClassifiedWorkout = classifyWorkoutIntent(userContent, priorHistory);
 
         List<GeminiRequestDto.Content> geminiContents = new ArrayList<>();
@@ -263,6 +351,7 @@ public class AiAssistantServiceImpl implements AiAssistantService {
         } else if (finalWorkoutDecision != null) {
             ActionResult planResult = executeClassifiedWorkoutTool(
                     userId,
+                    conversationId,
                     userContent,
                     finalWorkoutDecision,
                     assistantOutput.getWorkoutPlanAction(),
@@ -272,6 +361,9 @@ public class AiAssistantServiceImpl implements AiAssistantService {
             );
             if (planResult.replyOverride != null) {
                 replyContent = planResult.replyOverride;
+            }
+            if (planResult.intentOverride != null) {
+                detectedIntent = planResult.intentOverride;
             }
             actionMetadataJson = planResult.metadataJson;
         } else if ("WORKOUT_PLAN".equalsIgnoreCase(detectedIntent)) {
@@ -307,6 +399,7 @@ public class AiAssistantServiceImpl implements AiAssistantService {
                 .metadata(actionMetadataJson)
                 .build();
         AiMessage savedAssistantMessage = aiMessageRepository.save(assistantMessage);
+        attachPreviewAssistantMessageIfPresent(userId, actionMetadataJson, savedAssistantMessage.getId());
 
         // 8. Auto-update Conversation Title if still "New Conversation"
         if ("New Conversation".equalsIgnoreCase(conversation.getTitle())) {
@@ -318,7 +411,7 @@ public class AiAssistantServiceImpl implements AiAssistantService {
         log.info("AI message processed in conversation={}. Intent={}, HasMetadata={}",
                 conversationId, detectedIntent, actionMetadataJson != null);
 
-        return mapToMessageResponse(savedAssistantMessage);
+        return mapToMessageResponse(savedAssistantMessage, userId);
     }
 
     private String buildSystemPrompt(
@@ -381,7 +474,11 @@ public class AiAssistantServiceImpl implements AiAssistantService {
         return sb.toString();
     }
 
-    private record ActionResult(String replyOverride, String metadataJson) {}
+    private record ActionResult(String replyOverride, String metadataJson, String intentOverride) {
+        private ActionResult(String replyOverride, String metadataJson) {
+            this(replyOverride, metadataJson, null);
+        }
+    }
 
     private ActionResult executePrRecordAction(Long userId, String userMessage, GeminiAssistantOutput.PrAction prAction) {
         if (prAction == null || Boolean.TRUE.equals(prAction.getIsAmbiguous()) || prAction.getValue() == null) {
@@ -846,15 +943,142 @@ public class AiAssistantServiceImpl implements AiAssistantService {
 
     private record PendingWorkoutClarification(
             String pendingAction,
-            String exerciseName
+            String exerciseName,
+            WorkoutDayOfWeek targetDayOfWeek
     ) {}
 
     private static boolean isDeterministicWorkoutTool(String toolName) {
         return UserAiWorkoutToolService.TOOL_ADD_EXERCISE_TO_WORKOUT.equals(toolName)
                 || UserAiWorkoutToolService.TOOL_REMOVE_EXERCISE_FROM_WORKOUT.equals(toolName)
                 || UserAiWorkoutToolService.TOOL_MOVE_EXERCISE_BETWEEN_DAYS.equals(toolName)
+                || WorkoutPlanChangePreviewService.TOOL_UPDATE_EXERCISE_IN_WORKOUT.equals(toolName)
+                || WorkoutPlanChangePreviewService.TOOL_REORDER_EXERCISES_IN_WORKOUT.equals(toolName)
                 || UserAiWorkoutToolService.TOOL_UPDATE_WORKOUT_PLAN.equals(toolName)
                 || UserAiWorkoutToolService.TOOL_ASSIGN_WORKOUT_PLAN.equals(toolName);
+    }
+
+    private ActionResult tryHandlePendingPreviewFollowUp(
+            Long userId,
+            Long conversationId,
+            AiWorkoutPlanChangePreview pendingPreview,
+            String userContent,
+            boolean isVn
+    ) {
+        if (isPureConfirmMessage(userContent)) {
+            WorkoutPlanChangePreviewService.PreviewActionOutcome outcome =
+                    workoutPlanChangePreviewService.confirmPreview(
+                            userId, conversationId, pendingPreview.getPreviewId(), isVn, false);
+            UserAiWorkoutToolService.WorkoutToolResult res =
+                    workoutPlanChangePreviewService.toConversationalToolResult(outcome);
+            return new ActionResult(res.reply(), res.metadataJson(), res.intent());
+        }
+        if (isPureCancelMessage(userContent)) {
+            WorkoutPlanChangePreviewService.PreviewActionOutcome outcome =
+                    workoutPlanChangePreviewService.cancelPreview(
+                            userId, conversationId, pendingPreview.getPreviewId(), isVn, false);
+            UserAiWorkoutToolService.WorkoutToolResult res =
+                    workoutPlanChangePreviewService.toConversationalToolResult(outcome);
+            return new ActionResult(res.reply(), res.metadataJson(), res.intent());
+        }
+        if (isPendingPreviewRevisionFollowUp(userContent)) {
+            UserAiWorkoutToolService.WorkoutToolResult res =
+                    workoutPlanChangePreviewService.revisePendingPreview(
+                            userId, conversationId, pendingPreview, userContent, isVn);
+            return new ActionResult(res.reply(), res.metadataJson(), res.intent());
+        }
+        return null;
+    }
+
+    private static String normalizeShortCommand(String text) {
+        if (text == null) return "";
+        return text.trim().toLowerCase(Locale.US)
+                .replaceAll("[.!?]+$", "")
+                .replaceAll("\\s+", " ")
+                .trim();
+    }
+
+    private static boolean isPureConfirmMessage(String text) {
+        String norm = normalizeShortCommand(text);
+        return Set.of(
+                "confirm", "confirm changes", "confirm it", "confirm please",
+                "yes", "yes confirm", "yes, confirm", "yes please", "yes apply", "yes, apply",
+                "approve", "approved", "apply", "apply changes", "apply it",
+                "go ahead", "looks good", "looks good confirm", "looks good, confirm",
+                "do it", "proceed", "ok confirm", "okay confirm",
+                "xác nhận", "xác nhận thay đổi", "đồng ý", "áp dụng", "áp dụng thay đổi", "lưu thay đổi"
+        ).contains(norm);
+    }
+
+    private static boolean isPureCancelMessage(String text) {
+        String norm = normalizeShortCommand(text);
+        return Set.of(
+                "cancel", "cancel changes", "cancel it", "cancel please",
+                "no", "no cancel", "no, cancel", "no thanks", "nope",
+                "discard", "discard changes", "discard it",
+                "never mind", "nevermind", "abort", "stop", "forget it",
+                "don't apply", "do not apply", "reject",
+                "hủy", "hủy bỏ", "hủy thay đổi", "không", "thôi", "không áp dụng"
+        ).contains(norm);
+    }
+
+    private boolean isPendingPreviewRevisionFollowUp(String text) {
+        if (text == null || text.isBlank()) return false;
+        String lower = text.toLowerCase(Locale.US).trim();
+
+        // Exclude profile / PR / read-only view queries
+        if (lower.contains("profile") || lower.contains("weight") || lower.contains("height")
+                || containsWord(lower, "pr") || lower.contains("personal record")
+                || containsWord(lower, "show") || containsWord(lower, "view")
+                || containsWord(lower, "list") || lower.contains("xem ")
+                || lower.contains("what am i training") || lower.contains("today's workout")) {
+            return false;
+        }
+        // Exclude brand-new plan creation / replacement / add / remove commands (unless anaphoric move/day change)
+        boolean startsNewDistinctAction = containsWord(lower, "create") || containsWord(lower, "generate")
+                || containsWord(lower, "replace") || containsWord(lower, "regenerate")
+                || containsWord(lower, "add") || containsWord(lower, "remove") || containsWord(lower, "delete")
+                || lower.contains("thêm ") || lower.contains("xóa ") || lower.contains("tạo lịch");
+        if (startsNewDistinctAction) {
+            return false;
+        }
+
+        boolean hasPrescription = WorkoutPlanChangePreviewService.parseExercisePrescription(text).hasAny();
+        boolean hasWeekday = UserAiWorkoutToolService.extractWeekday(text) != null;
+        boolean hasAnaphoraOrInstead = containsWord(lower, "instead") || containsWord(lower, "actually")
+                || containsWord(lower, "it") || containsWord(lower, "that")
+                || lower.contains("thay vì") || lower.contains("đổi thành") || lower.contains("sang ");
+
+        // E.g. "Make it 4 sets instead", "Make it 5 sets", "Change rest to 120s", "12 reps instead"
+        if (hasPrescription && !containsWord(lower, "move")) {
+            return true;
+        }
+        // E.g. "Move it to Wednesday instead", "Make it 4 sets and move it to Wednesday", "Actually Wednesday"
+        if ((hasPrescription || hasWeekday) && hasAnaphoraOrInstead) {
+            return true;
+        }
+        return false;
+    }
+
+    private void attachPreviewAssistantMessageIfPresent(Long userId, String metadataJson, Long messageId) {
+        if (workoutPlanChangePreviewService == null || metadataJson == null || metadataJson.isBlank() || messageId == null) {
+            return;
+        }
+        if (!metadataJson.contains(WorkoutPlanChangePreviewService.METADATA_TYPE_PREVIEW)) {
+            return;
+        }
+        try {
+            JsonNode root = objectMapper.readTree(metadataJson);
+            if (WorkoutPlanChangePreviewService.METADATA_TYPE_PREVIEW.equals(root.path("type").asText())) {
+                String previewId = root.path("previewId").asText(null);
+                if (previewId == null || previewId.isBlank()) {
+                    previewId = root.path("preview").path("previewId").asText(null);
+                }
+                if (previewId != null && !previewId.isBlank()) {
+                    workoutPlanChangePreviewService.attachAssistantMessageId(userId, previewId, messageId);
+                }
+            }
+        } catch (Exception ignored) {
+        }
     }
 
     private WorkoutIntentClassification reconcileWorkoutDecision(
@@ -922,6 +1146,7 @@ public class AiAssistantServiceImpl implements AiAssistantService {
 
     private ActionResult executeClassifiedWorkoutTool(
             Long userId,
+            Long conversationId,
             String userContent,
             WorkoutIntentClassification decision,
             GeminiAssistantOutput.WorkoutPlanAction planAction,
@@ -946,7 +1171,7 @@ public class AiAssistantServiceImpl implements AiAssistantService {
                             userAiWorkoutToolService.getExerciseDetails(userId, userContent, isVn);
                     default -> userAiWorkoutToolService.getMyWorkoutPlan(userId, decision.detailed(), isVn);
                 };
-                return new ActionResult(result.reply(), result.metadataJson());
+                return new ActionResult(result.reply(), result.metadataJson(), result.intent());
             } catch (Exception ex) {
                 log.error("Read-only workout retrieval failed for userId={}, tool={}: {}",
                         userId, decision.toolName(), ex.getMessage(), ex);
@@ -963,7 +1188,8 @@ public class AiAssistantServiceImpl implements AiAssistantService {
             }
         }
 
-        // Write tools
+        // Write tools: full-plan creation generates an uncommitted AiWorkoutPlanPreviewResponse;
+        // all workout plan modifications generate a validated Workout Plan Change Preview and NEVER mutate DB before explicit confirmation.
         String actionExerciseName = decision.exerciseName() != null
                 ? decision.exerciseName()
                 : (planAction != null ? planAction.getExerciseName() : null);
@@ -975,33 +1201,40 @@ public class AiAssistantServiceImpl implements AiAssistantService {
             Integer weeks = planAction != null ? planAction.getDurationWeeks() : 4;
             UserAiWorkoutToolService.WorkoutToolResult res = userAiWorkoutToolService.createWorkoutPlan(
                     userId, userContent, fitnessLevel, weeks, timezone, isVn, true);
-            return new ActionResult(res.reply(), res.metadataJson());
-        }
-        if (UserAiWorkoutToolService.TOOL_UPDATE_WORKOUT_PLAN.equals(decision.toolName())) {
-            UserAiWorkoutToolService.WorkoutToolResult res = userAiWorkoutToolService.updateWorkoutPlan(
-                    userId, decision.targetDay(), selectedDayOfWeek, userContent, timezone, isVn);
-            return new ActionResult(res.reply(), res.metadataJson());
-        }
-        if (UserAiWorkoutToolService.TOOL_ADD_EXERCISE_TO_WORKOUT.equals(decision.toolName())) {
-            UserAiWorkoutToolService.WorkoutToolResult res = userAiWorkoutToolService.addExerciseToWorkout(
-                    userId, decision.targetDay(), selectedDayOfWeek, userContent, actionExerciseName, priorHistory, timezone, isVn);
-            return new ActionResult(res.reply(), res.metadataJson());
-        }
-        if (UserAiWorkoutToolService.TOOL_REMOVE_EXERCISE_FROM_WORKOUT.equals(decision.toolName())) {
-            UserAiWorkoutToolService.WorkoutToolResult res = userAiWorkoutToolService.removeExerciseFromWorkout(
-                    userId, decision.targetDay(), selectedDayOfWeek, userContent, actionExerciseName, priorHistory, isVn);
-            return new ActionResult(res.reply(), res.metadataJson());
-        }
-        if (UserAiWorkoutToolService.TOOL_MOVE_EXERCISE_BETWEEN_DAYS.equals(decision.toolName())) {
-            UserAiWorkoutToolService.WorkoutToolResult res = userAiWorkoutToolService.moveExerciseBetweenDays(
-                    userId, decision.sourceDay(), decision.targetDay(), selectedDayOfWeek, userContent, actionExerciseName, priorHistory, isVn);
-            return new ActionResult(res.reply(), res.metadataJson());
+            return new ActionResult(res.reply(), res.metadataJson(), res.intent());
         }
         if (UserAiWorkoutToolService.TOOL_ASSIGN_WORKOUT_PLAN.equals(decision.toolName())) {
             UserAiWorkoutToolService.WorkoutToolResult res = userAiWorkoutToolService.assignWorkoutPlan(
                     userId, null, userContent, isVn);
-            return new ActionResult(res.reply(), res.metadataJson());
+            return new ActionResult(res.reply(), res.metadataJson(), res.intent());
         }
+
+        if (UserAiWorkoutToolService.TOOL_UPDATE_WORKOUT_PLAN.equals(decision.toolName())
+                && decision.targetDay() == null
+                && UserAiWorkoutToolService.extractWeekday(userContent) == null
+                && selectedDayOfWeek == null
+                && !WorkoutPlanChangePreviewService.parseExercisePrescription(userContent).hasAny()) {
+            UserAiWorkoutToolService.WorkoutToolResult res = userAiWorkoutToolService.createWorkoutPlan(
+                    userId, userContent, null, 4, timezone, isVn, true);
+            return new ActionResult(res.reply(), res.metadataJson(), res.intent());
+        }
+
+        if (workoutPlanChangePreviewService != null) {
+            UserAiWorkoutToolService.WorkoutToolResult previewRes = workoutPlanChangePreviewService.proposeChanges(
+                    userId,
+                    conversationId,
+                    decision.toolName(),
+                    decision.sourceDay(),
+                    decision.targetDay(),
+                    selectedDayOfWeek,
+                    userContent,
+                    actionExerciseName,
+                    priorHistory,
+                    isVn
+            );
+            return new ActionResult(previewRes.reply(), previewRes.metadataJson(), previewRes.intent());
+        }
+
         return executeWorkoutPlanAction(userId, userContent, planAction, timezone);
     }
 
@@ -1081,6 +1314,19 @@ public class AiAssistantServiceImpl implements AiAssistantService {
                         UserAiWorkoutToolService.TOOL_REMOVE_EXERCISE_FROM_WORKOUT, false, null, weekday,
                         pendingClarification.exerciseName(), false, false, true);
             }
+            if ("MOVE".equalsIgnoreCase(pendingClarification.pendingAction())) {
+                WorkoutDayOfWeek clarifiedSource = pendingClarification.targetDayOfWeek() != null ? weekday : null;
+                WorkoutDayOfWeek clarifiedTarget = pendingClarification.targetDayOfWeek() != null
+                        ? pendingClarification.targetDayOfWeek() : weekday;
+                return new WorkoutIntentClassification("WORKOUT_PLAN_UPDATE",
+                        UserAiWorkoutToolService.TOOL_MOVE_EXERCISE_BETWEEN_DAYS, false, clarifiedSource, clarifiedTarget,
+                        pendingClarification.exerciseName(), false, false, true);
+            }
+            if ("UPDATE".equalsIgnoreCase(pendingClarification.pendingAction())) {
+                return new WorkoutIntentClassification("WORKOUT_PLAN_UPDATE",
+                        WorkoutPlanChangePreviewService.TOOL_UPDATE_EXERCISE_IN_WORKOUT, false, null, weekday,
+                        pendingClarification.exerciseName(), false, false, true);
+            }
         }
 
         // 1. Check EXPLICIT WRITE intents first
@@ -1100,6 +1346,19 @@ public class AiAssistantServiceImpl implements AiAssistantService {
         if (hasCreateVerb && (mentionsPlanOrSchedule || lower.contains("split") || lower.contains("schedule") || lower.contains("workout"))) {
             return new WorkoutIntentClassification("WORKOUT_PLAN",
                     UserAiWorkoutToolService.TOOL_CREATE_WORKOUT_PLAN, false, null, weekday, null, false, false, false);
+        }
+
+        boolean hasReorderCue = containsWord(lower, "reorder")
+                || lower.contains("sắp xếp lại")
+                || (containsWord(lower, "swap") && (lower.contains("order") || mentionsAnyPublishedExercise(lower)))
+                || ((containsWord(lower, "put") || containsWord(lower, "move") || containsWord(lower, "place"))
+                    && (lower.contains(" first") || lower.contains(" last")
+                        || lower.contains(" to the top") || lower.contains(" to the bottom")
+                        || lower.contains(" before ") || lower.contains(" after ")
+                        || lower.contains("position ") || lower.contains("đầu tiên") || lower.contains("cuối cùng")));
+        if (hasReorderCue && (weekday != null || mentionsExerciseVerb || hasWorkoutHistoryContext || mentionsAnyPublishedExercise(lower))) {
+            return new WorkoutIntentClassification("WORKOUT_PLAN_UPDATE",
+                    WorkoutPlanChangePreviewService.TOOL_REORDER_EXERCISES_IN_WORKOUT, false, null, weekday, null, false, false, true);
         }
 
         boolean hasMoveVerb = containsWord(lower, "move") || containsWord(lower, "transfer")
@@ -1128,6 +1387,19 @@ public class AiAssistantServiceImpl implements AiAssistantService {
                 || hasWorkoutHistoryContext || mentionsAnyPublishedExercise(lower))) {
             return new WorkoutIntentClassification("WORKOUT_PLAN_UPDATE",
                     UserAiWorkoutToolService.TOOL_REMOVE_EXERCISE_FROM_WORKOUT, false, null, weekday, null, false, false, true);
+        }
+
+        boolean hasPrescriptionSpec = WorkoutPlanChangePreviewService.parseExercisePrescription(userMessage).hasAny();
+        boolean hasUpdateExerciseVerb = containsWord(lower, "update") || containsWord(lower, "change")
+                || containsWord(lower, "modify") || containsWord(lower, "set")
+                || containsWord(lower, "make") || containsWord(lower, "increase")
+                || containsWord(lower, "decrease") || containsWord(lower, "adjust")
+                || containsWord(lower, "edit")
+                || lower.contains("đổi ") || lower.contains("sửa ") || lower.contains("chỉnh ") || lower.contains("cập nhật ");
+        if (hasUpdateExerciseVerb && hasPrescriptionSpec
+                && (mentionsAnyPublishedExercise(lower) || weekday != null || hasWorkoutHistoryContext)) {
+            return new WorkoutIntentClassification("WORKOUT_PLAN_UPDATE",
+                    WorkoutPlanChangePreviewService.TOOL_UPDATE_EXERCISE_IN_WORKOUT, false, null, weekday, null, false, false, true);
         }
 
         boolean hasModifyVerb = containsWord(lower, "change") || containsWord(lower, "modify")
@@ -1236,8 +1508,11 @@ public class AiAssistantServiceImpl implements AiAssistantService {
                 if ("WORKOUT_PLAN_CLARIFICATION".equals(root.path("type").asText())) {
                     String action = root.path("pendingAction").asText(null);
                     String exName = root.hasNonNull("exerciseName") ? root.get("exerciseName").asText() : null;
+                    WorkoutDayOfWeek targetDay = root.hasNonNull("targetDayOfWeek")
+                            ? parseOptionalEnumDay(root.get("targetDayOfWeek").asText())
+                            : null;
                     if (action != null && !action.isBlank()) {
-                        return new PendingWorkoutClarification(action, exName);
+                        return new PendingWorkoutClarification(action, exName, targetDay);
                     }
                 }
             } catch (Exception ignored) {
@@ -1574,7 +1849,7 @@ public class AiAssistantServiceImpl implements AiAssistantService {
         if (userMessage == null || userMessage.isBlank()) {
             return switch (intent) {
                 case "PR_RECORD" -> "PR Record Log";
-                case "WORKOUT_PLAN", "WORKOUT_PLAN_VIEW", "WORKOUT_DAY_VIEW", "WORKOUT_PLAN_UPDATE" -> "Workout Plan Session";
+                case "WORKOUT_PLAN", "WORKOUT_PLAN_VIEW", "WORKOUT_DAY_VIEW", "WORKOUT_PLAN_UPDATE", "WORKOUT_PLAN_PREVIEW" -> "Workout Plan Session";
                 case "PROGRESS_ANALYSIS" -> "Progress Analysis";
                 case "PROFILE_UPDATE" -> "Profile Update";
                 default -> "Calisthenics Coaching";
@@ -1611,13 +1886,27 @@ public class AiAssistantServiceImpl implements AiAssistantService {
     }
 
     private AiMessageResponse mapToMessageResponse(AiMessage message) {
+        return mapToMessageResponse(message, null);
+    }
+
+    private AiMessageResponse mapToMessageResponse(AiMessage message, Long userId) {
+        String metadata = message.getMetadata();
+        if (userId != null
+                && workoutPlanChangePreviewService != null
+                && metadata != null
+                && metadata.contains(WorkoutPlanChangePreviewService.METADATA_TYPE_PREVIEW)) {
+            String hydrated = workoutPlanChangePreviewService.hydrateMessageMetadata(userId, metadata);
+            if (hydrated != null) {
+                metadata = hydrated;
+            }
+        }
         return AiMessageResponse.builder()
                 .id(message.getId())
                 .conversationId(message.getConversation().getId())
                 .role(message.getRole())
                 .content(message.getContent())
                 .intent(message.getIntent())
-                .metadata(message.getMetadata())
+                .metadata(metadata)
                 .createdAt(message.getCreatedAt())
                 .build();
     }

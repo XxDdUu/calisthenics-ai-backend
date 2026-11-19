@@ -1,7 +1,10 @@
 package com.calisthenics.backend.aichat.controller;
 
 import com.calisthenics.backend.aichat.dto.*;
+import com.calisthenics.backend.aichat.dto.preview.WorkoutPlanChangePreviewActionResponse;
+import com.calisthenics.backend.aichat.dto.preview.WorkoutPlanChangePreviewResponse;
 import com.calisthenics.backend.aichat.service.AiAssistantService;
+import com.calisthenics.backend.aichat.service.WorkoutPlanChangePreviewService;
 import com.calisthenics.backend.security.UserPrincipal;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
@@ -87,5 +90,42 @@ public class AiAssistantController {
             @Valid @RequestBody SendAiMessageRequest request
     ) {
         return ResponseEntity.ok(aiAssistantService.sendMessageToActiveConversation(currentUser.getId(), request));
+    }
+
+    @GetMapping("/{id}/previews/pending")
+    @Operation(summary = "Get the active pending workout plan change preview for a conversation")
+    public ResponseEntity<WorkoutPlanChangePreviewResponse> getPendingWorkoutPreview(
+            @AuthenticationPrincipal UserPrincipal currentUser,
+            @PathVariable Long id
+    ) {
+        WorkoutPlanChangePreviewResponse pending = aiAssistantService.getPendingWorkoutPreview(currentUser.getId(), id);
+        if (pending == null) {
+            return ResponseEntity.noContent().build();
+        }
+        return ResponseEntity.ok(pending);
+    }
+
+    @PostMapping("/{id}/previews/{previewId}/confirm")
+    @Operation(summary = "Confirm and atomically apply a pending workout plan change preview")
+    public ResponseEntity<WorkoutPlanChangePreviewActionResponse> confirmWorkoutPreview(
+            @AuthenticationPrincipal UserPrincipal currentUser,
+            @PathVariable Long id,
+            @PathVariable String previewId
+    ) {
+        WorkoutPlanChangePreviewService.PreviewActionOutcome outcome =
+                aiAssistantService.confirmWorkoutPreview(currentUser.getId(), id, previewId);
+        return ResponseEntity.status(outcome.httpStatus()).body(outcome.response());
+    }
+
+    @PostMapping("/{id}/previews/{previewId}/cancel")
+    @Operation(summary = "Cancel and discard a pending workout plan change preview")
+    public ResponseEntity<WorkoutPlanChangePreviewActionResponse> cancelWorkoutPreview(
+            @AuthenticationPrincipal UserPrincipal currentUser,
+            @PathVariable Long id,
+            @PathVariable String previewId
+    ) {
+        WorkoutPlanChangePreviewService.PreviewActionOutcome outcome =
+                aiAssistantService.cancelWorkoutPreview(currentUser.getId(), id, previewId);
+        return ResponseEntity.status(outcome.httpStatus()).body(outcome.response());
     }
 }

@@ -75,9 +75,9 @@ public class UserAiWorkoutToolService {
     private static final Pattern REST_BEFORE_PATTERN = Pattern.compile(
             "(?i)\\brest\\s*[:=]?\\s*(?:of\\s*)?(\\d{1,3})\\s*(?:s|sec|secs|seconds?)?\\b");
     private static final Pattern HOLD_PATTERN = Pattern.compile(
-            "(?i)\\b(\\d{1,3})\\s*(?:s|sec|secs|seconds?)\\s*(?:hold\\b)?(?!\\s*rest\\b)");
+            "(?i)\\b(\\d{1,3})\\s*(?:s|sec|secs|seconds?)(?![\\p{L}\\p{N}])(?:\\s*hold\\b)?(?!\\s*rest\\b)");
     private static final Pattern HOLD_PREFIX_PATTERN = Pattern.compile(
-            "(?i)\\bhold\\s*(?:for\\s*)?(\\d{1,3})\\s*(?:s|sec|secs|seconds?)\\b");
+            "(?i)\\bhold\\s*(?:for\\s*)?(\\d{1,3})\\s*(?:s|sec|secs|seconds?)(?![\\p{L}\\p{N}])");
     private static final Pattern WEEKDAY_TOKEN_PATTERN = Pattern.compile(
             "(?<![\\p{L}\\p{N}])(" +
                     "monday|mon|" +

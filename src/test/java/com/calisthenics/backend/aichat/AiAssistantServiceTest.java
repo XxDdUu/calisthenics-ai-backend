@@ -1,12 +1,18 @@
 package com.calisthenics.backend.aichat;
 
 import com.calisthenics.backend.aichat.dto.*;
+import com.calisthenics.backend.aichat.dto.preview.WorkoutPlanChangePreviewActionResponse;
+import com.calisthenics.backend.aichat.dto.preview.WorkoutPlanChangePreviewResponse;
 import com.calisthenics.backend.aichat.entity.AiConversation;
 import com.calisthenics.backend.aichat.entity.AiMessage;
+import com.calisthenics.backend.aichat.entity.AiWorkoutPlanChangePreview;
 import com.calisthenics.backend.aichat.repository.AiConversationRepository;
 import com.calisthenics.backend.aichat.repository.AiMessageRepository;
 import com.calisthenics.backend.aichat.service.UserAiWorkoutToolService;
+import com.calisthenics.backend.aichat.service.WorkoutPlanChangePreviewService;
 import com.calisthenics.backend.aichat.service.impl.AiAssistantServiceImpl;
+import com.calisthenics.backend.aichat.type.WorkoutPlanPreviewStatus;
+import org.springframework.http.HttpStatus;
 import com.calisthenics.backend.aiworkout.dto.AiWorkoutPlanPreviewResponse;
 import com.calisthenics.backend.aiworkout.gemini.GeminiApiClient;
 import com.calisthenics.backend.aiworkout.service.AiWorkoutPlanService;
@@ -89,6 +95,9 @@ class AiAssistantServiceTest {
 
     @Mock
     private UserAiWorkoutToolService userAiWorkoutToolService;
+
+    @Mock
+    private WorkoutPlanChangePreviewService workoutPlanChangePreviewService;
 
     @Spy
     private ObjectMapper objectMapper = new ObjectMapper();
@@ -505,5 +514,154 @@ class AiAssistantServiceTest {
         assertThat(response.getIntent()).isEqualTo("PROFILE_UPDATE");
         assertThat(response.getContent()).contains("couldn't update your profile");
         assertThat(response.getMetadata()).contains("\"success\":false");
+    }
+
+    @Test
+    @DisplayName("sendMessage routes conversational 'Confirm.' to confirmPreview when a pending preview exists")
+    void testSendMessage_ConfirmPendingPreview() {
+        when(aiConversationRepository.findByIdAndUserId(10L, 1L)).thenReturn(Optional.of(testConversation));
+        when(userRepository.findById(1L)).thenReturn(Optional.of(testUser));
+        when(clientProfileRepository.findByUserId(1L)).thenReturn(Optional.empty());
+        when(personalRecordRepository.findByUserIdOrderByAchievedAtDesc(1L)).thenReturn(Collections.emptyList());
+        when(workoutSessionRepository.findByUserIdAndStatusOrderByWorkoutDateDesc(eq(1L), any())).thenReturn(Collections.emptyList());
+        when(aiMessageRepository.findTop15ByConversationIdOrderByCreatedAtDesc(10L)).thenReturn(new ArrayList<>());
+
+        AiWorkoutPlanChangePreview pending = AiWorkoutPlanChangePreview.builder()
+                .previewId("prev-123")
+                .userId(1L)
+                .conversationId(10L)
+                .workoutPlanId(50L)
+                .status(WorkoutPlanPreviewStatus.PENDING)
+                .expiresAt(ZonedDateTime.now().plusMinutes(30))
+                .build();
+        when(workoutPlanChangePreviewService.findActivePendingPreview(1L, 10L)).thenReturn(Optional.of(pending));
+
+        WorkoutPlanChangePreviewService.PreviewActionOutcome outcome = new WorkoutPlanChangePreviewService.PreviewActionOutcome(
+                HttpStatus.OK,
+                WorkoutPlanChangePreviewActionResponse.builder()
+                        .success(true)
+                        .mutated(true)
+                        .verified(true)
+                        .code("CONFIRMED")
+                        .message("✅ Workout Plan Updated & Verified!")
+                        .preview(WorkoutPlanChangePreviewResponse.builder()
+                                .previewId("prev-123")
+                                .status(WorkoutPlanPreviewStatus.CONFIRMED)
+                                .build())
+                        .build()
+        );
+        when(workoutPlanChangePreviewService.confirmPreview(1L, 10L, "prev-123", false, false)).thenReturn(outcome);
+        when(workoutPlanChangePreviewService.toConversationalToolResult(outcome)).thenReturn(
+                new UserAiWorkoutToolService.WorkoutToolResult(
+                        "confirm_workout_preview", false, "WORKOUT_PLAN_UPDATE", true,
+                        "✅ Workout Plan Updated & Verified!", "{\"type\":\"WORKOUT_PLAN_UPDATED\",\"mutated\":true,\"previewId\":\"prev-123\"}"
+                )
+        );
+        when(aiMessageRepository.save(any(AiMessage.class))).thenAnswer(inv -> {
+            AiMessage m = inv.getArgument(0);
+            m.setId(201L);
+            m.setCreatedAt(ZonedDateTime.now());
+            return m;
+        });
+
+        AiMessageResponse response = aiAssistantService.sendMessage(1L, 10L, new SendAiMessageRequest("Confirm.", null));
+
+        assertThat(response.getIntent()).isEqualTo("WORKOUT_PLAN_UPDATE");
+        assertThat(response.getContent()).contains("Workout Plan Updated");
+        verify(workoutPlanChangePreviewService).confirmPreview(1L, 10L, "prev-123", false, false);
+        verify(geminiApiClient, never()).callAssistant(anyString(), anyList());
+    }
+
+    @Test
+    @DisplayName("sendMessage routes conversational 'Cancel.' to cancelPreview when a pending preview exists")
+    void testSendMessage_CancelPendingPreview() {
+        when(aiConversationRepository.findByIdAndUserId(10L, 1L)).thenReturn(Optional.of(testConversation));
+        when(userRepository.findById(1L)).thenReturn(Optional.of(testUser));
+        when(clientProfileRepository.findByUserId(1L)).thenReturn(Optional.empty());
+        when(personalRecordRepository.findByUserIdOrderByAchievedAtDesc(1L)).thenReturn(Collections.emptyList());
+        when(workoutSessionRepository.findByUserIdAndStatusOrderByWorkoutDateDesc(eq(1L), any())).thenReturn(Collections.emptyList());
+        when(aiMessageRepository.findTop15ByConversationIdOrderByCreatedAtDesc(10L)).thenReturn(new ArrayList<>());
+
+        AiWorkoutPlanChangePreview pending = AiWorkoutPlanChangePreview.builder()
+                .previewId("prev-456")
+                .userId(1L)
+                .conversationId(10L)
+                .workoutPlanId(50L)
+                .status(WorkoutPlanPreviewStatus.PENDING)
+                .expiresAt(ZonedDateTime.now().plusMinutes(30))
+                .build();
+        when(workoutPlanChangePreviewService.findActivePendingPreview(1L, 10L)).thenReturn(Optional.of(pending));
+
+        WorkoutPlanChangePreviewService.PreviewActionOutcome outcome = new WorkoutPlanChangePreviewService.PreviewActionOutcome(
+                HttpStatus.OK,
+                WorkoutPlanChangePreviewActionResponse.builder()
+                        .success(true)
+                        .mutated(false)
+                        .code("CANCELLED")
+                        .message("Cancelled the proposed workout plan changes.")
+                        .build()
+        );
+        when(workoutPlanChangePreviewService.cancelPreview(1L, 10L, "prev-456", false, false)).thenReturn(outcome);
+        when(workoutPlanChangePreviewService.toConversationalToolResult(outcome)).thenReturn(
+                new UserAiWorkoutToolService.WorkoutToolResult(
+                        "cancel_workout_preview", false, "WORKOUT_PLAN_PREVIEW", true,
+                        "Cancelled the proposed workout plan changes.", "{\"type\":\"WORKOUT_PLAN_PREVIEW_CANCELLED\",\"mutated\":false}"
+                )
+        );
+        when(aiMessageRepository.save(any(AiMessage.class))).thenAnswer(inv -> {
+            AiMessage m = inv.getArgument(0);
+            m.setId(202L);
+            m.setCreatedAt(ZonedDateTime.now());
+            return m;
+        });
+
+        AiMessageResponse response = aiAssistantService.sendMessage(1L, 10L, new SendAiMessageRequest("Cancel.", null));
+
+        assertThat(response.getIntent()).isEqualTo("WORKOUT_PLAN_PREVIEW");
+        assertThat(response.getContent()).contains("Cancelled");
+        verify(workoutPlanChangePreviewService).cancelPreview(1L, 10L, "prev-456", false, false);
+        verify(geminiApiClient, never()).callAssistant(anyString(), anyList());
+    }
+
+    @Test
+    @DisplayName("sendMessage routes 'Make it 5 sets instead.' to revisePendingPreview when a pending preview exists")
+    void testSendMessage_RevisePendingPreview() {
+        when(aiConversationRepository.findByIdAndUserId(10L, 1L)).thenReturn(Optional.of(testConversation));
+        when(userRepository.findById(1L)).thenReturn(Optional.of(testUser));
+        when(clientProfileRepository.findByUserId(1L)).thenReturn(Optional.empty());
+        when(personalRecordRepository.findByUserIdOrderByAchievedAtDesc(1L)).thenReturn(Collections.emptyList());
+        when(workoutSessionRepository.findByUserIdAndStatusOrderByWorkoutDateDesc(eq(1L), any())).thenReturn(Collections.emptyList());
+        when(aiMessageRepository.findTop15ByConversationIdOrderByCreatedAtDesc(10L)).thenReturn(new ArrayList<>());
+
+        AiWorkoutPlanChangePreview pending = AiWorkoutPlanChangePreview.builder()
+                .previewId("prev-789")
+                .userId(1L)
+                .conversationId(10L)
+                .workoutPlanId(50L)
+                .status(WorkoutPlanPreviewStatus.PENDING)
+                .expiresAt(ZonedDateTime.now().plusMinutes(30))
+                .build();
+        when(workoutPlanChangePreviewService.findActivePendingPreview(1L, 10L)).thenReturn(Optional.of(pending));
+        when(workoutPlanChangePreviewService.revisePendingPreview(1L, 10L, pending, "Make it 5 sets instead.", false))
+                .thenReturn(new UserAiWorkoutToolService.WorkoutToolResult(
+                        "revise_workout_preview", false, "WORKOUT_PLAN_PREVIEW", true,
+                        "### Workout Plan Preview (Rev 2)", "{\"type\":\"WORKOUT_PLAN_CHANGE_PREVIEW\",\"previewId\":\"prev-790\",\"mutated\":false}"
+                ));
+        when(aiMessageRepository.save(any(AiMessage.class))).thenAnswer(inv -> {
+            AiMessage m = inv.getArgument(0);
+            m.setId(203L);
+            m.setCreatedAt(ZonedDateTime.now());
+            return m;
+        });
+        when(workoutPlanChangePreviewService.hydrateMessageMetadata(eq(1L), anyString()))
+                .thenAnswer(inv -> inv.getArgument(1));
+
+        AiMessageResponse response = aiAssistantService.sendMessage(1L, 10L, new SendAiMessageRequest("Make it 5 sets instead.", null));
+
+        assertThat(response.getIntent()).isEqualTo("WORKOUT_PLAN_PREVIEW");
+        assertThat(response.getContent()).contains("Rev 2");
+        verify(workoutPlanChangePreviewService).revisePendingPreview(1L, 10L, pending, "Make it 5 sets instead.", false);
+        verify(workoutPlanChangePreviewService).attachAssistantMessageId(1L, "prev-790", 203L);
+        verify(geminiApiClient, never()).callAssistant(anyString(), anyList());
     }
 }
