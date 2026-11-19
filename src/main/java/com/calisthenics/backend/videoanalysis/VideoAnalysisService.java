@@ -16,7 +16,12 @@ import org.springframework.core.task.TaskExecutor;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.server.ResponseStatusException;
 
@@ -90,6 +95,9 @@ public class VideoAnalysisService {
     private final ObjectMapper objectMapper;
     private final TaskExecutor taskExecutor;
     private final VideoAnalysisQuotaService videoAnalysisQuotaService;
+
+    @Autowired(required = false)
+    private PlatformTransactionManager transactionManager;
 
     public VideoAnalysisService(
             VideoAnalysisRepository videoAnalysisRepository,
@@ -213,14 +221,27 @@ public class VideoAnalysisService {
 
         String uuidStr = UUID.randomUUID().toString();
         String filename = file.getOriginalFilename();
-        taskExecutor.execute(() -> processAnalysisAsync(
-                savedAnalysis.getId(),
+        Long analysisId = savedAnalysis.getId();
+        String code = resolvedExercise.code();
+        Runnable dispatchTask = () -> taskExecutor.execute(() -> processAnalysisAsync(
+                analysisId,
                 fileBytes,
                 filename,
-                resolvedExercise.code(),
+                code,
                 uuidStr,
                 sideView
         ));
+        if (TransactionSynchronizationManager.isSynchronizationActive()
+                && TransactionSynchronizationManager.isActualTransactionActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    dispatchTask.run();
+                }
+            });
+        } else {
+            dispatchTask.run();
+        }
 
         VideoAnalysisResponseDto response = mapToResponse(savedAnalysis);
         response.setQuota(reservedQuota);
@@ -274,14 +295,24 @@ public class VideoAnalysisService {
 
             completeAnalysis(analysisId, aiResult, annotatedKey);
 
-        } catch (Exception e) {
-            log.error("Error during async video analysis processing for id={}", analysisId, e);
-            updateStatus(analysisId, "FAILED", e.getMessage() != null ? e.getMessage() : "Unexpected analysis failure");
+        } catch (Throwable t) {
+            log.error("Error during async video analysis processing for id={}", analysisId, t);
+            String msg = (t.getMessage() != null && !t.getMessage().isBlank())
+                    ? t.getMessage()
+                    : (t.getClass().getSimpleName() + ": Unexpected analysis failure");
+            persistFailureStatusSafely(analysisId, msg);
+            if (t instanceof VirtualMachineError err) {
+                throw err;
+            }
         }
     }
 
     @Transactional
     public void completeAnalysis(Long analysisId, AiVideoScoringResponseDto aiResult, String annotatedKey) {
+        runInRequiresNewTransaction(() -> completeAnalysisInternal(analysisId, aiResult, annotatedKey));
+    }
+
+    private void completeAnalysisInternal(Long analysisId, AiVideoScoringResponseDto aiResult, String annotatedKey) {
         VideoAnalysis analysis = videoAnalysisRepository.findById(analysisId).orElse(null);
         if (analysis == null) return;
 
@@ -319,29 +350,37 @@ public class VideoAnalysisService {
 
     @Transactional
     public void updateStatus(Long analysisId, String status, String errorMessage) {
-        VideoAnalysis analysis = videoAnalysisRepository.findById(analysisId).orElse(null);
-        if (analysis != null) {
-            analysis.setStatus(status);
-            analysis.setErrorMessage(errorMessage);
-            videoAnalysisRepository.save(analysis);
-        }
+        runInRequiresNewTransaction(() -> {
+            VideoAnalysis analysis = videoAnalysisRepository.findById(analysisId).orElse(null);
+            if (analysis != null) {
+                analysis.setStatus(status);
+                analysis.setErrorMessage(errorMessage);
+                videoAnalysisRepository.save(analysis);
+            }
+        });
     }
 
     @Transactional
     public void updateStatusWithFeedback(Long analysisId, String status, String errorMessage, List<String> feedback) {
-        VideoAnalysis analysis = videoAnalysisRepository.findById(analysisId).orElse(null);
-        if (analysis != null) {
-            analysis.setStatus(status);
-            analysis.setErrorMessage(errorMessage);
-            if (feedback != null && !feedback.isEmpty()) {
-                writeJsonSafely(feedback).ifPresent(analysis::setFeedbackJson);
+        runInRequiresNewTransaction(() -> {
+            VideoAnalysis analysis = videoAnalysisRepository.findById(analysisId).orElse(null);
+            if (analysis != null) {
+                analysis.setStatus(status);
+                analysis.setErrorMessage(errorMessage);
+                if (feedback != null && !feedback.isEmpty()) {
+                    writeJsonSafely(feedback).ifPresent(analysis::setFeedbackJson);
+                }
+                videoAnalysisRepository.save(analysis);
             }
-            videoAnalysisRepository.save(analysis);
-        }
+        });
     }
 
     @Transactional
     public void recordFailureResult(Long analysisId, String failureStatus, AiVideoScoringResponseDto aiResult) {
+        runInRequiresNewTransaction(() -> recordFailureResultInternal(analysisId, failureStatus, aiResult));
+    }
+
+    private void recordFailureResultInternal(Long analysisId, String failureStatus, AiVideoScoringResponseDto aiResult) {
         VideoAnalysis analysis = videoAnalysisRepository.findById(analysisId).orElse(null);
         if (analysis == null) return;
 
@@ -358,6 +397,55 @@ public class VideoAnalysisService {
         analysis.setErrorMessage(errorMsg);
         applyV1Fields(analysis, aiResult);
         videoAnalysisRepository.save(analysis);
+    }
+
+    private void persistFailureStatusSafely(Long analysisId, String errorMessage) {
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            try {
+                boolean updated = runBooleanInRequiresNewTransaction(() -> {
+                    VideoAnalysis analysis = videoAnalysisRepository.findById(analysisId).orElse(null);
+                    if (analysis == null) {
+                        return false;
+                    }
+                    analysis.setStatus("FAILED");
+                    analysis.setErrorMessage(errorMessage);
+                    videoAnalysisRepository.save(analysis);
+                    return true;
+                });
+                if (updated || attempt == 3) {
+                    return;
+                }
+            } catch (Exception persistenceEx) {
+                log.warn("Attempt {} to persist FAILED status for analysisId={} failed: {}",
+                        attempt, analysisId, persistenceEx.getMessage());
+            }
+            try {
+                Thread.sleep(25L);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+    }
+
+    private void runInRequiresNewTransaction(Runnable action) {
+        if (transactionManager == null) {
+            action.run();
+            return;
+        }
+        TransactionTemplate template = new TransactionTemplate(transactionManager);
+        template.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        template.executeWithoutResult(status -> action.run());
+    }
+
+    private boolean runBooleanInRequiresNewTransaction(java.util.function.BooleanSupplier action) {
+        if (transactionManager == null) {
+            return action.getAsBoolean();
+        }
+        TransactionTemplate template = new TransactionTemplate(transactionManager);
+        template.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        Boolean res = template.execute(status -> action.getAsBoolean());
+        return Boolean.TRUE.equals(res);
     }
 
     @Transactional(readOnly = true)

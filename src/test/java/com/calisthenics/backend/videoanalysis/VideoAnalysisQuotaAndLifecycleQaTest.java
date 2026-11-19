@@ -17,6 +17,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
@@ -133,6 +135,10 @@ class VideoAnalysisQuotaAndLifecycleQaTest {
     @Autowired
     private JdbcTemplate jdbcTemplate;
 
+    @Autowired(required = false)
+    @Qualifier("taskExecutor")
+    private ThreadPoolTaskExecutor appTaskExecutor;
+
     private final List<Long> createdUserIds = Collections.synchronizedList(new ArrayList<>());
 
     @MockBean
@@ -145,7 +151,8 @@ class VideoAnalysisQuotaAndLifecycleQaTest {
     private LiveAnalysisService liveAnalysisService;
 
     @BeforeEach
-    void setUp() {
+    void setUp() throws InterruptedException {
+        awaitAsyncExecutorIdle();
         createdUserIds.clear();
         testClock.setInstant(DEFAULT_INSTANT);
         reset(minioStorageService, aiServiceClient, liveAnalysisService);
@@ -172,12 +179,16 @@ class VideoAnalysisQuotaAndLifecycleQaTest {
 
     @AfterEach
     void tearDown() throws InterruptedException {
+        awaitAsyncExecutorIdle();
         List<Long> userIds = new ArrayList<>(createdUserIds);
         createdUserIds.clear();
         for (Long userId : userIds) {
             for (VideoAnalysis analysis : videoAnalysisRepository.findByUserIdOrderByCreatedAtDesc(userId)) {
                 awaitTerminalStatus(analysis.getId());
             }
+        }
+        awaitAsyncExecutorIdle();
+        for (Long userId : userIds) {
             jdbcTemplate.update(
                     "DELETE FROM video_analysis_keypoints WHERE video_analysis_id IN (SELECT id FROM video_analyses WHERE user_id = ?)",
                     userId
@@ -901,8 +912,23 @@ class VideoAnalysisQuotaAndLifecycleQaTest {
         );
     }
 
+    private void awaitAsyncExecutorIdle() throws InterruptedException {
+        if (appTaskExecutor == null) {
+            return;
+        }
+        long deadline = System.currentTimeMillis() + 20000L;
+        while (System.currentTimeMillis() < deadline) {
+            int active = appTaskExecutor.getActiveCount();
+            boolean queueEmpty = appTaskExecutor.getThreadPoolExecutor().getQueue().isEmpty();
+            if (active == 0 && queueEmpty) {
+                return;
+            }
+            Thread.sleep(25L);
+        }
+    }
+
     private VideoAnalysis awaitTerminalStatus(long analysisId) throws InterruptedException {
-        long deadline = System.currentTimeMillis() + 8000L;
+        long deadline = System.currentTimeMillis() + 20000L;
         VideoAnalysis latest = null;
         while (System.currentTimeMillis() < deadline) {
             latest = videoAnalysisRepository.findById(analysisId).orElse(null);

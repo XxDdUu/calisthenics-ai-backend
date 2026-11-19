@@ -22,6 +22,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
@@ -80,6 +82,10 @@ class AdminProManagementIntegrationTest {
     @Autowired
     private JdbcTemplate jdbcTemplate;
 
+    @Autowired(required = false)
+    @Qualifier("taskExecutor")
+    private ThreadPoolTaskExecutor appTaskExecutor;
+
     @MockBean
     private MinioAnalysisMediaStorageService minioStorageService;
 
@@ -92,7 +98,8 @@ class AdminProManagementIntegrationTest {
     private final List<Long> createdUserIds = Collections.synchronizedList(new ArrayList<>());
 
     @BeforeEach
-    void setUp() {
+    void setUp() throws InterruptedException {
+        awaitAsyncExecutorIdle();
         createdUserIds.clear();
         reset(minioStorageService, aiServiceClient, liveAnalysisService);
 
@@ -119,13 +126,29 @@ class AdminProManagementIntegrationTest {
                 .thenReturn(liveOk);
     }
 
+    private void awaitAsyncExecutorIdle() throws InterruptedException {
+        if (appTaskExecutor == null) {
+            return;
+        }
+        long deadline = System.currentTimeMillis() + 20000L;
+        while (System.currentTimeMillis() < deadline) {
+            int active = appTaskExecutor.getActiveCount();
+            boolean queueEmpty = appTaskExecutor.getThreadPoolExecutor().getQueue().isEmpty();
+            if (active == 0 && queueEmpty) {
+                return;
+            }
+            Thread.sleep(25L);
+        }
+    }
+
     @AfterEach
     void tearDown() throws InterruptedException {
+        awaitAsyncExecutorIdle();
         List<Long> userIds = new ArrayList<>(createdUserIds);
         createdUserIds.clear();
         for (Long userId : userIds) {
             for (VideoAnalysis analysis : videoAnalysisRepository.findByUserIdOrderByCreatedAtDesc(userId)) {
-                long deadline = System.currentTimeMillis() + 5000L;
+                long deadline = System.currentTimeMillis() + 20000L;
                 while (System.currentTimeMillis() < deadline) {
                     var latest = videoAnalysisRepository.findById(analysis.getId()).orElse(null);
                     if (latest == null || (!"PENDING".equalsIgnoreCase(latest.getStatus())
@@ -135,6 +158,7 @@ class AdminProManagementIntegrationTest {
                     Thread.sleep(30L);
                 }
             }
+            awaitAsyncExecutorIdle();
             jdbcTemplate.update("DELETE FROM admin_pro_audit_logs WHERE target_user_id = ? OR admin_user_id = ?", userId, userId);
             jdbcTemplate.update("DELETE FROM membership_entitlements WHERE user_id = ?", userId);
             jdbcTemplate.update(

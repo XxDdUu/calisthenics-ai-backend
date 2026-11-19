@@ -32,6 +32,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -554,6 +555,92 @@ class VideoAnalysisServiceTest {
         VideoAnalysis result = service.findAndVerifyOwnership(10L, 999L, true);
         assertNotNull(result);
         assertEquals(10L, result.getId());
+    }
+
+    @Test
+    void initiateVideoAnalysis_AiExceptionWithTransientLookupMiss_RetriesAndPersistsFailedStatus() {
+        MockMultipartFile file = new MockMultipartFile("video", "squat.mp4", "video/mp4", "video bytes".getBytes());
+        LocalDate date = LocalDate.of(2026, 11, 16);
+        VideoAnalysis[] savedHolder = new VideoAnalysis[1];
+        List<String> savedStatuses = new ArrayList<>();
+        boolean[] aiCalled = new boolean[1];
+        boolean[] transientMissInjected = new boolean[1];
+
+        when(userRepository.findById(1L)).thenReturn(Optional.of(testUser));
+        when(exerciseRepository.findByCode("SQUAT")).thenReturn(Optional.empty());
+        when(videoAnalysisQuotaService.reserveVideoAnalysisQuota(1L)).thenReturn(
+                QuotaEntitlementResponseDto.builder().userId(1L).quotaDate(date).build()
+        );
+        when(minioStorageService.store(any())).thenReturn("orig_99.mp4");
+        when(videoAnalysisRepository.save(any(VideoAnalysis.class))).thenAnswer(invocation -> {
+            VideoAnalysis entity = invocation.getArgument(0);
+            if (entity.getId() == null) {
+                entity.setId(99L);
+            }
+            savedHolder[0] = entity;
+            savedStatuses.add(entity.getStatus());
+            return entity;
+        });
+        when(videoAnalysisRepository.findById(99L)).thenAnswer(invocation -> {
+            if (aiCalled[0] && !transientMissInjected[0]) {
+                transientMissInjected[0] = true;
+                return Optional.empty();
+            }
+            return Optional.ofNullable(savedHolder[0]);
+        });
+        when(aiServiceClient.scoreVideo(any(), anyString(), anyString(), anyInt(), anyString(), anyBoolean()))
+                .thenAnswer(invocation -> {
+                    aiCalled[0] = true;
+                    throw new RuntimeException("AI inference timed out");
+                });
+
+        VideoAnalysisResponseDto response = service.initiateVideoAnalysis(1L, null, "SQUAT", null, false, file);
+
+        assertNotNull(response);
+        assertNotNull(savedHolder[0]);
+        assertEquals("FAILED", savedHolder[0].getStatus());
+        assertNotNull(savedHolder[0].getErrorMessage());
+        assertTrue(savedHolder[0].getErrorMessage().contains("AI inference timed out"));
+        assertTrue(savedStatuses.contains("PENDING"));
+        assertTrue(savedStatuses.contains("FAILED"));
+        assertTrue(transientMissInjected[0]);
+    }
+
+    @Test
+    void initiateVideoAnalysis_AiFailedResponse_PersistsFailedStatusAndErrorMessage() {
+        MockMultipartFile file = new MockMultipartFile("video", "squat.mp4", "video/mp4", "video bytes".getBytes());
+        LocalDate date = LocalDate.of(2026, 11, 16);
+        VideoAnalysis[] savedHolder = new VideoAnalysis[1];
+        List<String> savedStatuses = new ArrayList<>();
+
+        when(userRepository.findById(1L)).thenReturn(Optional.of(testUser));
+        when(exerciseRepository.findByCode("SQUAT")).thenReturn(Optional.empty());
+        when(videoAnalysisQuotaService.reserveVideoAnalysisQuota(1L)).thenReturn(
+                QuotaEntitlementResponseDto.builder().userId(1L).quotaDate(date).build()
+        );
+        when(minioStorageService.store(any())).thenReturn("orig_100.mp4");
+        when(videoAnalysisRepository.save(any(VideoAnalysis.class))).thenAnswer(invocation -> {
+            VideoAnalysis entity = invocation.getArgument(0);
+            if (entity.getId() == null) {
+                entity.setId(100L);
+            }
+            savedHolder[0] = entity;
+            savedStatuses.add(entity.getStatus());
+            return entity;
+        });
+        when(videoAnalysisRepository.findById(100L)).thenAnswer(invocation -> Optional.ofNullable(savedHolder[0]));
+        when(aiServiceClient.scoreVideo(any(), anyString(), anyString(), anyInt(), anyString(), anyBoolean()))
+                .thenReturn(AiVideoScoringResponseDto.builder()
+                        .status("FAILED")
+                        .errorMessage("Unable to detect pose landmarks")
+                        .build());
+
+        service.initiateVideoAnalysis(1L, null, "SQUAT", null, false, file);
+
+        assertNotNull(savedHolder[0]);
+        assertEquals("FAILED", savedHolder[0].getStatus());
+        assertEquals("Unable to detect pose landmarks", savedHolder[0].getErrorMessage());
+        assertTrue(savedStatuses.contains("FAILED"));
     }
 
     @Nested
