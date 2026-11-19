@@ -23,8 +23,12 @@ public class ExerciseRecommendationsCardDto {
     private boolean readOnly = true;
     @Builder.Default
     private boolean mutated = false;
+    @Builder.Default
+    private boolean informationalOnly = false;
 
     private String focusLabel;
+    private String criteriaKey;
+    private String topicPrompt;
     private WorkoutDayOfWeek suggestedDayOfWeek;
     private String suggestedDayLabel;
     private Integer targetDayExerciseCount;

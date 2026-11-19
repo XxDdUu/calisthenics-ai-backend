@@ -1,11 +1,15 @@
 package com.calisthenics.backend.aichat.service;
 
+import com.calisthenics.backend.aichat.dto.GeminiAssistantOutput;
 import com.calisthenics.backend.aichat.dto.recommendation.ExerciseRecommendationItemDto;
 import com.calisthenics.backend.aichat.dto.recommendation.ExerciseRecommendationsCardDto;
 import com.calisthenics.backend.aichat.dto.recommendation.ExerciseRecommendationsCardDto.MuscleGapInsightDto;
 import com.calisthenics.backend.aichat.dto.recommendation.ExerciseRecommendationsCardDto.PlanDayOptionDto;
 import com.calisthenics.backend.aichat.dto.recommendation.WorkoutConsultationCardDto;
 import com.calisthenics.backend.aichat.dto.recommendation.WorkoutConsultationCardDto.ConsultationFindingDto;
+import com.calisthenics.backend.aichat.entity.AiMessage;
+import com.calisthenics.backend.aiworkout.gemini.GeminiApiClient;
+import com.calisthenics.backend.aiworkout.gemini.dto.GeminiRequestDto;
 import com.calisthenics.backend.analytics.model.PersonalRecord;
 import com.calisthenics.backend.analytics.repository.PersonalRecordRepository;
 import com.calisthenics.backend.coachclient.entity.CoachClientRelationship;
@@ -38,9 +42,11 @@ import com.calisthenics.backend.workoutplan.repository.WorkoutPlanRepository;
 import com.calisthenics.backend.workoutplan.type.WorkoutDayOfWeek;
 import com.calisthenics.backend.workoutplan.type.WorkoutSessionType;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -61,8 +67,8 @@ public class AiWorkoutRecommendationService {
 
     private static final double HIGH_WEEKLY_MUSCLE_SETS_THRESHOLD = 18.0;
     private static final int HIGH_DAY_EXERCISE_THRESHOLD = 6;
-    private static final Pattern COUNT_PATTERN = Pattern.compile("\\b(\\d{1,2})\\s+(?:leg|arm|chest|back|shoulder|core|ab|hamstring|glute|quad|calf|calves|push|pull|planche|front lever|handstand|skill)?\\s*(?:exercises?|movements?|bài tập)\\b", Pattern.CASE_INSENSITIVE);
-    private static final Pattern SKILL_KEYWORDS = Pattern.compile("\\b(planche|front lever|back lever|handstand|hspu|muscle[ -]?up|l[ -]?sit|human flag|pistol|v[ -]?sit|dragon flag|iron cross)\\b", Pattern.CASE_INSENSITIVE);
+    private static final Pattern COUNT_PATTERN = Pattern.compile("\\b(\\d{1,2})\\s+(?:[a-zA-ZÀ-ỹ-]+\\s+){0,3}(?:exercises?|movements?|bài tập)\\b", Pattern.CASE_INSENSITIVE);
+    private static final Pattern SKILL_KEYWORDS = Pattern.compile("\\b(planche|front lever|back lever|handstand push[- ]?ups?|handstand|hspu|muscle[ -]?up|l[ -]?sit|human flag|pistol|v[ -]?sit|dragon flag|iron cross)\\b", Pattern.CASE_INSENSITIVE);
 
     private final ExerciseRepository exerciseRepository;
     private final MuscleTaxonomyService muscleTaxonomyService;
@@ -75,6 +81,9 @@ public class AiWorkoutRecommendationService {
     private final PersonalRecordRepository personalRecordRepository;
     private final WorkoutSessionRepository workoutSessionRepository;
     private final ObjectMapper objectMapper;
+
+    @Autowired(required = false)
+    private GeminiApiClient geminiApiClient;
 
     public record RecommendationOutcome(
             String intent,
@@ -102,7 +111,24 @@ public class AiWorkoutRecommendationService {
             boolean bodyweightOnly,
             String equipmentFilter,
             String focusLabel,
-            int requestedCount
+            String listHeading,
+            String criteriaKey,
+            int requestedCount,
+            boolean hasExplicitFilter
+    ) {}
+
+    private record ActiveTopicHistory(
+            String topicPrompt,
+            String criteriaKey,
+            String lastIntent,
+            boolean usedSupplementalAi,
+            ExerciseDeduplicator.DeduplicationState exclusions
+    ) {}
+
+    private record SupplementalCandidate(
+            String name,
+            String description,
+            Exercise catalogMatch
     ) {}
 
     private record PlanSnapshot(
@@ -127,14 +153,177 @@ public class AiWorkoutRecommendationService {
     ) {}
 
     @Transactional(readOnly = true)
+    public RecommendationOutcome listExercises(
+            Long userId,
+            String prompt,
+            List<AiMessage> priorHistory,
+            boolean isAnotherFollowUp,
+            boolean isVn
+    ) {
+        List<Exercise> publishedCatalog = loadPublishedCatalog();
+        PromptCriteria rawCriteria = parsePromptCriteria(prompt, null);
+        ActiveTopicHistory history = extractActiveTopicHistory(priorHistory, publishedCatalog, rawCriteria, isAnotherFollowUp);
+        PromptCriteria effectiveCriteria = resolveEffectiveCriteria(rawCriteria, prompt, history, isAnotherFollowUp);
+
+        if (isAnotherFollowUp && history.exclusions().isEmpty() && !rawCriteria.hasExplicitFilter()) {
+            return new RecommendationOutcome(
+                    "LIST_EXERCISES",
+                    buildNoPriorTopicMessage(isVn),
+                    null,
+                    null
+            );
+        }
+
+        List<ScoredCandidate> allMatches = rankCatalogCandidates(
+                publishedCatalog, effectiveCriteria, emptyPlanSnapshot(), null, List.of(), Set.of(), List.of(), Map.of(), null, null, false, isVn
+        );
+        List<ScoredCandidate> unseenCatalog = allMatches.stream()
+                .filter(sc -> !history.exclusions().isExcluded(sc.exercise()))
+                .toList();
+
+        int limit = Math.min(effectiveCriteria.requestedCount(), unseenCatalog.size());
+        List<ScoredCandidate> chosenCatalog = unseenCatalog.subList(0, limit);
+        List<SupplementalCandidate> supplemental = List.of();
+        boolean usedSupplementalAi = false;
+
+        int deficit = effectiveCriteria.requestedCount() - chosenCatalog.size();
+        boolean sparseCatalog = allMatches.size() < 3 && (!isAnotherFollowUp || history.usedSupplementalAi());
+        if (deficit > 0 && sparseCatalog && geminiApiClient != null) {
+            ExerciseDeduplicator.DeduplicationState tempExclusions = copyDeduplicationState(history.exclusions());
+            for (ScoredCandidate sc : chosenCatalog) {
+                tempExclusions.recordExcludedCatalogExercise(sc.exercise());
+            }
+            supplemental = fetchSupplementalFromGemini(
+                    prompt, effectiveCriteria, tempExclusions, deficit, publishedCatalog, false, isVn);
+            usedSupplementalAi = !supplemental.isEmpty() || history.usedSupplementalAi();
+        }
+
+        if (chosenCatalog.isEmpty() && supplemental.isEmpty()) {
+            String msg = isAnotherFollowUp
+                    ? buildNoMoreExercisesMessage(effectiveCriteria, isVn)
+                    : (isVn
+                        ? "Hiện chưa có bài tập phù hợp nào trong danh mục."
+                        : "No published exercises matching that focus are currently available in the catalog.");
+            String exhaustedMeta = buildExerciseListMetadata(
+                    effectiveCriteria, prompt, history, List.of(), List.of(), isAnotherFollowUp && history.usedSupplementalAi(), true);
+            return new RecommendationOutcome("LIST_EXERCISES", msg, exhaustedMeta, null);
+        }
+
+        List<ExerciseRecommendationItemDto> catalogItems = chosenCatalog.stream()
+                .map(sc -> toInformationalItem(sc, false))
+                .toList();
+        String markdown = formatListMarkdown(effectiveCriteria, catalogItems, supplemental, isVn);
+        String meta = buildExerciseListMetadata(
+                effectiveCriteria, prompt, history, catalogItems, supplemental, usedSupplementalAi, false);
+        return new RecommendationOutcome("LIST_EXERCISES", markdown, meta, null);
+    }
+
+    @Transactional(readOnly = true)
     public RecommendationOutcome recommendExercises(
             Long userId,
             String prompt,
             WorkoutDayOfWeek selectedDayOfWeek,
             boolean isVn
     ) {
+        return recommendExercises(
+                userId, prompt, selectedDayOfWeek,
+                planContextExplicitlyRequested(prompt), List.of(), false, isVn);
+    }
+
+    @Transactional(readOnly = true)
+    public RecommendationOutcome recommendExercises(
+            Long userId,
+            String prompt,
+            WorkoutDayOfWeek selectedDayOfWeek,
+            boolean planContextRequested,
+            List<AiMessage> priorHistory,
+            boolean isAnotherFollowUp,
+            boolean isVn
+    ) {
+        boolean includePlanAnalysis = planContextRequested && !isAnotherFollowUp;
+        List<Exercise> publishedCatalog = loadPublishedCatalog();
+
+        ClientProfile profile = includePlanAnalysis && userId != null
+                ? clientProfileRepository.findByUserId(userId).orElse(null)
+                : null;
+        PromptCriteria rawCriteria = parsePromptCriteria(prompt, profile);
+        ActiveTopicHistory history = extractActiveTopicHistory(priorHistory, publishedCatalog, rawCriteria, isAnotherFollowUp);
+        PromptCriteria criteria = resolveEffectiveCriteria(rawCriteria, prompt, history, isAnotherFollowUp);
+
+        if (!includePlanAnalysis) {
+            if (isAnotherFollowUp && history.exclusions().isEmpty() && !rawCriteria.hasExplicitFilter()) {
+                return new RecommendationOutcome(
+                        "EXERCISE_RECOMMENDATION",
+                        buildNoPriorTopicMessage(isVn),
+                        null,
+                        null
+                );
+            }
+
+            List<ScoredCandidate> allMatches = rankCatalogCandidates(
+                    publishedCatalog, criteria, emptyPlanSnapshot(), null, List.of(), Set.of(), List.of(), Map.of(), null, null, false, isVn
+            );
+            List<ScoredCandidate> unseenCatalog = allMatches.stream()
+                    .filter(sc -> !history.exclusions().isExcluded(sc.exercise()))
+                    .toList();
+
+            int limit = Math.min(criteria.requestedCount(), unseenCatalog.size());
+            List<ScoredCandidate> chosenCatalog = unseenCatalog.subList(0, limit);
+            List<SupplementalCandidate> supplemental = List.of();
+            boolean usedSupplementalAi = false;
+
+            int deficit = criteria.requestedCount() - chosenCatalog.size();
+            boolean sparseCatalog = allMatches.size() < 3 && (!isAnotherFollowUp || history.usedSupplementalAi());
+            if (deficit > 0 && sparseCatalog && geminiApiClient != null) {
+                ExerciseDeduplicator.DeduplicationState tempExclusions = copyDeduplicationState(history.exclusions());
+                for (ScoredCandidate sc : chosenCatalog) {
+                    tempExclusions.recordExcludedCatalogExercise(sc.exercise());
+                }
+                supplemental = fetchSupplementalFromGemini(
+                        prompt, criteria, tempExclusions, deficit, publishedCatalog, true, isVn);
+                usedSupplementalAi = !supplemental.isEmpty() || history.usedSupplementalAi();
+            }
+
+            if (chosenCatalog.isEmpty() && supplemental.isEmpty()) {
+                String emptyMsg = isAnotherFollowUp
+                        ? buildNoMoreExercisesMessage(criteria, isVn)
+                        : (isVn
+                            ? "Hiện chưa có bài tập phù hợp nào được xuất bản trong danh mục. Vui lòng thử lại sau."
+                            : "No published exercises matching that focus are currently available in the catalog.");
+                ExerciseRecommendationsCardDto emptyCard = ExerciseRecommendationsCardDto.builder()
+                        .informationalOnly(true)
+                        .focusLabel(criteria.focusLabel())
+                        .criteriaKey(criteria.criteriaKey())
+                        .topicPrompt(effectiveTopicPrompt(prompt, history))
+                        .recommendations(List.of())
+                        .build();
+                String metaJson = injectExtraFieldsIntoJson(safeToJson(emptyCard), usedSupplementalAi || history.usedSupplementalAi(), supplemental);
+                return new RecommendationOutcome("EXERCISE_RECOMMENDATION", emptyMsg, metaJson, emptyCard);
+            }
+
+            List<ExerciseRecommendationItemDto> items = chosenCatalog.stream()
+                    .map(sc -> toInformationalItem(sc, true))
+                    .toList();
+
+            ExerciseRecommendationsCardDto card = ExerciseRecommendationsCardDto.builder()
+                    .informationalOnly(true)
+                    .focusLabel(criteria.focusLabel())
+                    .criteriaKey(criteria.criteriaKey())
+                    .topicPrompt(effectiveTopicPrompt(prompt, history))
+                    .recommendations(items)
+                    .build();
+
+            Map<Long, Exercise> catalogById = publishedCatalog.stream()
+                    .collect(Collectors.toMap(Exercise::getId, e -> e, (a, b) -> a));
+            ExerciseRecommendationsCardDto validatedCard = validateAndSanitizeCard(card, catalogById);
+
+            String markdown = formatInformationalRecommendationsMarkdown(criteria, validatedCard.getRecommendations(), supplemental, isVn);
+            String metaJson = injectExtraFieldsIntoJson(safeToJson(validatedCard), usedSupplementalAi, supplemental);
+            return new RecommendationOutcome("EXERCISE_RECOMMENDATION", markdown, metaJson, validatedCard);
+        }
+
+        // Explicit workout plan / day-context recommendation path (user asked to add to a day or inspect missing routine muscles)
         PlanSnapshot snapshot = loadPlanSnapshot(userId);
-        ClientProfile profile = userId != null ? clientProfileRepository.findByUserId(userId).orElse(null) : null;
         List<PersonalRecord> recentPrs = userId != null
                 ? personalRecordRepository.findByUserIdOrderByAchievedAtDesc(userId)
                 : List.of();
@@ -142,17 +331,17 @@ public class AiWorkoutRecommendationService {
                 ? workoutSessionRepository.findByUserIdAndStatusOrderByWorkoutDateDesc(userId, WorkoutSessionStatus.COMPLETED)
                 : List.of();
 
-        PromptCriteria criteria = parsePromptCriteria(prompt, profile);
         WorkoutPlanDay suggestedDay = resolveSuggestedTargetDay(prompt, selectedDayOfWeek, criteria, snapshot);
         WorkoutDayOfWeek suggestedDow = suggestedDay != null ? suggestedDay.getDayOfWeek() : null;
 
-        List<Exercise> publishedCatalog = loadPublishedCatalog();
         if (publishedCatalog.isEmpty()) {
             String emptyMsg = isVn
                     ? "Hiện chưa có bài tập phù hợp nào được xuất bản trong danh mục. Vui lòng thử lại sau."
                     : "No published exercises matching that focus are currently available in the catalog.";
             ExerciseRecommendationsCardDto emptyCard = ExerciseRecommendationsCardDto.builder()
                     .focusLabel(criteria.focusLabel())
+                    .criteriaKey(criteria.criteriaKey())
+                    .topicPrompt(effectiveTopicPrompt(prompt, history))
                     .suggestedDayOfWeek(suggestedDow)
                     .availablePlanDays(buildPlanDayOptions(snapshot, isVn))
                     .recommendations(List.of())
@@ -185,9 +374,12 @@ public class AiWorkoutRecommendationService {
             if (targetDayExerciseIds.contains(ex.getId())) {
                 continue; // Do not recommend duplicates of exercises already in the target day
             }
+            if (isAnotherFollowUp && history.exclusions().isExcluded(ex)) {
+                continue;
+            }
             ScoredCandidate scored = scoreCandidate(
                     ex, criteria, snapshot, suggestedDay, targetDayExercises,
-                    targetDayTextPatterns, undertrained, referenceSets, userDifficulty, profile, isVn
+                    targetDayTextPatterns, undertrained, referenceSets, userDifficulty, profile, true, isVn
             );
             if (scored != null) {
                 ranked.add(scored);
@@ -196,12 +388,12 @@ public class AiWorkoutRecommendationService {
 
         // If filtering out target day left nothing (rare edge case in tiny test catalogs), include existing with flag
         boolean includedAlreadyOnTargetDay = false;
-        if (ranked.isEmpty() && !targetDayExerciseIds.isEmpty()) {
+        if (ranked.isEmpty() && !targetDayExerciseIds.isEmpty() && !isAnotherFollowUp) {
             includedAlreadyOnTargetDay = true;
             for (Exercise ex : publishedCatalog) {
                 ScoredCandidate scored = scoreCandidate(
                         ex, criteria, snapshot, suggestedDay, targetDayExercises,
-                        targetDayTextPatterns, undertrained, referenceSets, userDifficulty, profile, isVn
+                        targetDayTextPatterns, undertrained, referenceSets, userDifficulty, profile, true, isVn
                 );
                 if (scored != null) {
                     ranked.add(scored);
@@ -222,7 +414,10 @@ public class AiWorkoutRecommendationService {
         List<String> planWarnings = buildRecommendationPlanWarnings(snapshot, suggestedDay, targetDayExercises, includedAlreadyOnTargetDay, isVn);
 
         ExerciseRecommendationsCardDto card = ExerciseRecommendationsCardDto.builder()
+                .informationalOnly(false)
                 .focusLabel(criteria.focusLabel())
+                .criteriaKey(criteria.criteriaKey())
+                .topicPrompt(effectiveTopicPrompt(prompt, history))
                 .suggestedDayOfWeek(suggestedDow)
                 .suggestedDayLabel(suggestedDay != null ? formatDayTitle(suggestedDay, isVn) : null)
                 .targetDayExerciseCount(suggestedDay != null ? targetDayExercises.size() : null)
@@ -609,7 +804,10 @@ public class AiWorkoutRecommendationService {
                 .type("EXERCISE_RECOMMENDATIONS")
                 .readOnly(true)
                 .mutated(false)
+                .informationalOnly(raw.isInformationalOnly())
                 .focusLabel(raw.getFocusLabel())
+                .criteriaKey(raw.getCriteriaKey())
+                .topicPrompt(raw.getTopicPrompt())
                 .suggestedDayOfWeek(raw.getSuggestedDayOfWeek())
                 .suggestedDayLabel(raw.getSuggestedDayLabel())
                 .targetDayExerciseCount(raw.getTargetDayExerciseCount())
@@ -619,6 +817,45 @@ public class AiWorkoutRecommendationService {
                 .planWarnings(raw.getPlanWarnings() != null ? List.copyOf(raw.getPlanWarnings()) : List.of())
                 .recommendations(safeItems)
                 .build();
+    }
+
+    public boolean planContextExplicitlyRequested(String prompt) {
+        if (prompt == null || prompt.isBlank()) {
+            return false;
+        }
+        String lower = prompt.toLowerCase(Locale.US);
+        if (UserAiWorkoutToolService.extractWeekday(prompt) != null) {
+            return true;
+        }
+        return lower.contains("add to")
+                || lower.contains("to add")
+                || lower.contains("should i add")
+                || lower.contains("leg day")
+                || lower.contains("legs day")
+                || lower.contains("push day")
+                || lower.contains("pull day")
+                || lower.contains("upper day")
+                || lower.contains("lower day")
+                || lower.contains("planche day")
+                || lower.contains("skill day")
+                || lower.contains("in my routine")
+                || lower.contains("current routine")
+                || lower.contains("my current plan")
+                || lower.contains("my workout plan")
+                || lower.contains("missing in")
+                || lower.contains("what am i missing")
+                || lower.contains("what's missing")
+                || lower.contains("vào lịch")
+                || lower.contains("nên thêm")
+                || lower.contains("thiếu trong lịch");
+    }
+
+    public String extractCriteriaKey(String prompt) {
+        return parsePromptCriteria(prompt, null).criteriaKey();
+    }
+
+    public boolean hasExplicitExerciseCriteria(String prompt) {
+        return parsePromptCriteria(prompt, null).hasExplicitFilter();
     }
 
     // ==================== PRIVATE SCORING & ANALYSIS HELPERS ====================
@@ -631,9 +868,12 @@ public class AiWorkoutRecommendationService {
 
         Matcher skillMatcher = SKILL_KEYWORDS.matcher(lower);
         while (skillMatcher.find()) {
-            String token = skillMatcher.group(1).toLowerCase(Locale.US).replace('-', ' ').trim();
-            if (!skillKeywords.contains(token)) {
-                skillKeywords.add(token);
+            String rawSkill = skillMatcher.group(1).toLowerCase(Locale.US).replace('-', ' ').trim();
+            String canonicalSkill = (rawSkill.contains("handstand push") || rawSkill.equals("hspu"))
+                    ? "handstand"
+                    : rawSkill;
+            if (!skillKeywords.contains(canonicalSkill)) {
+                skillKeywords.add(canonicalSkill);
             }
         }
 
@@ -659,6 +899,13 @@ public class AiWorkoutRecommendationService {
             muscles.add(MuscleId.GLUTES);
             muscles.add(MuscleId.HAMSTRINGS);
             muscles.add(MuscleId.CALVES);
+        }
+        if (lower.contains("arm")) {
+            categories.add(ExerciseCategory.BICEPS);
+            categories.add(ExerciseCategory.TRICEPS);
+            muscles.add(MuscleId.BICEPS);
+            muscles.add(MuscleId.TRICEPS);
+            muscles.add(MuscleId.FOREARMS);
         }
         if (lower.contains("push")) categories.add(ExerciseCategory.PUSH);
         if (lower.contains("pull")) categories.add(ExerciseCategory.PULL);
@@ -693,44 +940,80 @@ public class AiWorkoutRecommendationService {
             muscles.add(MuscleId.TRICEPS);
         }
 
-        // If nothing explicit matched and user mentioned general profile goals, draw subtle signal
-        if (muscles.isEmpty() && categories.isEmpty() && !wholeGap && profile != null && profile.getPrimaryGoals() != null) {
-            wholeGap = true;
-        }
-
         boolean bodyweightOnly = lower.contains("no equipment") || lower.contains("without equipment")
                 || lower.contains("bodyweight only") || lower.contains("at home") || lower.contains("just floor");
         String eqFilter = null;
-        for (String eq : List.of("parallettes", "rings", "gymnastic rings", "pull-up bar", "pull up bar", "resistance band", "bench", "box", "kettlebell", "dumbbell")) {
+        for (String eq : List.of("parallettes", "rings", "gymnastic rings", "pull-up bar", "pull up bar", "resistance band", "bench", "box", "kettlebell", "dumbbell", "barbell")) {
             if (lower.contains(eq)) {
                 eqFilter = eq;
                 break;
             }
         }
 
+        boolean hasExplicitFilter = !muscles.isEmpty() || !categories.isEmpty() || !skillKeywords.isEmpty()
+                || wholeGap || bodyweightOnly || eqFilter != null;
+
+        // If nothing explicit matched and user mentioned general profile goals, draw subtle signal (only in plan-context mode)
+        if (muscles.isEmpty() && categories.isEmpty() && !wholeGap && profile != null && profile.getPrimaryGoals() != null) {
+            wholeGap = true;
+        }
+
         int requestedCount = 5;
+        boolean singularAnother = isSingularAnotherPhrase(lower);
         Matcher countMatcher = COUNT_PATTERN.matcher(lower);
         if (countMatcher.find()) {
             try {
-                requestedCount = Math.max(2, Math.min(8, Integer.parseInt(countMatcher.group(1))));
+                requestedCount = Math.max(1, Math.min(20, Integer.parseInt(countMatcher.group(1))));
             } catch (NumberFormatException ignored) {}
+        } else if (singularAnother) {
+            requestedCount = 1;
         }
 
+        boolean isHspuQuery = lower.contains("handstand push") || lower.contains("hspu");
         String focusLabel;
-        if (!skillKeywords.isEmpty()) {
-            focusLabel = capitalizeWords(String.join(", ", skillKeywords)) + " Progression";
+        String listHeading;
+        if (isHspuQuery) {
+            focusLabel = "Handstand Push-Up Exercises";
+            listHeading = "Handstand Push-Up Exercises";
+        } else if (!skillKeywords.isEmpty()) {
+            String capSkill = capitalizeWords(String.join(", ", skillKeywords));
+            focusLabel = capSkill + " Progression";
+            listHeading = capSkill + " Exercises";
         } else if (lowerBody && lower.contains("hamstring")) {
             focusLabel = "Hamstrings & Posterior Chain";
+            listHeading = "Hamstring Exercises";
         } else if (lowerBody) {
             focusLabel = "Lower Body & Legs";
+            listHeading = "Leg Exercises";
         } else if (wholeGap) {
             focusLabel = "Routine Balance & Missing Muscles";
+            listHeading = "Recommended Exercises";
         } else if (!muscles.isEmpty()) {
             focusLabel = muscles.stream().limit(3).map(MuscleId::getDisplayName).collect(Collectors.joining(", "));
+            listHeading = focusLabel + " Exercises";
         } else if (!categories.isEmpty()) {
             focusLabel = categories.stream().map(c -> capitalizeWords(c.name().replace('_', ' '))).collect(Collectors.joining(", "));
+            listHeading = focusLabel + " Exercises";
         } else {
             focusLabel = "Personalized Calisthenics Selection";
+            listHeading = "Calisthenics Exercises";
+        }
+
+        String criteriaKey;
+        if (isHspuQuery) {
+            criteriaKey = "SKILL:HANDSTAND_PUSH_UP";
+        } else if (!skillKeywords.isEmpty()) {
+            criteriaKey = "SKILL:" + skillKeywords.stream().sorted().collect(Collectors.joining(","));
+        } else if (wholeGap) {
+            criteriaKey = "GAP_ANALYSIS";
+        } else if (lowerBody && (lower.contains("leg") || lower.contains("lower body"))) {
+            criteriaKey = "LEGS";
+        } else if (!muscles.isEmpty()) {
+            criteriaKey = "MUSCLES:" + muscles.stream().map(MuscleId::name).sorted().collect(Collectors.joining(","));
+        } else if (!categories.isEmpty()) {
+            criteriaKey = "CATS:" + categories.stream().map(Enum::name).sorted().collect(Collectors.joining(","));
+        } else {
+            criteriaKey = "GENERAL";
         }
 
         return new PromptCriteria(
@@ -745,7 +1028,10 @@ public class AiWorkoutRecommendationService {
                 bodyweightOnly,
                 eqFilter,
                 focusLabel,
-                requestedCount
+                listHeading,
+                criteriaKey,
+                requestedCount,
+                hasExplicitFilter
         );
     }
 
@@ -893,6 +1179,7 @@ public class AiWorkoutRecommendationService {
             Map<MuscleId, Double> referenceSets,
             DifficultyLevel userDifficulty,
             ClientProfile profile,
+            boolean includePlanContext,
             boolean isVn
     ) {
         MuscleTaxonomyService.ResolvedMuscleTargets resolved = muscleTaxonomyService.resolveTargets(ex);
@@ -937,17 +1224,47 @@ public class AiWorkoutRecommendationService {
                 relevantToRequest = true;
             }
         }
+        if (criteria.skillKeywords().contains("handstand") && (exText.contains("pike push") || exText.contains("handstand push"))) {
+            score += 20.0;
+            relevantToRequest = true;
+        }
         if (criteria.lowerBodyFocus && isLowerBodyExercise(ex, primary, secondary)) {
             score += 20.0;
             relevantToRequest = true;
         }
-        if (criteria.wholeRoutineGapAnalysis()) {
+        if (criteria.wholeRoutineGapAnalysis() || !criteria.hasExplicitFilter()) {
             relevantToRequest = true;
         }
 
         // Strict relevance gate when user asked for specific focus (e.g. leg exercises shouldn't return bicep curls)
         if (!relevantToRequest && (!criteria.targetMuscles().isEmpty() || !criteria.targetCategories().isEmpty() || !criteria.skillKeywords().isEmpty())) {
             return null;
+        }
+
+        // Equipment compatibility (applies in both informational & plan-context modes)
+        String equipment = ex.getEquipment() != null ? ex.getEquipment().trim() : "";
+        String eqLower = equipment.toLowerCase(Locale.US);
+        boolean isMinimalEq = eqLower.isBlank() || eqLower.contains("none") || eqLower.contains("floor")
+                || eqLower.contains("bodyweight") || eqLower.contains("wall");
+        if (criteria.bodyweightOnly) {
+            if (isMinimalEq) {
+                score += 20.0;
+            } else {
+                score -= 45.0;
+            }
+        } else if (criteria.equipmentFilter() != null) {
+            if (eqLower.contains(criteria.equipmentFilter())) {
+                score += 25.0;
+            }
+        } else if (isMinimalEq) {
+            score += 6.0;
+        }
+
+        if (!includePlanContext) {
+            String briefRationale = buildInformationalRationale(ex, primary, isVn);
+            return new ScoredCandidate(
+                    ex, resolved, primary, secondary, List.of(), List.of(), score, null, briefRationale
+            );
         }
 
         // 2. Boost exercises that directly fill undertrained muscle gaps
@@ -978,25 +1295,6 @@ public class AiWorkoutRecommendationService {
             score += 26.0;
         } else if (targetDayPatterns.contains("SQUAT") && isSquatPattern && !targetDayPatterns.contains("HINGE")) {
             score -= 6.0;
-        }
-
-        // 4. Equipment compatibility
-        String equipment = ex.getEquipment() != null ? ex.getEquipment().trim() : "";
-        String eqLower = equipment.toLowerCase(Locale.US);
-        boolean isMinimalEq = eqLower.isBlank() || eqLower.contains("none") || eqLower.contains("floor")
-                || eqLower.contains("bodyweight") || eqLower.contains("wall");
-        if (criteria.bodyweightOnly) {
-            if (isMinimalEq) {
-                score += 20.0;
-            } else {
-                score -= 45.0;
-            }
-        } else if (criteria.equipmentFilter() != null) {
-            if (eqLower.contains(criteria.equipmentFilter())) {
-                score += 25.0;
-            }
-        } else if (isMinimalEq) {
-            score += 6.0; // Accessible calisthenics default bonus
         }
 
         // 5. Experience level / difficulty match
@@ -1056,6 +1354,18 @@ public class AiWorkoutRecommendationService {
     }
 
     private ExerciseRecommendationItemDto toRecommendationItem(ScoredCandidate sc, boolean alreadyInTargetDay) {
+        return toRecommendationItemInternal(sc, alreadyInTargetDay, true);
+    }
+
+    private ExerciseRecommendationItemDto toInformationalItem(ScoredCandidate sc, boolean includeRationale) {
+        return toRecommendationItemInternal(sc, false, includeRationale);
+    }
+
+    private ExerciseRecommendationItemDto toRecommendationItemInternal(
+            ScoredCandidate sc,
+            boolean alreadyInTargetDay,
+            boolean includeRationale
+    ) {
         Exercise ex = sc.exercise();
         int sets = ex.getRecommendedSets() != null && ex.getRecommendedSets() > 0 ? ex.getRecommendedSets() : 3;
         int rest = ex.getRecommendedRestSeconds() != null && ex.getRecommendedRestSeconds() >= 0
@@ -1085,12 +1395,25 @@ public class AiWorkoutRecommendationService {
                 .prescriptionSummary(formatPrescriptionSummary(sets, reps, durationSeconds, rest))
                 .equipment(ex.getEquipment())
                 .imageUrl(resolveBestImageUrl(ex))
-                .rationale(sc.rationale())
+                .rationale(includeRationale ? sc.rationale() : null)
                 .fillsUndertrainedMuscles(sc.filledGaps())
                 .alreadyInTargetDay(alreadyInTargetDay)
                 .alreadyInPlanDays(sc.alreadyInPlanDays())
                 .volumeWarning(sc.volumeWarning())
                 .build();
+    }
+
+    private String buildInformationalRationale(Exercise ex, List<MuscleId> primary, boolean isVn) {
+        if (ex.getDescription() != null && !ex.getDescription().isBlank()) {
+            return ex.getDescription().trim();
+        }
+        String primaryNames = primary.isEmpty()
+                ? (ex.getTargetMuscles() != null && !ex.getTargetMuscles().isBlank() ? ex.getTargetMuscles() : null)
+                : primary.stream().map(MuscleId::getDisplayName).collect(Collectors.joining(" & "));
+        if (primaryNames != null) {
+            return isVn ? "Tác động vào " + primaryNames + "." : "Targets " + primaryNames + ".";
+        }
+        return null;
     }
 
     private String buildCandidateRationale(
@@ -1611,6 +1934,516 @@ public class AiWorkoutRecommendationService {
 
     private static double round1(double val) {
         return Math.round(val * 10.0) / 10.0;
+    }
+
+    private PlanSnapshot emptyPlanSnapshot() {
+        return new PlanSnapshot(null, List.of(), Map.of(), Map.of(), Map.of(), Map.of());
+    }
+
+    private List<ScoredCandidate> rankCatalogCandidates(
+            List<Exercise> publishedCatalog,
+            PromptCriteria criteria,
+            PlanSnapshot snapshot,
+            WorkoutPlanDay suggestedDay,
+            List<WorkoutPlanExercise> targetDayExercises,
+            Set<String> targetDayPatterns,
+            List<MuscleGapInsightDto> undertrained,
+            Map<MuscleId, Double> referenceSets,
+            DifficultyLevel userDifficulty,
+            ClientProfile profile,
+            boolean includePlanContext,
+            boolean isVn
+    ) {
+        List<ScoredCandidate> ranked = new ArrayList<>();
+        for (Exercise ex : publishedCatalog) {
+            ScoredCandidate scored = scoreCandidate(
+                    ex, criteria, snapshot, suggestedDay, targetDayExercises,
+                    targetDayPatterns, undertrained, referenceSets, userDifficulty, profile,
+                    includePlanContext, isVn
+            );
+            if (scored != null) {
+                ranked.add(scored);
+            }
+        }
+        ranked.sort(Comparator.comparingDouble(ScoredCandidate::score).reversed()
+                .thenComparing(sc -> sc.exercise().getName(), String.CASE_INSENSITIVE_ORDER));
+        return ranked;
+    }
+
+    private ActiveTopicHistory extractActiveTopicHistory(
+            List<AiMessage> priorHistory,
+            List<Exercise> catalog,
+            PromptCriteria currentCriteria,
+            boolean isAnotherFollowUp
+    ) {
+        ExerciseDeduplicator.DeduplicationState exclusions = new ExerciseDeduplicator.DeduplicationState();
+        if (priorHistory == null || priorHistory.isEmpty()) {
+            return new ActiveTopicHistory(null, currentCriteria.criteriaKey(), null, false, exclusions);
+        }
+
+        // Only carry/accumulate exclusions across history for continuation queries or active topic refinements;
+        // a brand-new standalone non-follow-up query with a different criteria starts fresh.
+        String anchorTopicPrompt = null;
+        String anchorCriteriaKey = null;
+        String anchorIntent = null;
+        boolean usedSupplementalAi = false;
+
+        for (int i = priorHistory.size() - 1; i >= 0; i--) {
+            AiMessage m = priorHistory.get(i);
+            if (m == null || !"assistant".equalsIgnoreCase(m.getRole())) {
+                continue;
+            }
+            String mIntent = m.getIntent() != null ? m.getIntent().trim().toUpperCase(Locale.US) : "";
+            if (!"LIST_EXERCISES".equals(mIntent) && !"EXERCISE_RECOMMENDATION".equals(mIntent)) {
+                continue;
+            }
+
+            ParsedMessageTopic parsed = parseHistoryMessageTopic(m, catalog);
+            String msgKey = parsed.criteriaKey() != null ? parsed.criteriaKey() : currentCriteria.criteriaKey();
+
+            if (anchorCriteriaKey == null) {
+                if (!isAnotherFollowUp) {
+                    // Standalone non-follow-up request starts a fresh recommendation topic when user asks anew
+                    return new ActiveTopicHistory(null, currentCriteria.criteriaKey(), null, false, exclusions);
+                }
+                if (currentCriteria.hasExplicitFilter() && !isCompatibleCriteriaKey(currentCriteria.criteriaKey(), msgKey)) {
+                    return new ActiveTopicHistory(null, currentCriteria.criteriaKey(), null, false, exclusions);
+                }
+                anchorCriteriaKey = msgKey;
+                anchorTopicPrompt = parsed.topicPrompt();
+                anchorIntent = mIntent;
+            } else if (!isCompatibleCriteriaKey(anchorCriteriaKey, msgKey)) {
+                // Stop walking backward when hitting an earlier, genuinely different topic
+                break;
+            }
+
+            if (parsed.usedSupplementalAi()) {
+                usedSupplementalAi = true;
+            }
+            for (Long exId : parsed.exerciseIds()) {
+                Exercise catEx = catalog.stream().filter(c -> Objects.equals(c.getId(), exId)).findFirst().orElse(null);
+                if (catEx != null) {
+                    exclusions.recordExcludedCatalogExercise(catEx);
+                } else {
+                    exclusions.recordExcluded(exId, null, null, null);
+                }
+            }
+            for (String exName : parsed.exerciseNames()) {
+                Exercise catEx = ExerciseDeduplicator.matchCatalogExercise(exName, catalog);
+                if (catEx != null) {
+                    exclusions.recordExcludedCatalogExercise(catEx);
+                } else {
+                    exclusions.recordExcluded(null, exName, null, null);
+                }
+            }
+        }
+
+        return new ActiveTopicHistory(anchorTopicPrompt, anchorCriteriaKey, anchorIntent, usedSupplementalAi, exclusions);
+    }
+
+    private record ParsedMessageTopic(
+            String topicPrompt,
+            String criteriaKey,
+            boolean usedSupplementalAi,
+            List<Long> exerciseIds,
+            List<String> exerciseNames
+    ) {}
+
+    private ParsedMessageTopic parseHistoryMessageTopic(AiMessage m, List<Exercise> catalog) {
+        String topicPrompt = null;
+        String criteriaKey = null;
+        boolean usedSupplementalAi = false;
+        List<Long> ids = new ArrayList<>();
+        List<String> names = new ArrayList<>();
+
+        if (m.getMetadata() != null && !m.getMetadata().isBlank()) {
+            try {
+                JsonNode root = objectMapper.readTree(m.getMetadata());
+                topicPrompt = root.hasNonNull("topicPrompt") ? root.get("topicPrompt").asText() : null;
+                criteriaKey = root.hasNonNull("criteriaKey") ? root.get("criteriaKey").asText() : null;
+                usedSupplementalAi = root.path("usedSupplementalAi").asBoolean(false);
+
+                JsonNode itemsNode = root.has("recommendations") && root.get("recommendations").isArray()
+                        ? root.get("recommendations")
+                        : (root.has("exercises") && root.get("exercises").isArray() ? root.get("exercises") : null);
+                if (itemsNode != null) {
+                    for (JsonNode item : itemsNode) {
+                        if (item.hasNonNull("exerciseId")) {
+                            long id = item.get("exerciseId").asLong(-1L);
+                            if (id > 0) ids.add(id);
+                        }
+                        if (item.hasNonNull("name")) {
+                            String n = item.get("name").asText();
+                            if (n != null && !n.isBlank()) names.add(n);
+                        }
+                    }
+                }
+                JsonNode suppNode = root.get("supplementalNames");
+                if (suppNode != null && suppNode.isArray()) {
+                    for (JsonNode n : suppNode) {
+                        if (n.isTextual() && !n.asText().isBlank()) {
+                            names.add(n.asText());
+                        }
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+        }
+
+        if (ids.isEmpty() && names.isEmpty() && m.getContent() != null) {
+            for (ExerciseDeduplicator.ParsedExerciseLine line : ExerciseDeduplicator.parseExerciseLines(m.getContent())) {
+                names.add(line.name());
+            }
+        }
+        return new ParsedMessageTopic(topicPrompt, criteriaKey, usedSupplementalAi, ids, names);
+    }
+
+    private PromptCriteria resolveEffectiveCriteria(
+            PromptCriteria rawCriteria,
+            String rawPrompt,
+            ActiveTopicHistory history,
+            boolean isAnotherFollowUp
+    ) {
+        if (!isAnotherFollowUp || rawCriteria.hasExplicitFilter()) {
+            return rawCriteria;
+        }
+        String fallbackTopic = history.topicPrompt();
+        if ((fallbackTopic == null || fallbackTopic.isBlank()) && history.criteriaKey() != null) {
+            fallbackTopic = topicPromptFromCriteriaKey(history.criteriaKey());
+        }
+        if (fallbackTopic == null || fallbackTopic.isBlank()) {
+            return rawCriteria;
+        }
+        PromptCriteria inherited = parsePromptCriteria(fallbackTopic, null);
+        return new PromptCriteria(
+                inherited.targetMuscles(),
+                inherited.targetCategories(),
+                inherited.skillKeywords(),
+                inherited.wholeRoutineGapAnalysis(),
+                inherited.lowerBodyFocus(),
+                inherited.upperPushFocus(),
+                inherited.upperPullFocus(),
+                inherited.coreFocus(),
+                rawCriteria.bodyweightOnly() || inherited.bodyweightOnly(),
+                rawCriteria.equipmentFilter() != null ? rawCriteria.equipmentFilter() : inherited.equipmentFilter(),
+                inherited.focusLabel(),
+                inherited.listHeading(),
+                inherited.criteriaKey(),
+                rawCriteria.requestedCount(),
+                inherited.hasExplicitFilter()
+        );
+    }
+
+    private static String topicPromptFromCriteriaKey(String key) {
+        if (key == null || key.isBlank()) return null;
+        if ("LEGS".equals(key)) return "leg exercises";
+        if (key.startsWith("SKILL:")) return key.substring("SKILL:".length()).replace('_', ' ').toLowerCase(Locale.US) + " exercises";
+        if (key.startsWith("MUSCLES:")) return key.substring("MUSCLES:".length()).replace('_', ' ').toLowerCase(Locale.US) + " exercises";
+        if (key.startsWith("CATS:")) return key.substring("CATS:".length()).replace('_', ' ').toLowerCase(Locale.US) + " exercises";
+        return null;
+    }
+
+    private static boolean isCompatibleCriteriaKey(String currentKey, String historyKey) {
+        if (currentKey == null || historyKey == null) return false;
+        if (currentKey.equals(historyKey)) return true;
+        if ("GENERAL".equals(currentKey) || "GENERAL".equals(historyKey)) return false;
+        if ("LEGS".equals(historyKey) && currentKey.contains("HAMSTRINGS")) return true;
+        if ("LEGS".equals(historyKey) && currentKey.contains("QUADRICEPS")) return true;
+        if ("LEGS".equals(historyKey) && currentKey.contains("GLUTES")) return true;
+        if ("LEGS".equals(historyKey) && currentKey.contains("CALVES")) return true;
+        return false;
+    }
+
+    private static boolean isSingularAnotherPhrase(String lower) {
+        if (lower == null) return false;
+        boolean mentionsPluralExercises = lower.contains("more exercises") || lower.contains("other exercises")
+                || lower.contains("different exercises") || lower.contains("anything else") || lower.contains("what else");
+        if (mentionsPluralExercises) {
+            return false;
+        }
+        return lower.contains("another") || lower.contains("different one")
+                || lower.contains("different exercise") || lower.contains("bài khác")
+                || lower.contains("bài tập khác");
+    }
+
+    private ExerciseDeduplicator.DeduplicationState copyDeduplicationState(ExerciseDeduplicator.DeduplicationState src) {
+        ExerciseDeduplicator.DeduplicationState copy = new ExerciseDeduplicator.DeduplicationState();
+        for (Long id : src.excludedIds()) {
+            copy.recordExcluded(id, null, null, null);
+        }
+        for (String display : src.excludedDisplayNames()) {
+            copy.recordExcluded(null, display, null, null);
+        }
+        for (String key : src.excludedNormalizedKeys()) {
+            copy.addNormalizedKeyOnly(key);
+        }
+        return copy;
+    }
+
+    private List<SupplementalCandidate> fetchSupplementalFromGemini(
+            String userPrompt,
+            PromptCriteria criteria,
+            ExerciseDeduplicator.DeduplicationState exclusions,
+            int maxNeeded,
+            List<Exercise> publishedCatalog,
+            boolean includeBriefDescriptions,
+            boolean isVn
+    ) {
+        if (geminiApiClient == null || maxNeeded <= 0) {
+            return List.of();
+        }
+        try {
+            StringBuilder sys = new StringBuilder();
+            sys.append("You are an informational calisthenics and strength exercise directory.\n");
+            sys.append("Target topic/focus: ").append(criteria.listHeading()).append(".\n");
+            if (criteria.bodyweightOnly()) {
+                sys.append("Equipment constraint: bodyweight / no equipment only.\n");
+            } else if (criteria.equipmentFilter() != null) {
+                sys.append("Equipment constraint: ").append(criteria.equipmentFilter()).append(".\n");
+            }
+            if (!exclusions.isEmpty()) {
+                sys.append("ALREADY RECOMMENDED OR LISTED (EXCLUSION CONSTRAINTS - NEVER REPEAT, RENAME, OR REPHRASE THESE, INCLUDING ABBREVIATIONS LIKE DB/DUMBBELL OR RDL/ROMANIAN DEADLIFT):\n");
+                if (!exclusions.excludedIds().isEmpty()) {
+                    sys.append("- Excluded IDs: ").append(exclusions.excludedIds()).append("\n");
+                }
+                if (!exclusions.excludedDisplayNames().isEmpty()) {
+                    sys.append("- Excluded Names: ").append(String.join(", ", exclusions.excludedDisplayNames())).append("\n");
+                }
+            }
+            sys.append("STRICT OUTPUT RULES:\n");
+            sys.append("- Return up to ").append(maxNeeded).append(" NEW relevant exercise(s) in a clean numbered Markdown list inside 'reply'.\n");
+            if (includeBriefDescriptions) {
+                sys.append("- Format each item strictly as: 1. **Exercise Name** — concise 1-sentence description.\n");
+            } else {
+                sys.append("- Format each item strictly as: 1. Exercise Name\n");
+            }
+            sys.append("- NEVER analyze any workout plan, detect muscle gaps, report weekly sets or volume, suggest adding exercises to weekdays, ask which day to train, or append follow-up questions.\n");
+            sys.append("- If no suitable unseen exercises remain, set reply to 'NO_MORE_EXERCISES'.\n");
+            if (isVn) {
+                sys.append("- Respond in Vietnamese for headings/descriptions while keeping clear exercise names.\n");
+            }
+
+            List<GeminiRequestDto.Content> contents = List.of(GeminiRequestDto.Content.builder()
+                    .role("user")
+                    .parts(List.of(new GeminiRequestDto.Part(
+                            userPrompt != null && !userPrompt.isBlank() ? userPrompt : criteria.listHeading())))
+                    .build());
+
+            Optional<GeminiAssistantOutput> outOpt = geminiApiClient.callAssistant(sys.toString(), contents);
+            if (outOpt.isEmpty() || outOpt.get().getReply() == null || outOpt.get().getReply().isBlank()) {
+                return List.of();
+            }
+            String reply = outOpt.get().getReply().trim();
+            if (reply.contains("NO_MORE_EXERCISES")) {
+                return List.of();
+            }
+            return filterSupplementalLines(
+                    ExerciseDeduplicator.parseExerciseLines(reply),
+                    exclusions,
+                    publishedCatalog,
+                    maxNeeded
+            );
+        } catch (Exception ex) {
+            log.warn("Supplemental exercise retrieval from Gemini failed cleanly: {}", ex.getMessage());
+            return List.of();
+        }
+    }
+
+    public List<String> filterUnseenExerciseNames(
+            List<String> candidateNames,
+            Set<Long> excludedIds,
+            List<String> excludedNames,
+            List<Exercise> catalog
+    ) {
+        ExerciseDeduplicator.DeduplicationState state = new ExerciseDeduplicator.DeduplicationState();
+        if (excludedIds != null) {
+            for (Long id : excludedIds) {
+                state.recordExcluded(id, null, null, null);
+            }
+        }
+        if (excludedNames != null) {
+            for (String n : excludedNames) {
+                Exercise match = ExerciseDeduplicator.matchCatalogExercise(n, catalog);
+                if (match != null) {
+                    state.recordExcludedCatalogExercise(match);
+                } else {
+                    state.recordExcluded(null, n, null, null);
+                }
+            }
+        }
+        List<String> result = new ArrayList<>();
+        if (candidateNames == null) return result;
+        for (String candidate : candidateNames) {
+            if (candidate == null || candidate.isBlank()) continue;
+            if (state.isExcludedName(candidate, catalog)) {
+                continue;
+            }
+            Exercise match = ExerciseDeduplicator.matchCatalogExercise(candidate, catalog);
+            if (match != null) {
+                state.recordExcludedCatalogExercise(match);
+            } else {
+                state.recordExcluded(null, candidate, null, null);
+            }
+            result.add(candidate.trim());
+        }
+        return result;
+    }
+
+    private List<SupplementalCandidate> filterSupplementalLines(
+            List<ExerciseDeduplicator.ParsedExerciseLine> lines,
+            ExerciseDeduplicator.DeduplicationState exclusions,
+            List<Exercise> catalog,
+            int maxNeeded
+    ) {
+        if (lines == null || lines.isEmpty() || maxNeeded <= 0) {
+            return List.of();
+        }
+        List<SupplementalCandidate> accepted = new ArrayList<>();
+        for (ExerciseDeduplicator.ParsedExerciseLine line : lines) {
+            if (line.name() == null || line.name().isBlank()) continue;
+            if (exclusions.isExcludedName(line.name(), catalog)) {
+                continue;
+            }
+            Exercise catalogMatch = ExerciseDeduplicator.matchCatalogExercise(line.name(), catalog);
+            if (catalogMatch != null) {
+                exclusions.recordExcludedCatalogExercise(catalogMatch);
+            } else {
+                exclusions.recordExcluded(null, line.name(), null, null);
+            }
+            accepted.add(new SupplementalCandidate(line.name(), line.description(), catalogMatch));
+            if (accepted.size() >= maxNeeded) {
+                break;
+            }
+        }
+        return accepted;
+    }
+
+    private String formatListMarkdown(
+            PromptCriteria criteria,
+            List<ExerciseRecommendationItemDto> catalogItems,
+            List<SupplementalCandidate> supplemental,
+            boolean isVn
+    ) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("**").append(criteria.listHeading()).append("**\n");
+        int index = 1;
+        for (ExerciseRecommendationItemDto item : catalogItems) {
+            sb.append(index++).append(". ").append(item.getName()).append("\n");
+        }
+        for (SupplementalCandidate sup : supplemental) {
+            sb.append(index++).append(". ").append(sup.name()).append("\n");
+        }
+        return sb.toString().trim();
+    }
+
+    private String formatInformationalRecommendationsMarkdown(
+            PromptCriteria criteria,
+            List<ExerciseRecommendationItemDto> catalogItems,
+            List<SupplementalCandidate> supplemental,
+            boolean isVn
+    ) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("**").append(criteria.listHeading()).append("**\n");
+        int index = 1;
+        for (ExerciseRecommendationItemDto item : catalogItems) {
+            sb.append(index++).append(". **").append(item.getName()).append("**");
+            if (item.getRationale() != null && !item.getRationale().isBlank()) {
+                sb.append(" — ").append(item.getRationale());
+            }
+            sb.append("\n");
+        }
+        for (SupplementalCandidate sup : supplemental) {
+            sb.append(index++).append(". **").append(sup.name()).append("**");
+            if (sup.description() != null && !sup.description().isBlank()) {
+                sb.append(" — ").append(sup.description());
+            }
+            sb.append("\n");
+        }
+        return sb.toString().trim();
+    }
+
+    private String buildExerciseListMetadata(
+            PromptCriteria criteria,
+            String rawPrompt,
+            ActiveTopicHistory history,
+            List<ExerciseRecommendationItemDto> items,
+            List<SupplementalCandidate> supplemental,
+            boolean usedSupplementalAi,
+            boolean exhausted
+    ) {
+        List<Map<String, Object>> trackedExercises = new ArrayList<>();
+        List<String> suppNames = new ArrayList<>();
+        for (ExerciseRecommendationItemDto item : items) {
+            Map<String, Object> entry = new LinkedHashMap<>();
+            if (item.getExerciseId() != null) entry.put("exerciseId", item.getExerciseId());
+            entry.put("name", item.getName());
+            trackedExercises.add(entry);
+        }
+        for (SupplementalCandidate sup : supplemental) {
+            Map<String, Object> entry = new LinkedHashMap<>();
+            if (sup.catalogMatch() != null && sup.catalogMatch().getId() != null) {
+                entry.put("exerciseId", sup.catalogMatch().getId());
+            }
+            entry.put("name", sup.name());
+            trackedExercises.add(entry);
+            suppNames.add(sup.name());
+        }
+        Map<String, Object> meta = new LinkedHashMap<>();
+        meta.put("type", "EXERCISE_LIST");
+        meta.put("readOnly", true);
+        meta.put("mutated", false);
+        meta.put("focusLabel", criteria.listHeading());
+        meta.put("criteriaKey", criteria.criteriaKey());
+        meta.put("topicPrompt", effectiveTopicPrompt(rawPrompt, history));
+        meta.put("usedSupplementalAi", usedSupplementalAi);
+        meta.put("exhausted", exhausted);
+        meta.put("exercises", trackedExercises);
+        meta.put("supplementalNames", suppNames);
+        return safeToJson(meta);
+    }
+
+    @SuppressWarnings("unchecked")
+    private String injectExtraFieldsIntoJson(String json, boolean usedSupplementalAi, List<SupplementalCandidate> supplemental) {
+        if (json == null) return null;
+        if (!usedSupplementalAi && (supplemental == null || supplemental.isEmpty())) {
+            return json;
+        }
+        try {
+            Map<String, Object> map = objectMapper.readValue(json, Map.class);
+            map.put("usedSupplementalAi", usedSupplementalAi);
+            if (supplemental != null && !supplemental.isEmpty()) {
+                map.put("supplementalNames", supplemental.stream().map(SupplementalCandidate::name).toList());
+            }
+            return objectMapper.writeValueAsString(map);
+        } catch (Exception e) {
+            return json;
+        }
+    }
+
+    private static String effectiveTopicPrompt(String currentPrompt, ActiveTopicHistory history) {
+        if (history != null && history.topicPrompt() != null && !history.topicPrompt().isBlank()) {
+            return history.topicPrompt();
+        }
+        return currentPrompt;
+    }
+
+    private String buildNoPriorTopicMessage(boolean isVn) {
+        return isVn
+                ? "Hãy cho tôi biết bạn muốn tìm bài tập cho nhóm cơ hoặc kỹ năng nào trước nhé."
+                : "Please specify which muscle group or skill you want exercises for first.";
+    }
+
+    private String buildNoMoreExercisesMessage(PromptCriteria criteria, boolean isVn) {
+        if (isVn) {
+            return "Hiện không còn bài tập phù hợp nào khác trong tiêu chí này ngoài các bài đã được gợi ý.";
+        }
+        String label = criteria != null && criteria.listHeading() != null && !"Calisthenics Exercises".equals(criteria.listHeading())
+                ? criteria.listHeading().toLowerCase(Locale.US).replace("exercises", "").trim()
+                : "";
+        if (!label.isBlank()) {
+            return "There are no more suitable " + label + " exercises available within the current criteria.";
+        }
+        return "There are no more suitable exercises available within the current criteria.";
     }
 
     private String safeToJson(Object obj) {

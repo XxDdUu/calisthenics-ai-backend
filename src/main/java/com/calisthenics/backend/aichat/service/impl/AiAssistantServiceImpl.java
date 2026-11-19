@@ -25,9 +25,13 @@ import com.calisthenics.backend.analytics.repository.PersonalRecordRepository;
 import com.calisthenics.backend.analytics.service.PersonalRecordService;
 import com.calisthenics.backend.bodymetrics.entity.ClientBodyMeasurement;
 import com.calisthenics.backend.bodymetrics.repository.ClientBodyMeasurementRepository;
+import com.calisthenics.backend.coachclient.entity.CoachClientRelationship;
+import com.calisthenics.backend.coachclient.repository.CoachClientRelationshipRepository;
+import com.calisthenics.backend.coachclient.type.CoachClientRelationshipStatus;
 import com.calisthenics.backend.exercise.Exercise;
 import com.calisthenics.backend.exercise.ExerciseRepository;
 import com.calisthenics.backend.profile.entity.ClientProfile;
+import com.calisthenics.backend.profile.entity.CoachProfile;
 import com.calisthenics.backend.profile.repository.ClientProfileRepository;
 import com.calisthenics.backend.profile.repository.CoachProfileRepository;
 import com.calisthenics.backend.user.Gender;
@@ -42,6 +46,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -76,8 +81,13 @@ public class AiAssistantServiceImpl implements AiAssistantService {
     private final WorkoutPlanChangePreviewService workoutPlanChangePreviewService;
     private final AiWorkoutRecommendationService aiWorkoutRecommendationService;
 
+    @Autowired(required = false)
+    private CoachClientRelationshipRepository coachClientRelationshipRepository;
+
+    private static final String TOOL_LIST_EXERCISES = "list_exercises";
     private static final String TOOL_RECOMMEND_EXERCISES = "recommend_exercises";
     private static final String TOOL_CONSULT_WORKOUT_PLAN = "consult_workout_plan";
+    private static final String TOOL_GET_MY_COACH_INFO = "get_my_coach_info";
     private static final String TOOL_STORE_RECOMMENDATION_SELECTION = "store_recommendation_selection";
     private static final String TOOL_APPLY_SELECTED_RECOMMENDATIONS = "apply_selected_recommendations";
 
@@ -296,13 +306,20 @@ public class AiAssistantServiceImpl implements AiAssistantService {
         List<WorkoutSession> recentSessions = workoutSessionRepository.findByUserIdAndStatusOrderByWorkoutDateDesc(
                 userId, WorkoutSessionStatus.COMPLETED);
 
-        // 3. Prepare Multi-turn Conversation Context for Gemini
+        // 3. Prepare Multi-turn Conversation Context for Gemini + Full Recommendation History
         List<AiMessage> history = aiMessageRepository.findTop15ByConversationIdOrderByCreatedAtDesc(conversationId);
         Collections.reverse(history); // chronological order
         List<AiMessage> priorHistory = history.stream()
                 .filter(m -> userMessage.getId() == null || !Objects.equals(m.getId(), userMessage.getId()))
                 .filter(m -> !("user".equalsIgnoreCase(m.getRole()) && userContent.equals(m.getContent()) && m == history.get(history.size() - 1)))
                 .toList();
+        List<AiMessage> fullAscHistoryRaw = aiMessageRepository.findByConversationIdOrderByCreatedAtAsc(conversationId);
+        List<AiMessage> fullPriorHistory = (fullAscHistoryRaw != null && !fullAscHistoryRaw.isEmpty())
+                ? fullAscHistoryRaw.stream()
+                    .filter(m -> userMessage.getId() == null || !Objects.equals(m.getId(), userMessage.getId()))
+                    .filter(m -> !("user".equalsIgnoreCase(m.getRole()) && userContent.equals(m.getContent()) && m == fullAscHistoryRaw.get(fullAscHistoryRaw.size() - 1)))
+                    .toList()
+                : priorHistory;
 
         WorkoutDayOfWeek selectedDayOfWeek = request.getSelectedDayOfWeek();
         boolean isVn = isVietnamese(userContent);
@@ -358,7 +375,7 @@ public class AiAssistantServiceImpl implements AiAssistantService {
             return mapToMessageResponse(savedMsg, userId);
         }
 
-        WorkoutIntentClassification preClassifiedWorkout = classifyWorkoutIntent(userContent, priorHistory);
+        WorkoutIntentClassification preClassifiedWorkout = classifyWorkoutIntent(userContent, fullPriorHistory);
 
         List<GeminiRequestDto.Content> geminiContents = new ArrayList<>();
         for (AiMessage msg : history) {
@@ -384,12 +401,12 @@ public class AiAssistantServiceImpl implements AiAssistantService {
 
         // 5. Rule-Based Fallback if Gemini is offline or skipped for deterministic safety
         if (assistantOutput == null || assistantOutput.getIntent() == null) {
-            assistantOutput = fallbackIntentEngine(userContent, recentPrs, priorHistory);
+            assistantOutput = fallbackIntentEngine(userContent, recentPrs, fullPriorHistory);
         }
 
         // Guardrail: enforce deterministic read-only/write workout classification and explicit weekday priority
         WorkoutIntentClassification finalWorkoutDecision = reconcileWorkoutDecision(
-                preClassifiedWorkout, userContent, assistantOutput, priorHistory);
+                preClassifiedWorkout, userContent, assistantOutput, fullPriorHistory);
 
         // 6. Action Execution based on Intent
         String detectedIntent = finalWorkoutDecision != null
@@ -411,7 +428,7 @@ public class AiAssistantServiceImpl implements AiAssistantService {
                     userContent,
                     finalWorkoutDecision,
                     assistantOutput.getWorkoutPlanAction(),
-                    priorHistory,
+                    fullPriorHistory,
                     selectedDayOfWeek,
                     request.getTimezone()
             );
@@ -478,7 +495,7 @@ public class AiAssistantServiceImpl implements AiAssistantService {
             List<WorkoutSession> recentSessions
     ) {
         StringBuilder sb = new StringBuilder();
-        sb.append("You are the Calisthenics AI Assistant, an elite, motivational, and scientifically rigorous calisthenics personal coach.\n");
+        sb.append("You are the Calisthenics AI Assistant, an automated AI software assistant (NEVER claim to be the user's assigned human coach and NEVER invent a coach profile).\n");
         sb.append("User Information:\n");
         sb.append("- Name: ").append(user.getFullName() != null ? user.getFullName() : "Athlete").append("\n");
         if (user.getGender() != null) {
@@ -516,18 +533,20 @@ public class AiAssistantServiceImpl implements AiAssistantService {
         sb.append("   - If unambiguous (exercise, value, and type are clear), populate 'pr_action' with 'is_ambiguous=false'.\n");
         sb.append("   - If ambiguous (e.g. missing value, missing exercise), set 'is_ambiguous=true' and ask a clarifying question in 'reply'.\n");
         sb.append("2. 'WORKOUT_PLAN_VIEW' / 'WORKOUT_DAY_VIEW' / 'EXERCISE_DETAILS_VIEW' (STRICTLY READ-ONLY): The user asks to view, show, list, or explain their existing workout plan, weekly schedule, today's workout, or a specific day's workout (e.g., 'Show my workout plan', 'What am I training today?', 'Show Wednesday', 'Lịch tập của tôi thế nào?'). NEVER create or modify a workout plan for these queries.\n");
-        sb.append("3. 'EXERCISE_RECOMMENDATION' (READ-ONLY ADVISORY): The user asks for exercise recommendations, suggestions, ideas for undertrained muscles, or what to add to a training day/skill (e.g., 'Recommend some leg exercises to add to my leg day', 'Suggest exercises to improve my planche', 'What exercises am I missing in my current routine?'). NEVER require a specific exercise name or weekday or create a workout modification preview automatically unless user explicitly commands adding named exercises.\n");
-        sb.append("4. 'WORKOUT_CONSULTATION' (READ-ONLY COACHING): The user asks to evaluate, review, check recovery, muscle balance, or training volume of their workout routine or day (e.g., 'Is my leg day balanced?', 'Am I training my hamstrings enough?', 'Does my weekly routine have enough recovery?', 'Is my current planche training volume too high?'). NEVER modify the schedule.\n");
-        sb.append("5. 'WORKOUT_PLAN' / 'WORKOUT_PLAN_UPDATE' (WRITE ONLY ON EXPLICIT REQUEST): The user explicitly commands creating, generating, replacing, regenerating, updating, adding specific exercises to, removing exercises from, or moving exercises between days in a workout plan.\n");
+        sb.append("3. 'LIST_EXERCISES' (READ-ONLY INFORMATIONAL): The user asks for a list of exercises (e.g., 'List me some leg exercises', 'What exercises can I do for my legs?'). Return ONLY a clean numbered list of relevant exercises. NEVER analyze their workout plan, report muscle gaps, display weekly sets, suggest weekdays, ask which day to train, or append follow-up questions.\n");
+        sb.append("4. 'EXERCISE_RECOMMENDATION' (READ-ONLY ADVISORY): The user asks for exercise recommendations (e.g., 'Recommend some exercises for handstand push-ups', 'Suggest exercises to improve my planche', 'Recommend some leg exercises to add to my leg day', 'What exercises am I missing in my current routine?'). Unless the user explicitly mentions their plan/routine/day, do NOT analyze their workout plan, report muscle gaps, display weekly sets, or suggest weekdays. NEVER modify the schedule automatically.\n");
+        sb.append("5. 'WORKOUT_CONSULTATION' (READ-ONLY COACHING): The user asks to evaluate, review, check recovery, muscle balance, or training volume of their workout routine or day (e.g., 'Is my leg day balanced?', 'Am I training my hamstrings enough?', 'Does my weekly routine have enough recovery?', 'Is my current planche training volume too high?'). NEVER modify the schedule.\n");
+        sb.append("6. 'COACH_INFO' (READ-ONLY ACCOUNT LOOKUP): The user asks about their assigned human coach ('Who is my coach?', 'Show me my coach information', 'Show my coach profile'). Retrieve only real backend data.\n");
+        sb.append("7. 'WORKOUT_PLAN' / 'WORKOUT_PLAN_UPDATE' (WRITE ONLY ON EXPLICIT REQUEST): The user explicitly commands creating, generating, replacing, regenerating, updating, adding specific exercises to, removing exercises from, or moving exercises between days in a workout plan.\n");
         sb.append("   - Populate 'workout_plan_action' with tool_name, prompt, fitness_level, duration_weeks, day_of_week, source_day_of_week (when moving), exercise_name, and detailed.\n");
         sb.append("   - CRITICAL RULES: Explicit weekday requests ALWAYS take priority over any selected day. Never infer a different weekday when one is explicitly stated (e.g. 'to Tuesday not Monday' means TUESDAY). Never substitute or add unrelated exercises.\n");
-        sb.append("6. 'PROGRESS_ANALYSIS': The user asks about their progress, plateaus, improvements, or training trends (e.g., 'How is my pull up progress?', 'Am I plateauing on dips?').\n");
+        sb.append("8. 'PROGRESS_ANALYSIS': The user asks about their progress, plateaus, improvements, or training trends (e.g., 'How is my pull up progress?', 'Am I plateauing on dips?').\n");
         sb.append("   - Populate 'progress_analysis_action'. Provide data-backed insights.\n");
-        sb.append("7. 'PROFILE_UPDATE': The user requests to update their personal/athlete profile details (e.g. 'Cập nhật cân nặng của tôi thành 76kg', 'Đổi mục tiêu tập luyện thành Straddle Planche', 'My height is 178 cm', 'Update my bio to Calisthenics athlete', 'Change display name to Alex').\n");
+        sb.append("9. 'PROFILE_UPDATE': The user requests to update their personal/athlete profile details (e.g. 'Cập nhật cân nặng của tôi thành 76kg', 'Đổi mục tiêu tập luyện thành Straddle Planche', 'My height is 178 cm', 'Update my bio to Calisthenics athlete', 'Change display name to Alex').\n");
         sb.append("   - Supported editable fields: display_name, full_name, bio, height_cm, weight_kg, experience_level, training_experience, primary_goals, training_interests, preferred_frequency, coaching_language, gender.\n");
         sb.append("   - If unambiguous and has specific field and value, set 'is_ambiguous=false' and populate 'profile_update_action'.\n");
         sb.append("   - If ambiguous or missing specific values (e.g. 'update my profile' without specifying what), set 'is_ambiguous=true' and ask what they want to change in 'clarification_question'.\n");
-        sb.append("8. 'GENERAL_CHAT': Form tips, exercise breakdowns, mobility advice, recovery, or motivation.\n");
+        sb.append("10. 'GENERAL_CHAT': Form tips, exercise breakdowns, mobility advice, recovery, or motivation.\n");
         sb.append("   - Provide structured, rich Markdown responses (headers, bold, bullet points).\n");
         return sb.toString();
     }
@@ -996,8 +1015,23 @@ public class AiAssistantServiceImpl implements AiAssistantService {
             String exerciseName,
             boolean isToday,
             boolean nextSession,
-            boolean detailed
-    ) {}
+            boolean detailed,
+            boolean anotherFollowUp
+    ) {
+        private WorkoutIntentClassification(
+                String intent,
+                String toolName,
+                boolean readOnly,
+                WorkoutDayOfWeek sourceDay,
+                WorkoutDayOfWeek targetDay,
+                String exerciseName,
+                boolean isToday,
+                boolean nextSession,
+                boolean detailed
+        ) {
+            this(intent, toolName, readOnly, sourceDay, targetDay, exerciseName, isToday, nextSession, detailed, false);
+        }
+    }
 
     private record PendingWorkoutClarification(
             String pendingAction,
@@ -1093,8 +1127,9 @@ public class AiAssistantServiceImpl implements AiAssistantService {
         if (text == null || text.isBlank()) return false;
         String lower = text.toLowerCase(Locale.US).trim();
 
-        // Exclude profile / PR / read-only view queries
-        if (lower.contains("profile") || lower.contains("weight") || lower.contains("height")
+        // Exclude profile / PR / coach info / read-only view queries
+        if (isCoachInfoRequest(lower)
+                || lower.contains("profile") || lower.contains("weight") || lower.contains("height")
                 || containsWord(lower, "pr") || lower.contains("personal record")
                 || containsWord(lower, "show") || containsWord(lower, "view")
                 || containsWord(lower, "list") || lower.contains("xem ")
@@ -1189,6 +1224,14 @@ public class AiAssistantServiceImpl implements AiAssistantService {
             return new WorkoutIntentClassification("EXERCISE_DETAILS_VIEW",
                     UserAiWorkoutToolService.TOOL_GET_EXERCISE_DETAILS, true, null, null, exerciseName, false, false, true);
         }
+        if ("LIST_EXERCISES".equals(intent)) {
+            return new WorkoutIntentClassification("LIST_EXERCISES",
+                    TOOL_LIST_EXERCISES, true, null, null, exerciseName, false, false, true);
+        }
+        if ("COACH_INFO".equals(intent)) {
+            return new WorkoutIntentClassification("COACH_INFO",
+                    TOOL_GET_MY_COACH_INFO, true, null, null, null, false, false, true);
+        }
         if ("EXERCISE_RECOMMENDATION".equals(intent)) {
             return new WorkoutIntentClassification("EXERCISE_RECOMMENDATION",
                     TOOL_RECOMMEND_EXERCISES, true, null, day, exerciseName, false, false, true);
@@ -1237,11 +1280,28 @@ public class AiAssistantServiceImpl implements AiAssistantService {
                         ? decision.targetDay()
                         : ((decision.isToday() || decision.nextSession()) ? null : selectedDayOfWeek);
                 UserAiWorkoutToolService.WorkoutToolResult result = switch (decision.toolName()) {
+                    case TOOL_GET_MY_COACH_INFO -> executeGetMyCoachInfo(userId, isVn);
+                    case TOOL_LIST_EXERCISES -> {
+                        if (aiWorkoutRecommendationService != null) {
+                            AiWorkoutRecommendationService.RecommendationOutcome listOut =
+                                    aiWorkoutRecommendationService.listExercises(
+                                            userId, userContent, priorHistory, decision.anotherFollowUp(), isVn);
+                            yield new UserAiWorkoutToolService.WorkoutToolResult(
+                                    TOOL_LIST_EXERCISES, true, listOut.intent(), true, listOut.reply(), listOut.metadataJson());
+                        }
+                        yield new UserAiWorkoutToolService.WorkoutToolResult(
+                                TOOL_LIST_EXERCISES, true, "LIST_EXERCISES", false,
+                                "Exercise directory is currently unavailable.", null);
+                    }
                     case TOOL_RECOMMEND_EXERCISES -> {
                         if (aiWorkoutRecommendationService != null) {
                             WorkoutDayOfWeek focusDay = decision.targetDay() != null ? decision.targetDay() : selectedDayOfWeek;
+                            boolean planContextRequested = !decision.anotherFollowUp()
+                                    && aiWorkoutRecommendationService.planContextExplicitlyRequested(userContent);
                             AiWorkoutRecommendationService.RecommendationOutcome recOut =
-                                    aiWorkoutRecommendationService.recommendExercises(userId, userContent, focusDay, isVn);
+                                    aiWorkoutRecommendationService.recommendExercises(
+                                            userId, userContent, focusDay, planContextRequested,
+                                            priorHistory, decision.anotherFollowUp(), isVn);
                             yield new UserAiWorkoutToolService.WorkoutToolResult(
                                     TOOL_RECOMMEND_EXERCISES, true, recOut.intent(), true, recOut.reply(), recOut.metadataJson());
                         }
@@ -1391,6 +1451,12 @@ public class AiAssistantServiceImpl implements AiAssistantService {
         }
         String lower = userMessage.toLowerCase(Locale.US).trim();
 
+        // 0a. Check assigned coach information query BEFORE mentionsProfile ("Show my coach profile" contains "profile")
+        if (isCoachInfoRequest(lower)) {
+            return new WorkoutIntentClassification("COACH_INFO",
+                    TOOL_GET_MY_COACH_INFO, true, null, null, null, false, false, true);
+        }
+
         // Do not hijack explicit PR/profile/progress queries
         boolean mentionsProfile = lower.contains("profile") || lower.contains("hồ sơ")
                 || lower.contains("weight") || lower.contains("cân nặng")
@@ -1447,8 +1513,10 @@ public class AiAssistantServiceImpl implements AiAssistantService {
                 || lower.contains("xem ");
 
         // Pending clarification follow-up (e.g. Turn 1: "Add Front Lever Raises" or "I like Squat and RDL", Turn 2: "Tuesday" / "Add them to Wednesday")
+        boolean isAnotherRequest = isAnotherExerciseRequest(lower, priorHistory);
         PendingWorkoutClarification pendingClarification = findPendingWorkoutClarification(priorHistory);
         if (pendingClarification != null && weekday != null && !isViewVerb
+                && !isAnotherRequest && !isListExercisesRequest(lower, weekday, mentionsPlanOrSchedule, mentionsTodayTraining, mentionsNextSession)
                 && !isExerciseRecommendationRequest(lower) && !isWorkoutConsultationRequest(lower)) {
             if ("ADD_MULTI".equalsIgnoreCase(pendingClarification.pendingAction())
                     && pendingClarification.selectedExerciseIds() != null
@@ -1489,7 +1557,9 @@ public class AiAssistantServiceImpl implements AiAssistantService {
                 || containsWord(lower, "move") || containsWord(lower, "update")
                 || containsWord(lower, "change") || containsWord(lower, "modify")
                 || containsWord(lower, "reorder") || containsWord(lower, "replace");
-        if (!isExerciseRecommendationRequest(lower) && !isWorkoutConsultationRequest(lower)
+        if (!isAnotherRequest
+                && !isListExercisesRequest(lower, weekday, mentionsPlanOrSchedule, mentionsTodayTraining, mentionsNextSession)
+                && !isExerciseRecommendationRequest(lower) && !isWorkoutConsultationRequest(lower)
                 && !isViewVerb && !hasOtherWriteVerb) {
             RecommendedSelectionContext recFollowUp = extractRecommendationSelectionFromMessage(userMessage, priorHistory);
             if (recFollowUp != null && !recFollowUp.selectedIds().isEmpty()) {
@@ -1502,7 +1572,17 @@ public class AiAssistantServiceImpl implements AiAssistantService {
             }
         }
 
-        // 0b. Check EXERCISE_RECOMMENDATION & WORKOUT_CONSULTATION BEFORE explicit ADD/CREATE verbs
+        // 0b. Check "Another exercise" follow-up, LIST_EXERCISES, EXERCISE_RECOMMENDATION & WORKOUT_CONSULTATION BEFORE WRITE/VIEW verbs
+        if (isAnotherRequest) {
+            String topicIntent = resolveAnotherFollowUpIntent(lower, priorHistory);
+            String tool = "LIST_EXERCISES".equals(topicIntent) ? TOOL_LIST_EXERCISES : TOOL_RECOMMEND_EXERCISES;
+            return new WorkoutIntentClassification(topicIntent,
+                    tool, true, null, null, null, false, false, true, true);
+        }
+        if (isListExercisesRequest(lower, weekday, mentionsPlanOrSchedule, mentionsTodayTraining, mentionsNextSession)) {
+            return new WorkoutIntentClassification("LIST_EXERCISES",
+                    TOOL_LIST_EXERCISES, true, null, null, null, false, false, true);
+        }
         if (isExerciseRecommendationRequest(lower)) {
             return new WorkoutIntentClassification("EXERCISE_RECOMMENDATION",
                     TOOL_RECOMMEND_EXERCISES, true, null, weekday, null, false, false, true);
@@ -1650,6 +1730,235 @@ public class AiAssistantServiceImpl implements AiAssistantService {
         }
 
         return null;
+    }
+
+    private boolean isCoachInfoRequest(String lower) {
+        if (lower == null || lower.isBlank()) {
+            return false;
+        }
+        if (containsWord(lower, "update") || containsWord(lower, "change") || containsWord(lower, "edit")) {
+            return false;
+        }
+        return lower.contains("who is my coach")
+                || lower.contains("who's my coach")
+                || lower.contains("whos my coach")
+                || lower.contains("my coach")
+                || lower.contains("assigned coach")
+                || lower.contains("coach information")
+                || lower.contains("coach info")
+                || lower.contains("coach profile")
+                || lower.contains("coach's profile")
+                || lower.contains("coach's bio")
+                || lower.contains("coach details")
+                || lower.contains("huấn luyện viên của tôi")
+                || lower.contains("hlv của tôi")
+                || lower.contains("ai là huấn luyện viên")
+                || lower.contains("thông tin huấn luyện viên")
+                || lower.contains("thông tin hlv")
+                || lower.contains("hồ sơ huấn luyện viên");
+    }
+
+    private boolean isAnotherExerciseRequest(String lower, List<AiMessage> priorHistory) {
+        if (lower == null || lower.isBlank()) {
+            return false;
+        }
+        boolean mentionsPlanOrSchedule = lower.contains("workout plan") || lower.contains("training plan")
+                || lower.contains("schedule") || lower.contains("routine") || lower.contains("split");
+        if (mentionsPlanOrSchedule) {
+            return false;
+        }
+        boolean mentionsExerciseNoun = lower.contains("exercise") || lower.contains("exercises")
+                || lower.contains("movement") || lower.contains("movements")
+                || lower.contains("bài tập");
+        boolean hasExplicitAnotherCue = ((containsWord(lower, "another") || containsWord(lower, "different") || containsWord(lower, "other"))
+                && (mentionsExerciseNoun || containsWord(lower, "one")))
+                || lower.contains("more exercises")
+                || lower.contains("other exercises")
+                || lower.contains("different exercises")
+                || lower.contains("bài tập khác")
+                || lower.contains("bài khác");
+        if (hasExplicitAnotherCue) {
+            return true;
+        }
+
+        boolean hasRecentExerciseContext = hasActiveExerciseListOrRecHistory(priorHistory);
+        if (!hasRecentExerciseContext) {
+            return false;
+        }
+        return lower.contains("anything else")
+                || lower.contains("what else")
+                || lower.contains("something else")
+                || lower.contains("any other")
+                || containsWord(lower, "another")
+                || containsWord(lower, "more")
+                || lower.contains("suggest another")
+                || lower.contains("recommend another")
+                || lower.contains("give me another")
+                || lower.contains("thêm nữa")
+                || lower.contains("còn bài nào")
+                || lower.contains("còn nữa không")
+                || lower.contains("gợi ý thêm");
+    }
+
+    private boolean hasActiveExerciseListOrRecHistory(List<AiMessage> priorHistory) {
+        if (priorHistory == null || priorHistory.isEmpty()) {
+            return false;
+        }
+        for (int i = priorHistory.size() - 1; i >= 0; i--) {
+            AiMessage m = priorHistory.get(i);
+            if (m == null || !"assistant".equalsIgnoreCase(m.getRole())) {
+                continue;
+            }
+            String intent = m.getIntent() != null ? m.getIntent().trim().toUpperCase(Locale.US) : "";
+            return "LIST_EXERCISES".equals(intent) || "EXERCISE_RECOMMENDATION".equals(intent);
+        }
+        return false;
+    }
+
+    private String resolveAnotherFollowUpIntent(String lower, List<AiMessage> priorHistory) {
+        if (containsWord(lower, "recommend") || containsWord(lower, "suggest") || lower.contains("gợi ý")) {
+            return "EXERCISE_RECOMMENDATION";
+        }
+        if (priorHistory != null) {
+            for (int i = priorHistory.size() - 1; i >= 0; i--) {
+                AiMessage m = priorHistory.get(i);
+                if (m != null && "assistant".equalsIgnoreCase(m.getRole()) && m.getIntent() != null) {
+                    String intent = m.getIntent().trim().toUpperCase(Locale.US);
+                    if ("LIST_EXERCISES".equals(intent) || "EXERCISE_RECOMMENDATION".equals(intent)) {
+                        return intent;
+                    }
+                }
+            }
+        }
+        return "LIST_EXERCISES";
+    }
+
+    private boolean isListExercisesRequest(
+            String lower,
+            WorkoutDayOfWeek weekday,
+            boolean mentionsPlanOrSchedule,
+            boolean mentionsTodayTraining,
+            boolean mentionsNextSession
+    ) {
+        if (lower == null || lower.isBlank()) {
+            return false;
+        }
+        if (mentionsPlanOrSchedule || mentionsTodayTraining || mentionsNextSession || weekday != null) {
+            return false;
+        }
+        if (lower.contains("exercise details") || lower.contains("details for ")
+                || lower.contains("show exercise ") || lower.contains("chi tiết bài tập")) {
+            return false;
+        }
+        // Keep explicit plan/workout creation or modification out of LIST_EXERCISES
+        boolean hasPlanOrWriteCue = containsWord(lower, "add") || containsWord(lower, "remove")
+                || containsWord(lower, "delete") || containsWord(lower, "move")
+                || containsWord(lower, "replace") || containsWord(lower, "reorder")
+                || containsWord(lower, "update") || containsWord(lower, "change")
+                || lower.contains("should i add") || lower.contains("missing in my")
+                || lower.contains("in my workout") || lower.contains("in my plan") || lower.contains("on my schedule")
+                || lower.contains("thêm ") || lower.contains("xóa ") || lower.contains("bỏ ");
+        if (hasPlanOrWriteCue) {
+            return false;
+        }
+        boolean hasRecommendVerb = containsWord(lower, "recommend") || containsWord(lower, "recommendation")
+                || containsWord(lower, "recommendations") || containsWord(lower, "suggest")
+                || containsWord(lower, "suggestion") || containsWord(lower, "suggestions")
+                || lower.contains("gợi ý") || lower.contains("đề xuất");
+        if (hasRecommendVerb) {
+            return false;
+        }
+        boolean mentionsPluralExerciseNoun = lower.contains("exercises") || lower.contains("movements") || lower.contains("bài tập");
+        boolean mentionsAnyExerciseNoun = mentionsPluralExerciseNoun || lower.contains("exercise");
+        if (!mentionsAnyExerciseNoun) {
+            return false;
+        }
+        boolean hasListVerb = containsWord(lower, "list") || lower.contains("show me")
+                || lower.contains("what exercises") || lower.contains("which exercises")
+                || lower.contains("what are some") || lower.contains("what are good")
+                || lower.contains("any exercises") || lower.contains("give me a list")
+                || lower.contains("liệt kê");
+        if (hasListVerb) {
+            return true;
+        }
+        return mentionsPluralExerciseNoun
+                && (lower.contains("for ") || (aiWorkoutRecommendationService != null
+                        && aiWorkoutRecommendationService.hasExplicitExerciseCriteria(lower)))
+                && !lower.contains("give me some") && !lower.contains("give me a few");
+    }
+
+    private UserAiWorkoutToolService.WorkoutToolResult executeGetMyCoachInfo(Long userId, boolean isVn) {
+        if (userId == null) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Authentication required");
+        }
+        Optional<CoachClientRelationship> activeRelOpt = coachClientRelationshipRepository != null
+                ? coachClientRelationshipRepository.findFirstByClientIdAndStatusOrderByUpdatedAtDesc(
+                        userId, CoachClientRelationshipStatus.ACTIVE)
+                : Optional.empty();
+        if (activeRelOpt.isEmpty() || activeRelOpt.get().getCoach() == null) {
+            String msg = "You don't currently have an assigned coach.";
+            return new UserAiWorkoutToolService.WorkoutToolResult(
+                    TOOL_GET_MY_COACH_INFO, true, "COACH_INFO", true, msg, null);
+        }
+
+        User coach = activeRelOpt.get().getCoach();
+        CoachProfile profile = coachProfileRepository != null
+                ? coachProfileRepository.findByUserId(coach.getId()).orElse(null)
+                : null;
+
+        String displayName = (profile != null && isNonBlankText(profile.getDisplayName()))
+                ? profile.getDisplayName().trim()
+                : (isNonBlankText(coach.getFullName()) ? coach.getFullName().trim() : null);
+        String fullName = isNonBlankText(coach.getFullName()) ? coach.getFullName().trim() : null;
+        String avatarUrl = (profile != null && isNonBlankText(profile.getAvatarUrl()))
+                ? profile.getAvatarUrl().trim()
+                : (isNonBlankText(coach.getAvatarUrl()) ? coach.getAvatarUrl().trim() : null);
+
+        StringBuilder sb = new StringBuilder();
+        sb.append(isVn ? "**Thông Tin Huấn Luyện Viên**\n\n" : "**Assigned Coach Profile**\n\n");
+        if (displayName != null) {
+            sb.append("- **Name**: ").append(displayName).append("\n");
+        }
+        if (fullName != null && (displayName == null || !fullName.equalsIgnoreCase(displayName))) {
+            sb.append("- **Full Name**: ").append(fullName).append("\n");
+        }
+        if (avatarUrl != null) {
+            sb.append("- **Profile Picture**: ").append(avatarUrl).append("\n");
+        }
+        if (profile != null && Boolean.TRUE.equals(profile.getIsVerified())) {
+            sb.append("- **Status**: Verified Coach\n");
+        }
+        if (profile != null && isNonBlankText(profile.getBio())) {
+            sb.append("- **Bio**: ").append(profile.getBio().trim()).append("\n");
+        }
+        if (profile != null && isNonBlankText(profile.getSpecialties())) {
+            sb.append("- **Specialties**: ").append(profile.getSpecialties().trim()).append("\n");
+        }
+        if (profile != null && profile.getYearsExperience() != null) {
+            sb.append("- **Experience**: ").append(profile.getYearsExperience()).append(" years\n");
+        }
+        if (profile != null && isNonBlankText(profile.getCertifications())) {
+            sb.append("- **Certifications**: ").append(profile.getCertifications().trim()).append("\n");
+        }
+        if (profile != null && isNonBlankText(profile.getTrainingPhilosophy())) {
+            sb.append("- **Coaching Philosophy**: ").append(profile.getTrainingPhilosophy().trim()).append("\n");
+        }
+        if (profile != null && isNonBlankText(profile.getCoachingDescription())) {
+            sb.append("- **Coaching Description**: ").append(profile.getCoachingDescription().trim()).append("\n");
+        }
+        if (profile != null && isNonBlankText(profile.getLanguages())) {
+            sb.append("- **Languages**: ").append(profile.getLanguages().trim()).append("\n");
+        }
+        if (profile != null && isNonBlankText(profile.getSocialLinks())) {
+            sb.append("- **Social Links**: ").append(profile.getSocialLinks().trim()).append("\n");
+        }
+
+        return new UserAiWorkoutToolService.WorkoutToolResult(
+                TOOL_GET_MY_COACH_INFO, true, "COACH_INFO", true, sb.toString().trim(), null);
+    }
+
+    private static boolean isNonBlankText(String value) {
+        return value != null && !value.isBlank();
     }
 
     private boolean isExerciseRecommendationRequest(String lower) {
@@ -1928,6 +2237,18 @@ public class AiAssistantServiceImpl implements AiAssistantService {
     ) {
         String lower = userMessage.toLowerCase();
 
+        // 0. Coach Information Check BEFORE profile update check (e.g. "Show my coach profile" contains "profile")
+        if (isCoachInfoRequest(lower)) {
+            return GeminiAssistantOutput.builder()
+                    .intent("COACH_INFO")
+                    .reply(null)
+                    .workoutPlanAction(GeminiAssistantOutput.WorkoutPlanAction.builder()
+                            .prompt(userMessage)
+                            .toolName(TOOL_GET_MY_COACH_INFO)
+                            .build())
+                    .build();
+        }
+
         // 1. Profile Update Pattern Checks (Vietnamese & English)
         Double extractedWeight = extractWeight(userMessage);
         Double extractedHeight = extractHeight(userMessage);
@@ -2201,6 +2522,8 @@ public class AiAssistantServiceImpl implements AiAssistantService {
         if (userMessage == null || userMessage.isBlank()) {
             return switch (intent) {
                 case "PR_RECORD" -> "PR Record Log";
+                case "LIST_EXERCISES" -> "Exercise Directory";
+                case "COACH_INFO" -> "Coach Profile";
                 case "EXERCISE_RECOMMENDATION" -> "Exercise Recommendations";
                 case "WORKOUT_CONSULTATION" -> "Routine Consultation";
                 case "WORKOUT_PLAN", "WORKOUT_PLAN_VIEW", "WORKOUT_DAY_VIEW", "WORKOUT_PLAN_UPDATE", "WORKOUT_PLAN_PREVIEW" -> "Workout Plan Session";

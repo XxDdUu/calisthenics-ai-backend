@@ -432,8 +432,10 @@ public class GeminiApiClient {
                         "remove_exercise_from_workout",
                         "move_exercise_between_days",
                         "regenerate_workout_plan",
+                        "list_exercises",
                         "recommend_exercises",
-                        "consult_workout_plan"
+                        "consult_workout_plan",
+                        "get_my_coach_info"
                 ),
                 "description", "Read-only/advisory tools for view, recommendation, and consultation requests; write tools only for explicit create/modify/replace requests"
         ));
@@ -493,8 +495,10 @@ public class GeminiApiClient {
                         "WORKOUT_DAY_VIEW",
                         "EXERCISE_DETAILS_VIEW",
                         "WORKOUT_PLAN_UPDATE",
+                        "LIST_EXERCISES",
                         "EXERCISE_RECOMMENDATION",
                         "WORKOUT_CONSULTATION",
+                        "COACH_INFO",
                         "PR_RECORD",
                         "PROGRESS_ANALYSIS",
                         "PROFILE_UPDATE",
