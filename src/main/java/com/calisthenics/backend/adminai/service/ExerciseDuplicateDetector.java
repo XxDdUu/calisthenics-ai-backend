@@ -144,7 +144,10 @@ public class ExerciseDuplicateDetector {
             Map.entry("ez bar skullcrusher", "ez bar skull crusher"),
             Map.entry("tricep pushdown", "cable triceps pushdown"),
             Map.entry("cable tricep pushdown", "cable triceps pushdown"),
-            Map.entry("triceps pushdown", "cable triceps pushdown")
+            Map.entry("triceps pushdown", "cable triceps pushdown"),
+            Map.entry("hspu", "handstand push up"),
+            Map.entry("wall hspu", "wall handstand push up"),
+            Map.entry("freestanding hspu", "freestanding handstand push up")
     );
 
     public enum MatchType {

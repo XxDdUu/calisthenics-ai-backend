@@ -142,9 +142,10 @@ public class AdminAiController {
     public ResponseEntity<AdminTrainingAnalyticsResponse> getTrainingAnalytics(
             @RequestParam(required = false, defaultValue = "LAST_30_DAYS") AdminAnalyticsRange range,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate startDate,
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate endDate
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate endDate,
+            @RequestParam(required = false) com.calisthenics.backend.exercise.ExerciseTrainingType trainingType
     ) {
-        return ResponseEntity.ok(trainingAnalyticsService.getTrainingAnalytics(range, startDate, endDate));
+        return ResponseEntity.ok(trainingAnalyticsService.getTrainingAnalytics(range, startDate, endDate, trainingType));
     }
 
     @GetMapping("/recommendations")

@@ -24,12 +24,14 @@ import com.calisthenics.backend.exercise.ExerciseCategory;
 import com.calisthenics.backend.exercise.ExerciseMediaMapper;
 import com.calisthenics.backend.exercise.ExerciseRepository;
 import com.calisthenics.backend.exercise.ExerciseStatus;
+import com.calisthenics.backend.exercise.ExerciseTrainingType;
 import com.calisthenics.backend.exercise.dto.ExerciseMediaResponse;
 import com.calisthenics.backend.exercise.muscle.MuscleId;
 import com.calisthenics.backend.exercise.muscle.MuscleRegion;
 import com.calisthenics.backend.exercise.muscle.MuscleTaxonomyService;
 import com.calisthenics.backend.profile.entity.ClientProfile;
 import com.calisthenics.backend.profile.repository.ClientProfileRepository;
+import com.calisthenics.backend.skill.service.SkillCatalogService;
 import com.calisthenics.backend.workout.WorkoutSession;
 import com.calisthenics.backend.workout.WorkoutSessionRepository;
 import com.calisthenics.backend.workout.WorkoutSessionStatus;
@@ -68,7 +70,7 @@ public class AiWorkoutRecommendationService {
     private static final double HIGH_WEEKLY_MUSCLE_SETS_THRESHOLD = 18.0;
     private static final int HIGH_DAY_EXERCISE_THRESHOLD = 6;
     private static final Pattern COUNT_PATTERN = Pattern.compile("\\b(\\d{1,2})\\s+(?:[a-zA-ZÀ-ỹ-]+\\s+){0,3}(?:exercises?|movements?|bài tập)\\b", Pattern.CASE_INSENSITIVE);
-    private static final Pattern SKILL_KEYWORDS = Pattern.compile("\\b(planche|front lever|back lever|handstand push[- ]?ups?|handstand|hspu|muscle[ -]?up|l[ -]?sit|human flag|pistol|v[ -]?sit|dragon flag|iron cross)\\b", Pattern.CASE_INSENSITIVE);
+    private static final Pattern SKILL_KEYWORDS = Pattern.compile("\\b(planche|front lever|back lever|handstand push[- ]?ups?|handstand|hspu|muscle[ -]?up|l[ -]?sit|human flag|pistol(?: squat)?|shrimp squat|nordic(?: curl)?|v[ -]?sit|dragon flag|iron cross|bench press|incline bench(?: press)?|overhead press|lat pulldown|barbell row|seated cable row|romanian deadlift|rdl|leg press|leg extension|leg curl|calf raise|cable crunch|lateral raise|bicep curl|triceps? extension|face pull|barbell squat)\\b", Pattern.CASE_INSENSITIVE);
 
     private final ExerciseRepository exerciseRepository;
     private final MuscleTaxonomyService muscleTaxonomyService;
@@ -109,6 +111,7 @@ public class AiWorkoutRecommendationService {
             boolean upperPullFocus,
             boolean coreFocus,
             boolean bodyweightOnly,
+            ExerciseTrainingType requestedTrainingType,
             String equipmentFilter,
             String focusLabel,
             String listHeading,
@@ -942,8 +945,30 @@ public class AiWorkoutRecommendationService {
 
         boolean bodyweightOnly = lower.contains("no equipment") || lower.contains("without equipment")
                 || lower.contains("bodyweight only") || lower.contains("at home") || lower.contains("just floor");
+        boolean explicitlyGym = lower.contains("gym") || lower.contains("weight training")
+                || lower.contains("barbell") || lower.contains("dumbbell") || lower.contains("cable")
+                || lower.contains("machine") || lower.contains("smith")
+                || lower.contains("bench press") || lower.contains("lat pulldown")
+                || lower.contains("leg press") || lower.contains("leg extension")
+                || lower.contains("leg curl") || lower.contains("romanian deadlift")
+                || lower.contains("face pull") || lower.contains("calf raise");
+        boolean explicitlyCalisthenics = bodyweightOnly || lower.contains("calisthenics") || lower.contains("bodyweight")
+                || lower.contains("planche") || lower.contains("front lever") || lower.contains("back lever")
+                || lower.contains("handstand") || lower.contains("hspu") || lower.contains("human flag")
+                || lower.contains("muscle up") || lower.contains("muscle-up")
+                || lower.contains("pistol squat") || lower.contains("shrimp squat")
+                || lower.contains("l-sit") || lower.contains("l sit")
+                || lower.contains("v-sit") || lower.contains("v sit")
+                || lower.contains("dragon flag");
+        ExerciseTrainingType requestedTrainingType = null;
+        if (explicitlyGym && !explicitlyCalisthenics) {
+            requestedTrainingType = ExerciseTrainingType.GYM;
+        } else if (explicitlyCalisthenics && !explicitlyGym) {
+            requestedTrainingType = ExerciseTrainingType.CALISTHENICS;
+        }
+
         String eqFilter = null;
-        for (String eq : List.of("parallettes", "rings", "gymnastic rings", "pull-up bar", "pull up bar", "resistance band", "bench", "box", "kettlebell", "dumbbell", "barbell")) {
+        for (String eq : List.of("parallettes", "rings", "gymnastic rings", "pull-up bar", "pull up bar", "resistance band", "bench", "box", "kettlebell", "dumbbell", "barbell", "cable", "machine")) {
             if (lower.contains(eq)) {
                 eqFilter = eq;
                 break;
@@ -951,7 +976,7 @@ public class AiWorkoutRecommendationService {
         }
 
         boolean hasExplicitFilter = !muscles.isEmpty() || !categories.isEmpty() || !skillKeywords.isEmpty()
-                || wholeGap || bodyweightOnly || eqFilter != null;
+                || wholeGap || bodyweightOnly || eqFilter != null || requestedTrainingType != null;
 
         // If nothing explicit matched and user mentioned general profile goals, draw subtle signal (only in plan-context mode)
         if (muscles.isEmpty() && categories.isEmpty() && !wholeGap && profile != null && profile.getPrimaryGoals() != null) {
@@ -994,6 +1019,9 @@ public class AiWorkoutRecommendationService {
         } else if (!categories.isEmpty()) {
             focusLabel = categories.stream().map(c -> capitalizeWords(c.name().replace('_', ' '))).collect(Collectors.joining(", "));
             listHeading = focusLabel + " Exercises";
+        } else if (requestedTrainingType == ExerciseTrainingType.GYM) {
+            focusLabel = "Gym / Weight Training Selection";
+            listHeading = "Gym Exercises";
         } else {
             focusLabel = "Personalized Calisthenics Selection";
             listHeading = "Calisthenics Exercises";
@@ -1012,6 +1040,8 @@ public class AiWorkoutRecommendationService {
             criteriaKey = "MUSCLES:" + muscles.stream().map(MuscleId::name).sorted().collect(Collectors.joining(","));
         } else if (!categories.isEmpty()) {
             criteriaKey = "CATS:" + categories.stream().map(Enum::name).sorted().collect(Collectors.joining(","));
+        } else if (requestedTrainingType != null) {
+            criteriaKey = "TYPE:" + requestedTrainingType.name();
         } else {
             criteriaKey = "GENERAL";
         }
@@ -1026,6 +1056,7 @@ public class AiWorkoutRecommendationService {
                 pull,
                 core,
                 bodyweightOnly,
+                requestedTrainingType,
                 eqFilter,
                 focusLabel,
                 listHeading,
@@ -1198,6 +1229,12 @@ public class AiWorkoutRecommendationService {
         double score = 0.0;
         boolean relevantToRequest = false;
         List<String> filledGaps = new ArrayList<>();
+
+        // 0. Strict training type separation (prevent Gym movements from leaking into Calisthenics skills and vice versa)
+        if (criteria.requestedTrainingType() != null
+                && !SkillCatalogService.isExerciseCompatibleWithTrainingType(ex, criteria.requestedTrainingType())) {
+            return null;
+        }
 
         // 1. Direct target muscle / category / skill alignment
         if (!criteria.targetMuscles().isEmpty()) {
@@ -2125,6 +2162,7 @@ public class AiWorkoutRecommendationService {
                 inherited.upperPullFocus(),
                 inherited.coreFocus(),
                 rawCriteria.bodyweightOnly() || inherited.bodyweightOnly(),
+                rawCriteria.requestedTrainingType() != null ? rawCriteria.requestedTrainingType() : inherited.requestedTrainingType(),
                 rawCriteria.equipmentFilter() != null ? rawCriteria.equipmentFilter() : inherited.equipmentFilter(),
                 inherited.focusLabel(),
                 inherited.listHeading(),

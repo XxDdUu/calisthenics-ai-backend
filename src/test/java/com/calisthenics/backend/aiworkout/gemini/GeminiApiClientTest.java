@@ -1,5 +1,6 @@
 package com.calisthenics.backend.aiworkout.gemini;
 
+import com.calisthenics.backend.aiworkout.gemini.dto.GeminiExerciseBatchOutcome;
 import com.calisthenics.backend.config.AppProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -7,6 +8,7 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.client.MockRestServiceServer;
+import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestTemplate;
 
 import org.springframework.web.server.ResponseStatusException;
@@ -277,6 +279,75 @@ class GeminiApiClientTest {
                 .isInstanceOf(ResponseStatusException.class)
                 .satisfies(ex -> assertThat(((ResponseStatusException) ex).getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE));
 
+        server.verify();
+    }
+
+    @Test
+    void generateExerciseDraftBatch_classifiesMalformedJsonMaxTokensAndTimeoutCleanly() throws Exception {
+        AppProperties props = new AppProperties();
+        props.getGemini().setApiKey("test-key");
+        props.getGemini().setBaseUrl("https://generativelanguage.googleapis.com/v1beta");
+        props.getGemini().setMaxRetries(1);
+
+        RestTemplate restTemplate = new RestTemplate();
+        MockRestServiceServer server = MockRestServiceServer.createServer(restTemplate);
+        String expectedUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent";
+
+        ObjectMapper mapper = new ObjectMapper();
+        String malformedEnvelope = mapper.writeValueAsString(Map.of(
+                "candidates", List.of(Map.of(
+                        "finishReason", "STOP",
+                        "content", Map.of("parts", List.of(Map.of("text", "{broken-json")))
+                ))
+        ));
+        String truncatedEnvelope = mapper.writeValueAsString(Map.of(
+                "candidates", List.of(Map.of(
+                        "finishReason", "MAX_TOKENS",
+                        "content", Map.of("parts", List.of(Map.of("text", "{\"exercise_drafts\":[{\"name\":\"Pike Push-Up\"")))
+                )),
+                "usageMetadata", Map.of("promptTokenCount", 100, "candidatesTokenCount", 8192)
+        ));
+
+        server.expect(requestTo(expectedUrl))
+                .andRespond(withSuccess(malformedEnvelope, MediaType.APPLICATION_JSON));
+        server.expect(requestTo(expectedUrl))
+                .andRespond(withSuccess(truncatedEnvelope, MediaType.APPLICATION_JSON));
+        server.expect(requestTo(expectedUrl))
+                .andRespond(req -> {
+                    throw new ResourceAccessException("Read timed out");
+                });
+        server.expect(requestTo(expectedUrl))
+                .andRespond(req -> {
+                    throw new ResourceAccessException("Read timed out");
+                });
+
+        GeminiApiClient client = new GeminiApiClient(props, mapper) {
+            @Override
+            protected RestTemplate createRestTemplate() {
+                return restTemplate;
+            }
+
+            @Override
+            protected void sleepBeforeRetry(long delayMs) {
+            }
+        };
+
+        GeminiExerciseBatchOutcome malformed = client.generateExerciseDraftBatch("sys", "user");
+        assertThat(malformed.status()).isEqualTo(GeminiExerciseBatchOutcome.Status.MALFORMED_JSON);
+        assertThat(malformed.rawResponseLength()).isGreaterThan(0);
+        assertThat(malformed.drafts()).isEmpty();
+
+        GeminiExerciseBatchOutcome truncated = client.generateExerciseDraftBatch("sys", "user");
+        assertThat(truncated.status()).isEqualTo(GeminiExerciseBatchOutcome.Status.MAX_TOKENS_TRUNCATED);
+        assertThat(truncated.isTruncated()).isTrue();
+        assertThat(truncated.finishReason()).isEqualTo("MAX_TOKENS");
+        assertThat(truncated.outputTokens()).isEqualTo(8192);
+
+        GeminiExerciseBatchOutcome timedOut = client.generateExerciseDraftBatch("sys", "user");
+        assertThat(timedOut.status()).isEqualTo(GeminiExerciseBatchOutcome.Status.API_TIMEOUT);
+        assertThat(timedOut.errorDetail()).contains("Read timed out");
+
+        assertNoArrayCardinalityBounds(GeminiApiClient.buildExerciseDraftBatchSchema());
         server.verify();
     }
 

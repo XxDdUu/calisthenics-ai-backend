@@ -49,6 +49,7 @@ public class AppProperties {
         private long initialRetryDelayMs = 1000L;
         private long maxRetryDelayMs = 8000L;
         private long maxRetryAfterMs = 15000L;
+        private int exerciseGenerationMaxRetries = 3;
     }
 
     @Getter

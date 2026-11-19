@@ -59,11 +59,49 @@ public class ExerciseDraftValidationService {
     public record ExerciseDraftRequestContract(
             List<RequestedExerciseSpec> explicitExercises,
             ExerciseCategory requiredCategory,
+            Set<ExerciseCategory> allowedCategories,
+            String skillFocus,
             DifficultyLevel requiredDifficulty,
             int expectedCount
     ) {
+        public ExerciseDraftRequestContract(
+                List<RequestedExerciseSpec> explicitExercises,
+                ExerciseCategory requiredCategory,
+                DifficultyLevel requiredDifficulty,
+                int expectedCount
+        ) {
+            this(
+                    explicitExercises,
+                    requiredCategory,
+                    requiredCategory != null ? Set.of(requiredCategory) : Set.of(),
+                    null,
+                    requiredDifficulty,
+                    expectedCount
+            );
+        }
+
         public boolean hasExplicitExercises() {
             return explicitExercises != null && !explicitExercises.isEmpty();
+        }
+
+        public boolean isCategoryAllowed(ExerciseCategory candidateCategory) {
+            if (candidateCategory == null) {
+                return false;
+            }
+            if (allowedCategories != null && !allowedCategories.isEmpty()) {
+                return allowedCategories.contains(candidateCategory);
+            }
+            return requiredCategory == null || requiredCategory == candidateCategory;
+        }
+
+        public String describeAllowedCategories() {
+            if (allowedCategories != null && !allowedCategories.isEmpty()) {
+                if (allowedCategories.size() == 1) {
+                    return allowedCategories.iterator().next().name();
+                }
+                return allowedCategories.stream().map(ExerciseCategory::name).sorted().reduce((a, b) -> a + ", " + b).orElse("");
+            }
+            return requiredCategory != null ? requiredCategory.name() : "ANY";
         }
     }
 
@@ -76,6 +114,18 @@ public class ExerciseDraftValidationService {
             return String.join("; ", errors);
         }
     }
+
+    public record ItemizedValidationOutcome(
+            int parsedCount,
+            List<ExerciseRecommendationPayload> validPayloads,
+            List<String> rejectionReasons
+    ) {}
+
+    private record SkillProgressionPolicy(
+            String skillFocus,
+            ExerciseCategory primaryCategory,
+            Set<ExerciseCategory> allowedCategories
+    ) {}
 
     public ExerciseDraftRequestContract parseRequestContract(
             String userPrompt,
@@ -139,12 +189,71 @@ public class ExerciseDraftValidationService {
             resolvedCount = resolveRequestedCount(userPrompt, explicitCount);
         }
 
+        SkillProgressionPolicy skillPolicy = (effectiveSpecs.isEmpty() && explicitCategory == null)
+                ? detectSkillProgressionPolicy(userPrompt, skillFilter)
+                : null;
+        Set<ExerciseCategory> allowedCategories;
+        String skillFocus = null;
+        if (skillPolicy != null && (promptCategory == null || promptCategory == skillPolicy.primaryCategory())) {
+            allowedCategories = skillPolicy.allowedCategories();
+            requiredCategory = skillPolicy.primaryCategory();
+            skillFocus = skillPolicy.skillFocus();
+        } else {
+            allowedCategories = requiredCategory != null ? Set.of(requiredCategory) : Set.of();
+        }
+
         return new ExerciseDraftRequestContract(
                 List.copyOf(effectiveSpecs),
                 requiredCategory,
+                allowedCategories,
+                skillFocus,
                 requiredDifficulty,
                 resolvedCount
         );
+    }
+
+    /**
+     * Validates each candidate independently without discarding valid items if count != expectedCount
+     * or if a subset of candidates contains missing fields or mismatched categories.
+     */
+    public ItemizedValidationOutcome validateRawCandidatesItemized(
+            ExerciseDraftRequestContract contract,
+            List<ExerciseDraftCandidateDto> rawCandidates
+    ) {
+        if (rawCandidates == null || rawCandidates.isEmpty()) {
+            return new ItemizedValidationOutcome(0, List.of(), List.of());
+        }
+
+        List<ExerciseRecommendationPayload> valid = new ArrayList<>();
+        List<String> rejectionReasons = new ArrayList<>();
+        Set<String> seenNames = new HashSet<>();
+        Set<String> seenCodes = new HashSet<>();
+        Set<String> expectedNormNames = collectExpectedNormNames(contract);
+
+        for (int i = 0; i < rawCandidates.size(); i++) {
+            ExerciseDraftCandidateDto dto = rawCandidates.get(i);
+            String label = dto != null && dto.getName() != null && !dto.getName().isBlank()
+                    ? "'" + dto.getName().trim() + "'"
+                    : "item #" + (i + 1);
+            List<String> itemErrors = new ArrayList<>();
+            ExerciseRecommendationPayload payload = convertAndValidateDto(dto, i, contract, expectedNormNames, itemErrors);
+            if (!itemErrors.isEmpty() || payload == null) {
+                rejectionReasons.addAll(itemErrors);
+                continue;
+            }
+            String normName = normalizeExactName(payload.getName());
+            if (!seenNames.add(normName)) {
+                rejectionReasons.add("Duplicate exercise name in batch: " + label + ".");
+                continue;
+            }
+            if (!seenCodes.add(payload.getCode())) {
+                rejectionReasons.add("Duplicate exercise code '" + payload.getCode() + "' in batch.");
+                continue;
+            }
+            valid.add(payload);
+        }
+
+        return new ItemizedValidationOutcome(rawCandidates.size(), valid, rejectionReasons);
     }
 
     public ValidationOutcome validateRawCandidates(
@@ -157,48 +266,41 @@ public class ExerciseDraftValidationService {
 
         List<String> errors = new ArrayList<>();
         List<ExerciseRecommendationPayload> converted = new ArrayList<>();
+        Set<String> seenNames = new HashSet<>();
+        Set<String> seenCodes = new HashSet<>();
+        Set<String> expectedNormNames = collectExpectedNormNames(contract);
 
         for (int i = 0; i < rawCandidates.size(); i++) {
             ExerciseDraftCandidateDto dto = rawCandidates.get(i);
             String label = dto != null && dto.getName() != null && !dto.getName().isBlank()
                     ? "'" + dto.getName().trim() + "'"
                     : "item #" + (i + 1);
-            if (dto == null) {
-                errors.add("Exercise item #" + (i + 1) + " is null.");
-                continue;
+            List<String> itemErrors = new ArrayList<>();
+            ExerciseRecommendationPayload payload = convertAndValidateDto(dto, i, contract, expectedNormNames, itemErrors);
+            errors.addAll(itemErrors);
+            if (payload != null) {
+                String normName = normalizeExactName(payload.getName());
+                if (!seenNames.add(normName)) {
+                    errors.add("Duplicate exercise name in batch: " + label + ".");
+                }
+                if (!payload.getCode().isBlank() && !seenCodes.add(payload.getCode())) {
+                    errors.add("Duplicate exercise code '" + payload.getCode() + "' in batch.");
+                }
+                converted.add(payload);
             }
-            ExerciseCategory parsedCategory = parseCategoryEnum(dto.getCategory());
-            if (parsedCategory == null) {
-                errors.add("Invalid or missing category '" + dto.getCategory() + "' for exercise " + label + ".");
-            }
-            DifficultyLevel parsedDifficulty = parseDifficultyEnum(dto.getDifficulty());
-            if (parsedDifficulty == null) {
-                errors.add("Invalid or missing difficulty '" + dto.getDifficulty() + "' for exercise " + label + ".");
-            }
-
-            String cleanName = dto.getName() != null ? dto.getName().trim() : "";
-            String normalizedCode = normalizeSlug(
-                    (dto.getCode() != null && !dto.getCode().isBlank()) ? dto.getCode() : cleanName
-            );
-
-            converted.add(ExerciseRecommendationPayload.builder()
-                    .name(cleanName)
-                    .code(normalizedCode)
-                    .category(parsedCategory)
-                    .difficulty(parsedDifficulty)
-                    .description(safeTrim(dto.getDescription()))
-                    .instructions(safeTrim(dto.getInstructions()))
-                    .targetMuscles(safeTrim(dto.getTargetMuscles()))
-                    .equipment(safeTrim(dto.getEquipment()))
-                    .targetSkill(safeTrim(dto.getTargetSkill()))
-                    .build());
         }
+
+        if (contract.expectedCount() > 0 && rawCandidates.size() != contract.expectedCount()) {
+            errors.add(0, String.format("Requested %d exercise(s), but received %d.",
+                    contract.expectedCount(), rawCandidates.size()));
+        }
+
+        validateExplicitMatchCoverage(contract, converted, errors);
 
         if (!errors.isEmpty()) {
             return new ValidationOutcome(false, List.of(), errors);
         }
-
-        return validatePayloads(contract, converted);
+        return new ValidationOutcome(true, converted, List.of());
     }
 
     public ValidationOutcome validatePayloads(
@@ -218,130 +320,311 @@ public class ExerciseDraftValidationService {
 
         Set<String> seenNames = new HashSet<>();
         Set<String> seenCodes = new HashSet<>();
+        Set<String> expectedNormNames = collectExpectedNormNames(contract);
+        List<ExerciseRecommendationPayload> normalized = new ArrayList<>();
 
         for (int i = 0; i < candidates.size(); i++) {
             ExerciseRecommendationPayload p = candidates.get(i);
-            String label = p != null && p.getName() != null && !p.getName().isBlank()
-                    ? "'" + p.getName().trim() + "'"
-                    : "item #" + (i + 1);
-            if (p == null) {
-                errors.add("Exercise candidate #" + (i + 1) + " is null.");
-                continue;
-            }
-            if (p.getName() == null || p.getName().isBlank()) {
-                errors.add("Exercise candidate #" + (i + 1) + " is missing a name.");
-            } else if (p.getName().trim().length() > 100) {
-                errors.add("Exercise name " + label + " exceeds 100 characters.");
-            } else {
-                String normName = normalizeExactName(p.getName());
+            List<String> itemErrors = new ArrayList<>();
+            ExerciseRecommendationPayload validated = validateAndNormalizePayload(p, i, contract, expectedNormNames, itemErrors);
+            errors.addAll(itemErrors);
+            if (validated != null) {
+                String label = "'" + validated.getName() + "'";
+                String normName = normalizeExactName(validated.getName());
                 if (!seenNames.add(normName)) {
                     errors.add("Duplicate exercise name in batch: " + label + ".");
                 }
-            }
-
-            String slug = normalizeSlug(p.getCode() != null && !p.getCode().isBlank() ? p.getCode() : p.getName());
-            if (slug.isBlank()) {
-                errors.add("Missing slug/code for exercise " + label + ".");
-            } else {
-                if (slug.length() > 50) {
-                    slug = slug.substring(0, 50).replaceAll("_+$", "");
+                if (!validated.getCode().isBlank() && !seenCodes.add(validated.getCode())) {
+                    errors.add("Duplicate exercise code '" + validated.getCode() + "' in batch.");
                 }
-                if (!seenCodes.add(slug)) {
-                    errors.add("Duplicate exercise code '" + slug + "' in batch.");
-                }
-            }
-
-            if (p.getCategory() == null) {
-                errors.add("Missing valid category for exercise " + label + ".");
-            } else if (contract.requiredCategory() != null && p.getCategory() != contract.requiredCategory()) {
-                errors.add(String.format("Category mismatch for %s: expected %s, got %s.",
-                        label, contract.requiredCategory(), p.getCategory()));
-            }
-
-            if (p.getDifficulty() == null) {
-                errors.add("Missing valid difficulty for exercise " + label + ".");
-            } else if (contract.requiredDifficulty() != null && p.getDifficulty() != contract.requiredDifficulty()) {
-                errors.add(String.format("Difficulty mismatch for %s: expected %s, got %s.",
-                        label, contract.requiredDifficulty(), p.getDifficulty()));
-            }
-
-            if (isBlank(p.getDescription())) {
-                errors.add("Missing description for exercise " + label + ".");
-            }
-            if (isBlank(p.getInstructions())) {
-                errors.add("Missing instructions for exercise " + label + ".");
-            }
-            if (isBlank(p.getTargetMuscles())) {
-                errors.add("Missing target muscles for exercise " + label + ".");
-            }
-            if (isBlank(p.getEquipment())) {
-                errors.add("Missing equipment requirement for exercise " + label + ".");
+                normalized.add(validated);
             }
         }
 
-        // Strict explicit request matching (prioritize exact name matching over semantic substitution)
-        if (contract.hasExplicitExercises()) {
-            Map<String, ExerciseRecommendationPayload> candidateByExactNorm = new LinkedHashMap<>();
-            for (ExerciseRecommendationPayload c : candidates) {
-                if (c != null && c.getName() != null) {
-                    candidateByExactNorm.putIfAbsent(normalizeExactName(c.getName()), c);
-                }
-            }
-
-            Set<String> expectedNormNames = new LinkedHashSet<>();
-            for (RequestedExerciseSpec spec : contract.explicitExercises()) {
-                String expectedNorm = normalizeExactName(spec.name());
-                expectedNormNames.add(expectedNorm);
-                ExerciseRecommendationPayload matched = candidateByExactNorm.get(expectedNorm);
-                if (matched == null) {
-                    errors.add("Missing requested exercise '" + spec.name() + "'. Unrelated substitutions are rejected.");
-                    continue;
-                }
-                if (spec.category() != null && matched.getCategory() != spec.category()) {
-                    errors.add(String.format("Exercise '%s' category mismatch: expected %s, got %s.",
-                            spec.name(), spec.category(), matched.getCategory()));
-                }
-                if (spec.difficulty() != null && matched.getDifficulty() != spec.difficulty()) {
-                    errors.add(String.format("Exercise '%s' difficulty mismatch: expected %s, got %s.",
-                            spec.name(), spec.difficulty(), matched.getDifficulty()));
-                }
-            }
-
-            for (ExerciseRecommendationPayload c : candidates) {
-                if (c != null && c.getName() != null && !expectedNormNames.contains(normalizeExactName(c.getName()))) {
-                    errors.add("Unexpected/unrelated exercise '" + c.getName()
-                            + "' rejected because it was not in the requested exercise list.");
-                }
-            }
-        }
+        validateExplicitMatchCoverage(contract, normalized, errors);
 
         if (!errors.isEmpty()) {
             return new ValidationOutcome(false, List.of(), errors);
         }
 
-        List<ExerciseRecommendationPayload> normalized = new ArrayList<>();
-        for (ExerciseRecommendationPayload p : candidates) {
-            String slug = normalizeSlug(p.getCode() != null && !p.getCode().isBlank() ? p.getCode() : p.getName());
-            if (slug.length() > 50) {
-                slug = slug.substring(0, 50).replaceAll("_+$", "");
-            }
-            normalized.add(ExerciseRecommendationPayload.builder()
-                    .name(p.getName().trim())
-                    .code(slug)
-                    .category(p.getCategory())
-                    .difficulty(p.getDifficulty())
-                    .description(p.getDescription().trim())
-                    .instructions(p.getInstructions().trim())
-                    .targetMuscles(p.getTargetMuscles().trim())
-                    .equipment(p.getEquipment().trim())
-                    .targetSkill(safeTrim(p.getTargetSkill()))
-                    .progressionLevel(safeTrim(p.getProgressionLevel()))
-                    .prerequisites(safeTrim(p.getPrerequisites()))
-                    .whyAdd(safeTrim(p.getWhyAdd()))
-                    .build());
+        return new ValidationOutcome(true, normalized, List.of());
+    }
+
+    private ExerciseRecommendationPayload convertAndValidateDto(
+            ExerciseDraftCandidateDto dto,
+            int index,
+            ExerciseDraftRequestContract contract,
+            Set<String> expectedNormNames,
+            List<String> itemErrors
+    ) {
+        String label = dto != null && dto.getName() != null && !dto.getName().isBlank()
+                ? "'" + dto.getName().trim() + "'"
+                : "item #" + (index + 1);
+        if (dto == null) {
+            itemErrors.add("Exercise item #" + (index + 1) + " is null.");
+            return null;
+        }
+        ExerciseCategory parsedCategory = parseCategoryEnum(dto.getCategory());
+        if (parsedCategory == null) {
+            itemErrors.add("Invalid or missing category '" + dto.getCategory() + "' for exercise " + label + ".");
+        }
+        DifficultyLevel parsedDifficulty = parseDifficultyEnum(dto.getDifficulty());
+        if (parsedDifficulty == null) {
+            itemErrors.add("Invalid or missing difficulty '" + dto.getDifficulty() + "' for exercise " + label + ".");
         }
 
-        return new ValidationOutcome(true, normalized, List.of());
+        String cleanName = dto.getName() != null ? dto.getName().trim() : "";
+        String normalizedCode = normalizeSlug(
+                (dto.getCode() != null && !dto.getCode().isBlank()) ? dto.getCode() : cleanName
+        );
+
+        ExerciseRecommendationPayload payload = ExerciseRecommendationPayload.builder()
+                .name(cleanName)
+                .code(normalizedCode)
+                .category(parsedCategory)
+                .difficulty(parsedDifficulty)
+                .description(safeTrim(dto.getDescription()))
+                .instructions(safeTrim(dto.getInstructions()))
+                .targetMuscles(safeTrim(dto.getTargetMuscles()))
+                .equipment(safeTrim(dto.getEquipment()))
+                .targetSkill(safeTrim(dto.getTargetSkill()))
+                .trainingType(parseTrainingTypeOrInfer(dto.getTrainingType(), dto.getEquipment(), cleanName))
+                .aliases(safeTrim(dto.getAliases()))
+                .build();
+
+        return validateAndNormalizePayload(payload, index, contract, expectedNormNames, itemErrors);
+    }
+
+    private ExerciseRecommendationPayload validateAndNormalizePayload(
+            ExerciseRecommendationPayload p,
+            int index,
+            ExerciseDraftRequestContract contract,
+            Set<String> expectedNormNames,
+            List<String> itemErrors
+    ) {
+        String label = p != null && p.getName() != null && !p.getName().isBlank()
+                ? "'" + p.getName().trim() + "'"
+                : "item #" + (index + 1);
+        if (p == null) {
+            itemErrors.add("Exercise candidate #" + (index + 1) + " is null.");
+            return null;
+        }
+        if (p.getName() == null || p.getName().isBlank()) {
+            itemErrors.add("Exercise candidate #" + (index + 1) + " is missing a name.");
+        } else if (p.getName().trim().length() > 100) {
+            itemErrors.add("Exercise name " + label + " exceeds 100 characters.");
+        }
+
+        String slug = normalizeSlug(p.getCode() != null && !p.getCode().isBlank() ? p.getCode() : p.getName());
+        if (slug.isBlank()) {
+            itemErrors.add("Missing slug/code for exercise " + label + ".");
+        } else if (slug.length() > 50) {
+            slug = slug.substring(0, 50).replaceAll("_+$", "");
+        }
+
+        if (p.getCategory() == null) {
+            if (itemErrors.stream().noneMatch(e -> e.contains("Invalid or missing category"))) {
+                itemErrors.add("Missing valid category for exercise " + label + ".");
+            }
+        } else if (!contract.isCategoryAllowed(p.getCategory())) {
+            itemErrors.add(String.format("Category mismatch for %s: expected %s, got %s.",
+                    label, contract.describeAllowedCategories(), p.getCategory()));
+        }
+
+        if (p.getDifficulty() == null) {
+            if (itemErrors.stream().noneMatch(e -> e.contains("Invalid or missing difficulty"))) {
+                itemErrors.add("Missing valid difficulty for exercise " + label + ".");
+            }
+        } else if (contract.requiredDifficulty() != null && p.getDifficulty() != contract.requiredDifficulty()) {
+            itemErrors.add(String.format("Difficulty mismatch for %s: expected %s, got %s.",
+                    label, contract.requiredDifficulty(), p.getDifficulty()));
+        }
+
+        if (isBlank(p.getDescription())) {
+            itemErrors.add("Missing description for exercise " + label + ".");
+        }
+        if (isBlank(p.getInstructions())) {
+            itemErrors.add("Missing instructions for exercise " + label + ".");
+        }
+        if (isBlank(p.getTargetMuscles())) {
+            itemErrors.add("Missing target muscles for exercise " + label + ".");
+        }
+        if (isBlank(p.getEquipment())) {
+            itemErrors.add("Missing equipment requirement for exercise " + label + ".");
+        }
+
+        if (contract.hasExplicitExercises() && p.getName() != null && !p.getName().isBlank()) {
+            String norm = normalizeExactName(p.getName());
+            if (!expectedNormNames.contains(norm)) {
+                itemErrors.add("Unexpected/unrelated exercise '" + p.getName()
+                        + "' rejected because it was not in the requested exercise list.");
+            } else {
+                for (RequestedExerciseSpec spec : contract.explicitExercises()) {
+                    if (normalizeExactName(spec.name()).equals(norm)) {
+                        if (spec.category() != null && p.getCategory() != null && p.getCategory() != spec.category()) {
+                            itemErrors.add(String.format("Exercise '%s' category mismatch: expected %s, got %s.",
+                                    spec.name(), spec.category(), p.getCategory()));
+                        }
+                        if (spec.difficulty() != null && p.getDifficulty() != spec.difficulty()) {
+                            itemErrors.add(String.format("Exercise '%s' difficulty mismatch: expected %s, got %s.",
+                                    spec.name(), spec.difficulty(), p.getDifficulty()));
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (!itemErrors.isEmpty()) {
+            return null;
+        }
+
+        String targetSkill = safeTrim(p.getTargetSkill());
+        if ((targetSkill == null || targetSkill.isBlank()) && contract.skillFocus() != null) {
+            targetSkill = contract.skillFocus();
+        }
+
+        return ExerciseRecommendationPayload.builder()
+                .name(p.getName().trim())
+                .code(slug)
+                .category(p.getCategory())
+                .difficulty(p.getDifficulty())
+                .description(p.getDescription().trim())
+                .instructions(p.getInstructions().trim())
+                .targetMuscles(p.getTargetMuscles().trim())
+                .equipment(p.getEquipment().trim())
+                .targetSkill(targetSkill)
+                .trainingType(p.getTrainingType() != null
+                        ? p.getTrainingType()
+                        : parseTrainingTypeOrInfer(null, p.getEquipment(), p.getName()))
+                .aliases(safeTrim(p.getAliases()))
+                .progressionLevel(safeTrim(p.getProgressionLevel()))
+                .prerequisites(safeTrim(p.getPrerequisites()))
+                .whyAdd(safeTrim(p.getWhyAdd()))
+                .build();
+    }
+
+    private static com.calisthenics.backend.exercise.ExerciseTrainingType parseTrainingTypeOrInfer(
+            String rawType,
+            String equipment,
+            String name
+    ) {
+        if (rawType != null && !rawType.isBlank()) {
+            String upper = rawType.trim().toUpperCase(Locale.US);
+            for (com.calisthenics.backend.exercise.ExerciseTrainingType value
+                    : com.calisthenics.backend.exercise.ExerciseTrainingType.values()) {
+                if (value.name().equals(upper)) {
+                    return value;
+                }
+            }
+        }
+        String combined = ((equipment != null ? equipment : "") + " " + (name != null ? name : ""))
+                .toLowerCase(Locale.US);
+        if (combined.contains("barbell") || combined.contains("dumbbell") || combined.contains("cable")
+                || combined.contains("machine") || combined.contains("smith") || combined.contains("leg press")
+                || combined.contains("leg extension") || combined.contains("leg curl")
+                || combined.contains("lat pulldown")) {
+            return com.calisthenics.backend.exercise.ExerciseTrainingType.GYM;
+        }
+        return com.calisthenics.backend.exercise.ExerciseTrainingType.CALISTHENICS;
+    }
+
+    private Set<String> collectExpectedNormNames(ExerciseDraftRequestContract contract) {
+        if (!contract.hasExplicitExercises()) {
+            return Set.of();
+        }
+        Set<String> expected = new LinkedHashSet<>();
+        for (RequestedExerciseSpec spec : contract.explicitExercises()) {
+            expected.add(normalizeExactName(spec.name()));
+        }
+        return expected;
+    }
+
+    private void validateExplicitMatchCoverage(
+            ExerciseDraftRequestContract contract,
+            List<ExerciseRecommendationPayload> candidates,
+            List<String> errors
+    ) {
+        if (!contract.hasExplicitExercises()) {
+            return;
+        }
+        Map<String, ExerciseRecommendationPayload> candidateByExactNorm = new LinkedHashMap<>();
+        for (ExerciseRecommendationPayload c : candidates) {
+            if (c != null && c.getName() != null) {
+                candidateByExactNorm.putIfAbsent(normalizeExactName(c.getName()), c);
+            }
+        }
+        for (RequestedExerciseSpec spec : contract.explicitExercises()) {
+            String expectedNorm = normalizeExactName(spec.name());
+            if (!candidateByExactNorm.containsKey(expectedNorm)) {
+                errors.add("Missing requested exercise '" + spec.name() + "'. Unrelated substitutions are rejected.");
+            }
+        }
+    }
+
+    private SkillProgressionPolicy detectSkillProgressionPolicy(String prompt, String skillFilter) {
+        String source = (prompt != null && !prompt.isBlank()) ? prompt : skillFilter;
+        if (source == null || source.isBlank()) {
+            return null;
+        }
+        String lower = source.toLowerCase(Locale.US);
+        if (lower.contains("handstand push") || lower.matches(".*\\bhspu\\b.*")) {
+            return new SkillProgressionPolicy(
+                    "Handstand Push-Up",
+                    ExerciseCategory.PUSH,
+                    Set.of(ExerciseCategory.PUSH, ExerciseCategory.SKILL, ExerciseCategory.SHOULDERS, ExerciseCategory.ISOMETRIC)
+            );
+        }
+        if (lower.contains("handstand")) {
+            return new SkillProgressionPolicy(
+                    "Handstand",
+                    ExerciseCategory.SKILL,
+                    Set.of(ExerciseCategory.SKILL, ExerciseCategory.PUSH, ExerciseCategory.SHOULDERS, ExerciseCategory.ISOMETRIC)
+            );
+        }
+        if (lower.contains("planche")) {
+            return new SkillProgressionPolicy(
+                    "Planche",
+                    ExerciseCategory.SKILL,
+                    Set.of(ExerciseCategory.SKILL, ExerciseCategory.PUSH, ExerciseCategory.SHOULDERS, ExerciseCategory.ISOMETRIC, ExerciseCategory.CORE)
+            );
+        }
+        if (lower.contains("front lever")) {
+            return new SkillProgressionPolicy(
+                    "Front Lever",
+                    ExerciseCategory.SKILL,
+                    Set.of(ExerciseCategory.SKILL, ExerciseCategory.PULL, ExerciseCategory.ISOMETRIC, ExerciseCategory.CORE, ExerciseCategory.BACK)
+            );
+        }
+        if (lower.contains("back lever")) {
+            return new SkillProgressionPolicy(
+                    "Back Lever",
+                    ExerciseCategory.SKILL,
+                    Set.of(ExerciseCategory.SKILL, ExerciseCategory.PULL, ExerciseCategory.ISOMETRIC, ExerciseCategory.SHOULDERS)
+            );
+        }
+        if (lower.matches(".*\\bmuscle[- ]?ups?\\b.*")) {
+            return new SkillProgressionPolicy(
+                    "Muscle-Up",
+                    ExerciseCategory.SKILL,
+                    Set.of(ExerciseCategory.SKILL, ExerciseCategory.PULL, ExerciseCategory.PUSH)
+            );
+        }
+        if (lower.contains("human flag")) {
+            return new SkillProgressionPolicy(
+                    "Human Flag",
+                    ExerciseCategory.SKILL,
+                    Set.of(ExerciseCategory.SKILL, ExerciseCategory.ISOMETRIC, ExerciseCategory.CORE, ExerciseCategory.SHOULDERS, ExerciseCategory.PULL, ExerciseCategory.PUSH)
+            );
+        }
+        if (lower.matches(".*\\b[lv][- ]?sit\\b.*")) {
+            return new SkillProgressionPolicy(
+                    "L-Sit",
+                    ExerciseCategory.SKILL,
+                    Set.of(ExerciseCategory.SKILL, ExerciseCategory.CORE, ExerciseCategory.ISOMETRIC)
+            );
+        }
+        return null;
     }
 
     public List<RequestedExerciseSpec> extractRequestedExercises(String text) {
@@ -553,22 +836,25 @@ public class ExerciseDraftValidationService {
     }
 
     public static int resolveRequestedCount(String prompt, Integer explicitCount) {
+        // Explicit numeric count written by the admin in the current prompt always takes precedence
+        // over an underestimated AI-planner requested_count field (e.g. prompt=10 vs AI requested_count=3).
+        if (prompt != null && !prompt.isBlank()) {
+            Matcher explicitMatcher = EXPLICIT_COUNT_WITH_NOUN.matcher(prompt);
+            if (explicitMatcher.find()) {
+                try {
+                    int parsed = Integer.parseInt(explicitMatcher.group(1));
+                    if (parsed >= 1 && parsed <= 14) {
+                        return parsed;
+                    }
+                } catch (NumberFormatException ignored) {
+                }
+            }
+        }
         if (explicitCount != null && explicitCount > 0) {
-            return Math.min(10, explicitCount);
+            return Math.min(14, explicitCount);
         }
         if (prompt == null || prompt.isBlank()) {
             return 3;
-        }
-        // Check explicit "<N> ... exercises" phrasing first so list numbering ("1. ...", "2. ...") never overrides count
-        Matcher explicitMatcher = EXPLICIT_COUNT_WITH_NOUN.matcher(prompt);
-        if (explicitMatcher.find()) {
-            try {
-                int parsed = Integer.parseInt(explicitMatcher.group(1));
-                if (parsed >= 1 && parsed <= 10) {
-                    return parsed;
-                }
-            } catch (NumberFormatException ignored) {
-            }
         }
         String withoutListOrdinals = prompt.replaceAll("(?m)^\\s*\\d+[.)]\\s+", " ");
         String lower = " " + withoutListOrdinals.toLowerCase(Locale.US) + " ";

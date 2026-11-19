@@ -46,4 +46,9 @@ public class ExerciseResponse {
     private List<String> primaryMuscleIds;
     private List<String> secondaryMuscleIds;
     private List<ExerciseMuscleTargetDto> muscleTargets;
+    private String subcategory;
+    private List<String> skillCodes;
+    private List<String> skillNames;
+    private String progressionLevel;
+    private Boolean videoAnalysisSupported;
 }

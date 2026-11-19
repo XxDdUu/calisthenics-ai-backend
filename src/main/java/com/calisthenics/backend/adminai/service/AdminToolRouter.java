@@ -12,6 +12,7 @@ import com.calisthenics.backend.adminai.type.AdminAiIntent;
 import com.calisthenics.backend.adminai.type.AdminAnalyticsRange;
 import com.calisthenics.backend.adminai.type.AdminRecommendationPriority;
 import com.calisthenics.backend.adminai.type.AdminToolName;
+import com.calisthenics.backend.aiworkout.gemini.GeminiApiClient;
 import com.calisthenics.backend.exercise.DifficultyLevel;
 import com.calisthenics.backend.exercise.ExerciseCategory;
 import com.calisthenics.backend.gettingstarted.dto.GettingStartedCampaignAnalyticsResponse;
@@ -71,6 +72,7 @@ public class AdminToolRouter {
     private final AdminGettingStartedToolService adminGettingStartedToolService;
     private final AdminProToolService adminProToolService;
     private final ExerciseRecommendationService exerciseRecommendationService;
+    private final ExerciseDraftGenerationOrchestrator exerciseDraftGenerationOrchestrator;
     private final ExerciseDraftValidationService exerciseDraftValidationService;
     private final BulkExerciseGenerationService bulkExerciseGenerationService;
     private final AdminAiMessageRepository adminAiMessageRepository;
@@ -328,6 +330,30 @@ public class AdminToolRouter {
             String skillKeyword,
             GeminiAdminToolPlan geminiPlan
     ) {
+        return routeAndExecuteForChat(
+                userPrompt,
+                request,
+                intent,
+                range,
+                customStart,
+                customEnd,
+                skillKeyword,
+                geminiPlan,
+                null
+        );
+    }
+
+    public RoutedChatToolsResult routeAndExecuteForChat(
+            String userPrompt,
+            AdminChatRequest request,
+            AdminAiIntent intent,
+            AdminAnalyticsRange range,
+            LocalDate customStart,
+            LocalDate customEnd,
+            String skillKeyword,
+            GeminiAdminToolPlan geminiPlan,
+            GeminiApiClient.GeminiCallDiagnostics initialPlannerDiagnostics
+    ) {
         adminAuthorizationService.requireAuthenticatedAdmin();
 
         LocalDate startDate = customStart;
@@ -543,35 +569,18 @@ public class AdminToolRouter {
         if (toolsToRun.contains(AdminToolName.CREATE_EXERCISE_DRAFTS)) {
             long t0 = System.currentTimeMillis();
             User admin = adminAuthorizationService.requireAuthenticatedAdmin();
-            DifficultyLevel diff = null;
-            if (!hasExplicitExercisesInPrompt && geminiPlan != null && !isBlank(geminiPlan.getExperienceLevel())) {
-                try {
-                    diff = DifficultyLevel.valueOf(geminiPlan.getExperienceLevel().trim().toUpperCase(Locale.US));
-                } catch (IllegalArgumentException ignored) {
-                }
-            }
-            ExerciseCategory geminiPlanCategory = parseGeminiExerciseCategory(geminiPlan);
-            ExerciseCategory inferredCategory = explicitPromptCategory != null
-                    ? explicitPromptCategory
-                    : (geminiPlanCategory != null
-                            ? geminiPlanCategory
-                            : ExerciseDraftValidationService.detectCategoryFromText(effectiveSkill));
-            Integer requestedCount = geminiPlan != null && geminiPlan.getRequestedCount() != null
-                    ? geminiPlan.getRequestedCount()
-                    : ExerciseRecommendationService.resolveRequestedCount(userPrompt, null);
+            Integer requestedCount = ExerciseRecommendationService.resolveRequestedCount(
+                    userPrompt, geminiPlan != null ? geminiPlan.getRequestedCount() : null);
             String recentRecContext = !hasExplicitExercisesInPrompt
                     ? findImmediatePriorRecommendationContent(request.getConversationId())
                     : null;
-            exerciseDraftResult = exerciseRecommendationService.createExerciseDrafts(
+            exerciseDraftResult = exerciseDraftGenerationOrchestrator.generateExactDraftBatch(
                     admin,
                     request.getConversationId(),
                     userPrompt,
                     recentRecContext,
-                    inferredCategory,
-                    effectiveSkill,
-                    diff,
-                    requestedCount,
-                    geminiPlan != null ? geminiPlan.getExerciseDrafts() : null
+                    geminiPlan,
+                    initialPlannerDiagnostics
             );
             String toolStatus = exerciseDraftResult.isSuccess() ? "EXECUTED" : "FAILED";
             String toolSummary = exerciseDraftResult.isSuccess()
@@ -584,7 +593,11 @@ public class AdminToolRouter {
             executionRecords.add(AdminToolExecutionRecord.builder()
                     .toolName(AdminToolName.CREATE_EXERCISE_DRAFTS.getToolName())
                     .status(toolStatus)
-                    .parametersSummary("category=" + exerciseDraftResult.getCategory() + ",requested=" + requestedCount)
+                    .parametersSummary("category=" + exerciseDraftResult.getCategory()
+                            + ",requested=" + requestedCount
+                            + ",valid=" + exerciseDraftResult.getValidCount()
+                            + ",duplicates=" + exerciseDraftResult.getDuplicateCount()
+                            + ",retries=" + exerciseDraftResult.getRetryCount())
                     .summary(toolSummary)
                     .recordCount(count)
                     .durationMs(Math.max(0L, System.currentTimeMillis() - t0))

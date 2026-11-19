@@ -49,4 +49,11 @@ public class GeminiResponseDto {
         }
         return null;
     }
+
+    public String getFirstFinishReason() {
+        if (candidates != null && !candidates.isEmpty()) {
+            return candidates.get(0).getFinishReason();
+        }
+        return null;
+    }
 }

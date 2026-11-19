@@ -17,6 +17,9 @@ import com.calisthenics.backend.config.AppProperties;
 import com.calisthenics.backend.config.UserTimeResolver;
 import com.calisthenics.backend.exercise.Exercise;
 import com.calisthenics.backend.exercise.ExerciseRepository;
+import com.calisthenics.backend.exercise.ExerciseTrainingType;
+import com.calisthenics.backend.skill.dto.SkillReferenceDto;
+import com.calisthenics.backend.skill.service.SkillCatalogService;
 import com.calisthenics.backend.user.User;
 import com.calisthenics.backend.user.UserRepository;
 import com.calisthenics.backend.workout.WorkoutSession;
@@ -37,6 +40,7 @@ import com.calisthenics.backend.workoutplan.type.WorkoutSplitType;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -46,6 +50,7 @@ import java.time.DayOfWeek;
 import java.time.LocalDate;
 import java.time.temporal.TemporalAdjusters;
 import java.util.*;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Service
@@ -72,6 +77,9 @@ public class AiWorkoutPlanServiceImpl implements AiWorkoutPlanService {
     private final AiWorkoutPlanValidator planValidator;
     private final UserTimeResolver userTimeResolver;
     private final AppProperties appProperties;
+
+    @Autowired(required = false)
+    private SkillCatalogService skillCatalogService;
 
     @Override
     @Transactional
@@ -492,9 +500,23 @@ public class AiWorkoutPlanServiceImpl implements AiWorkoutPlanService {
         sb.append("NEVER invent new exercises or IDs.\n\n");
         sb.append("AVAILABLE EXERCISE CATALOG:\n");
 
+        Map<Long, List<SkillReferenceDto>> skillRefsByExercise = skillCatalogService != null
+                ? skillCatalogService.getSkillReferencesByExerciseIds(catalog.stream().map(Exercise::getId).toList())
+                : Map.of();
+
         for (Exercise ex : catalog) {
-            sb.append(String.format("- ID: %d | Name: \"%s\" | Code: %s | Category: %s | Difficulty: %s\n",
-                    ex.getId(), ex.getName(), ex.getCode(), ex.getCategory().name(), ex.getDifficulty().name()));
+            ExerciseTrainingType resolvedType = SkillCatalogService.resolveEffectiveTrainingType(ex);
+            String linkedSkills = skillRefsByExercise.getOrDefault(ex.getId(), List.of()).stream()
+                    .map(SkillReferenceDto::getSkillName)
+                    .distinct()
+                    .collect(Collectors.joining(", "));
+            if (linkedSkills.isBlank()) {
+                sb.append(String.format("- ID: %d | Name: \"%s\" | Code: %s | TrainingType: %s | Category: %s | Difficulty: %s\n",
+                        ex.getId(), ex.getName(), ex.getCode(), resolvedType.name(), ex.getCategory().name(), ex.getDifficulty().name()));
+            } else {
+                sb.append(String.format("- ID: %d | Name: \"%s\" | Code: %s | TrainingType: %s | Category: %s | Difficulty: %s | Skills: %s\n",
+                        ex.getId(), ex.getName(), ex.getCode(), resolvedType.name(), ex.getCategory().name(), ex.getDifficulty().name(), linkedSkills));
+            }
         }
 
         sb.append("\nSTRICT STRUCTURE & VOLUME RULES:\n");
@@ -513,6 +535,7 @@ public class AiWorkoutPlanServiceImpl implements AiWorkoutPlanService {
                 constraints.fitnessLevel(), constraints.maxExercisesPerSession()));
         sb.append("6. NEVER repeat the same 'exercise_id' within the same session.\n");
         sb.append("7. Avoid repeating the same dynamic compound strength exercise (PUSH/PULL/LEGS) across consecutive training days; intentional skill (SKILL) or core (CORE) practice may repeat when appropriate.\n");
+        sb.append("8. STRICT MODALITY ISOLATION: When the user asks for Calisthenics / bodyweight / calisthenics skills, pick exercises with TrainingType CALISTHENICS (or BOTH) and NEVER include GYM machine/barbell movements. When the user asks for Gym / weights, pick GYM (or BOTH) exercises and NEVER substitute Calisthenics-only isometric skills unless explicitly requested.\n");
         sb.append("8. For static holds (e.g. Planche progressions, Front Lever, Handstand, L-Sit): set 'hold_seconds' (5-60) and 'reps' to null.\n");
         sb.append("9. For dynamic rep-based exercises (Push-Ups, Pull-Ups, Dips, Squats, Pike Push-Up, Muscle-Up, Planche push up, Front lever pull up): set 'reps' (3-25) and 'hold_seconds' to null.\n");
         sb.append("10. Sets: 2-6 (typically 3-5). Rest: 60-180 seconds. Do NOT include any AI provider brand names in titles or descriptions.\n");

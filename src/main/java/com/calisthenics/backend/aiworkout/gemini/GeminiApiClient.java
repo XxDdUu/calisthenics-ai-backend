@@ -3,7 +3,9 @@ package com.calisthenics.backend.aiworkout.gemini;
 import com.calisthenics.backend.adminai.dto.GeminiAdminAgentOutput;
 import com.calisthenics.backend.adminai.dto.data.GeminiAdminToolPlan;
 import com.calisthenics.backend.adminai.dto.data.GeminiBulkExerciseBatchOutput;
+import com.calisthenics.backend.adminai.dto.data.GeminiExerciseDraftBatchDto;
 import com.calisthenics.backend.aichat.dto.GeminiAssistantOutput;
+import com.calisthenics.backend.aiworkout.gemini.dto.GeminiExerciseBatchOutcome;
 import com.calisthenics.backend.aiworkout.gemini.dto.GeminiRequestDto;
 import com.calisthenics.backend.aiworkout.gemini.dto.GeminiResponseDto;
 import com.calisthenics.backend.aiworkout.gemini.dto.GeminiStructuredPerformanceSummary;
@@ -39,6 +41,22 @@ public class GeminiApiClient {
     private final ObjectMapper objectMapper;
     private volatile RestTemplate pooledRestTemplate;
     private volatile int pooledTimeoutSeconds = -1;
+    private final ThreadLocal<GeminiCallDiagnostics> lastCallDiagnostics = new ThreadLocal<>();
+
+    public record GeminiCallDiagnostics(
+            GeminiExerciseBatchOutcome.Status status,
+            int rawResponseLength,
+            String finishReason,
+            String errorDetail,
+            String modelUsed,
+            long latencyMs,
+            Integer outputTokens
+    ) {
+        public boolean isTruncated() {
+            return status == GeminiExerciseBatchOutcome.Status.MAX_TOKENS_TRUNCATED
+                    || "MAX_TOKENS".equalsIgnoreCase(finishReason);
+        }
+    }
 
     public record GeminiCallResult(
             GeminiStructuredWorkoutPlan plan,
@@ -69,7 +87,8 @@ public class GeminiApiClient {
 
     private record GeminiCallAttempt<T>(
             Optional<GeminiStructuredRawResult<T>> result,
-            boolean nonRetryableClientError
+            boolean nonRetryableClientError,
+            GeminiCallDiagnostics diagnostics
     ) {}
 
     public GeminiCallResult generateWorkoutPlan(String systemPrompt, String userPrompt) {
@@ -147,6 +166,55 @@ public class GeminiApiClient {
         ).result().map(GeminiStructuredRawResult::payload);
     }
 
+    public GeminiCallDiagnostics getLastCallDiagnostics() {
+        return lastCallDiagnostics.get();
+    }
+
+    /**
+     * Focused Gemini structured generation call dedicated to producing exact-count exercise drafts
+     * without sharing schema space with unrelated admin planner fields.
+     */
+    public GeminiExerciseBatchOutcome generateExerciseDraftBatch(
+            String systemPrompt,
+            String userPrompt
+    ) {
+        List<GeminiRequestDto.Content> contents = List.of(GeminiRequestDto.Content.builder()
+                .role("user")
+                .parts(List.of(new GeminiRequestDto.Part(userPrompt)))
+                .build());
+        GeminiCallAttempt<GeminiExerciseDraftBatchDto> attempt = callGeminiConversation(
+                systemPrompt,
+                contents,
+                buildExerciseDraftBatchSchema(),
+                GeminiExerciseDraftBatchDto.class
+        );
+        GeminiCallDiagnostics diag = attempt.diagnostics();
+        if (attempt.result().isPresent()) {
+            GeminiStructuredRawResult<GeminiExerciseDraftBatchDto> raw = attempt.result().get();
+            List<com.calisthenics.backend.adminai.dto.data.ExerciseDraftCandidateDto> drafts =
+                    raw.payload() != null && raw.payload().getExerciseDrafts() != null
+                            ? raw.payload().getExerciseDrafts()
+                            : List.of();
+            return GeminiExerciseBatchOutcome.ok(
+                    drafts,
+                    diag != null ? diag.rawResponseLength() : (raw.rawJson() != null ? raw.rawJson().length() : 0),
+                    diag != null ? diag.finishReason() : null,
+                    raw.modelUsed(),
+                    raw.latencyMs(),
+                    raw.outputTokens()
+            );
+        }
+        return GeminiExerciseBatchOutcome.failed(
+                diag != null ? diag.status() : GeminiExerciseBatchOutcome.Status.UNEXPECTED_ERROR,
+                diag != null ? diag.rawResponseLength() : 0,
+                diag != null ? diag.finishReason() : null,
+                diag != null ? diag.errorDetail() : "Empty Gemini batch response",
+                diag != null ? diag.modelUsed() : resolveModel(),
+                diag != null ? diag.latencyMs() : 0L,
+                diag != null ? diag.outputTokens() : null
+        );
+    }
+
     private String resolveModel() {
         String model = appProperties.getGemini().getModel();
         return (model == null || model.isBlank()) ? "gemini-flash-lite-latest" : model;
@@ -218,7 +286,11 @@ public class GeminiApiClient {
 
         if (apiKey == null || apiKey.isBlank() || apiKey.startsWith("placeholder")) {
             log.warn("GEMINI_API_KEY is not configured or empty. Skipping remote Gemini call for {}", responseType.getSimpleName());
-            return new GeminiCallAttempt<>(Optional.empty(), false);
+            GeminiCallDiagnostics diag = new GeminiCallDiagnostics(
+                    GeminiExerciseBatchOutcome.Status.NOT_CONFIGURED, 0, null,
+                    "GEMINI_API_KEY not configured", model, 0L, null);
+            lastCallDiagnostics.set(diag);
+            return new GeminiCallAttempt<>(Optional.empty(), false, diag);
         }
 
         long startTime = System.currentTimeMillis();
@@ -240,6 +312,10 @@ public class GeminiApiClient {
         int attempt = 0;
         Exception lastException = null;
         boolean nonRetryableClientError = false;
+        GeminiExerciseBatchOutcome.Status failureStatus = GeminiExerciseBatchOutcome.Status.UNEXPECTED_ERROR;
+        String lastFinishReason = null;
+        int lastRawLength = 0;
+        Integer lastOutputTokens = null;
 
         while (attempt <= maxRetries) {
             try {
@@ -254,12 +330,19 @@ public class GeminiApiClient {
 
                 long latency = System.currentTimeMillis() - startTime;
                 GeminiResponseDto body = response.getBody();
-                if (body == null || body.getFirstText() == null) {
-                    throw new IllegalStateException("Empty response from Gemini API");
+                lastFinishReason = body != null ? body.getFirstFinishReason() : null;
+                lastOutputTokens = (body != null && body.getUsageMetadata() != null)
+                        ? body.getUsageMetadata().getCandidatesTokenCount()
+                        : null;
+                if (body == null || body.getFirstText() == null || body.getFirstText().isBlank()) {
+                    failureStatus = GeminiExerciseBatchOutcome.Status.EMPTY_RESPONSE;
+                    throw new IllegalStateException("Empty response from Gemini API (finishReason=" + lastFinishReason + ")");
                 }
 
                 String jsonText = body.getFirstText();
-                log.debug("Received structured JSON from Gemini ({}): {}", responseType.getSimpleName(), jsonText);
+                lastRawLength = jsonText.length();
+                log.debug("Received structured JSON from Gemini ({}, length={}, finishReason={}): {}",
+                        responseType.getSimpleName(), lastRawLength, lastFinishReason, jsonText);
 
                 T parsed = objectMapper.readValue(jsonText, responseType);
 
@@ -268,14 +351,32 @@ public class GeminiApiClient {
                 int outputTokens = body.getUsageMetadata() != null && body.getUsageMetadata().getCandidatesTokenCount() != null
                         ? body.getUsageMetadata().getCandidatesTokenCount() : 0;
 
-                log.info("Gemini API call succeeded in {}ms ({}). Tokens: in={}, out={}", latency, responseType.getSimpleName(), inputTokens, outputTokens);
+                if ("MAX_TOKENS".equalsIgnoreCase(lastFinishReason)) {
+                    log.warn("Gemini API call reached MAX_TOKENS ({}) in {}ms. Raw length={}, outTokens={}",
+                            responseType.getSimpleName(), latency, lastRawLength, outputTokens);
+                } else {
+                    log.info("Gemini API call succeeded in {}ms ({}). Finish={}, rawLength={}, Tokens: in={}, out={}",
+                            latency, responseType.getSimpleName(), lastFinishReason, lastRawLength, inputTokens, outputTokens);
+                }
+                GeminiCallDiagnostics diag = new GeminiCallDiagnostics(
+                        GeminiExerciseBatchOutcome.Status.OK,
+                        lastRawLength,
+                        lastFinishReason,
+                        null,
+                        model,
+                        latency,
+                        outputTokens
+                );
+                lastCallDiagnostics.set(diag);
                 return new GeminiCallAttempt<>(
                         Optional.of(new GeminiStructuredRawResult<>(parsed, jsonText, inputTokens, outputTokens, latency, model)),
-                        false
+                        false,
+                        diag
                 );
 
             } catch (HttpStatusCodeException ex) {
                 lastException = ex;
+                failureStatus = GeminiExerciseBatchOutcome.Status.HTTP_ERROR;
                 log.warn("Gemini HTTP error (status={}): {}", ex.getStatusCode(), ex.getResponseBodyAsString());
                 if (!isTransientHttpStatus(ex.getStatusCode())) {
                     nonRetryableClientError = ex.getStatusCode().is4xxClientError();
@@ -290,12 +391,17 @@ public class GeminiApiClient {
                 }
                 break;
             } catch (JsonProcessingException ex) {
-                // Deterministic JSON deserialization mismatch: do not retry and waste API quota.
+                // Deterministic JSON deserialization mismatch or MAX_TOKENS mid-JSON cutoff: do not retry HTTP identically.
                 lastException = ex;
-                log.warn("Gemini returned non-deserializable JSON for {}: {}", responseType.getSimpleName(), ex.getMessage());
+                failureStatus = "MAX_TOKENS".equalsIgnoreCase(lastFinishReason)
+                        ? GeminiExerciseBatchOutcome.Status.MAX_TOKENS_TRUNCATED
+                        : GeminiExerciseBatchOutcome.Status.MALFORMED_JSON;
+                log.warn("Gemini returned {} JSON for {} (finishReason={}, rawLength={}): {}",
+                        failureStatus, responseType.getSimpleName(), lastFinishReason, lastRawLength, ex.getMessage());
                 break;
             } catch (ResourceAccessException ex) {
                 lastException = ex;
+                failureStatus = GeminiExerciseBatchOutcome.Status.API_TIMEOUT;
                 log.warn("Gemini network/timeout failure on attempt {}: {}", attempt, ex.getMessage());
                 if (attempt <= maxRetries) {
                     long delayMs = resolveRetryDelayMs(attempt, null);
@@ -307,15 +413,22 @@ public class GeminiApiClient {
                 break;
             } catch (Exception ex) {
                 lastException = ex;
+                if (failureStatus == GeminiExerciseBatchOutcome.Status.OK) {
+                    failureStatus = GeminiExerciseBatchOutcome.Status.UNEXPECTED_ERROR;
+                }
                 log.warn("Gemini API call failed on attempt {}: {}", attempt, ex.getMessage());
                 break;
             }
         }
 
-        log.error("All Gemini API attempts failed for {}. Cause: {}",
-                responseType.getSimpleName(),
-                lastException != null ? lastException.getMessage() : "Unknown");
-        return new GeminiCallAttempt<>(Optional.empty(), nonRetryableClientError);
+        long totalLatency = System.currentTimeMillis() - startTime;
+        String detail = lastException != null ? lastException.getMessage() : "Unknown Gemini error";
+        GeminiCallDiagnostics failDiag = new GeminiCallDiagnostics(
+                failureStatus, lastRawLength, lastFinishReason, detail, model, totalLatency, lastOutputTokens);
+        lastCallDiagnostics.set(failDiag);
+        log.error("All Gemini API attempts failed for {}. Status={}, finishReason={}, rawLength={}, Cause: {}",
+                responseType.getSimpleName(), failureStatus, lastFinishReason, lastRawLength, detail);
+        return new GeminiCallAttempt<>(Optional.empty(), nonRetryableClientError, failDiag);
     }
 
     private boolean isTransientHttpStatus(HttpStatusCode statusCode) {
@@ -646,30 +759,53 @@ public class GeminiApiClient {
                 "description", "Number of exercises explicitly requested in the latest admin prompt"
         ));
 
-        Map<String, Object> draftItemProps = new LinkedHashMap<>();
-        draftItemProps.put("name", Map.of("type", "STRING", "description", "Exact requested or recommended exercise name"));
-        draftItemProps.put("code", Map.of("type", "STRING", "description", "Uppercase underscore identifier slug, max 50 chars"));
-        draftItemProps.put("category", Map.of("type", "STRING", "enum", allCategories, "description", "Strict movement category matching the user request"));
-        draftItemProps.put("difficulty", Map.of("type", "STRING", "enum", List.of("BEGINNER", "INTERMEDIATE", "ADVANCED", "ELITE"), "description", "Difficulty level matching the user request"));
-        draftItemProps.put("description", Map.of("type", "STRING", "description", "Concise technical summary of the exercise"));
-        draftItemProps.put("instructions", Map.of("type", "STRING", "description", "Clear step-by-step execution instructions"));
-        draftItemProps.put("target_muscles", Map.of("type", "STRING", "description", "Primary and secondary target muscle groups"));
-        draftItemProps.put("equipment", Map.of("type", "STRING", "description", "Required equipment such as Floor, Box, Bench, Pull-Up Bar, Partner"));
-        draftItemProps.put("target_skill", Map.of("type", "STRING", "description", "Associated training focus or skill"));
-        Map<String, Object> draftItemSchema = new LinkedHashMap<>();
-        draftItemSchema.put("type", "OBJECT");
-        draftItemSchema.put("properties", draftItemProps);
-        draftItemSchema.put("required", List.of("name", "code", "category", "difficulty", "description", "instructions", "target_muscles", "equipment"));
+        Map<String, Object> draftItemSchema = buildExerciseDraftItemSchema();
         props.put("exercise_drafts", Map.of(
                 "type", "ARRAY",
                 "items", draftItemSchema,
-                "description", "Exact exercise draft specifications matching the latest user prompt when create_exercise_drafts is invoked"
+                "description", "Exact requested_count complete, non-duplicate exercise drafts matching the latest admin prompt when create_exercise_drafts is invoked"
         ));
 
         Map<String, Object> root = new LinkedHashMap<>();
         root.put("type", "OBJECT");
         root.put("properties", props);
         root.put("required", List.of("intent", "tools"));
+        return root;
+    }
+
+    private static Map<String, Object> buildExerciseDraftItemSchema() {
+        List<String> allCategories = List.of(
+                "PUSH", "PULL", "CORE", "LEGS", "FULL_BODY", "SKILL", "MOBILITY", "FLEXIBILITY",
+                "ISOMETRIC", "CARDIO", "CHEST", "BACK", "SHOULDERS", "BICEPS", "TRICEPS", "GLUTES", "RECOVERY"
+        );
+        Map<String, Object> draftItemProps = new LinkedHashMap<>();
+        draftItemProps.put("name", Map.of("type", "STRING", "description", "Exact requested or unique recommended exercise name"));
+        draftItemProps.put("code", Map.of("type", "STRING", "description", "Uppercase underscore identifier slug, max 50 chars"));
+        draftItemProps.put("category", Map.of("type", "STRING", "enum", allCategories, "description", "Movement category matching the user request"));
+        draftItemProps.put("difficulty", Map.of("type", "STRING", "enum", List.of("BEGINNER", "INTERMEDIATE", "ADVANCED", "ELITE"), "description", "Difficulty level matching the user request"));
+        draftItemProps.put("description", Map.of("type", "STRING", "description", "Concise technical summary of the exercise (1-2 sentences)"));
+        draftItemProps.put("instructions", Map.of("type", "STRING", "description", "Clear step-by-step execution instructions (2-4 steps)"));
+        draftItemProps.put("target_muscles", Map.of("type", "STRING", "description", "Primary and secondary target muscle groups"));
+        draftItemProps.put("equipment", Map.of("type", "STRING", "description", "Required equipment such as Floor, Wall, Box, Parallettes, Pull-Up Bar, Gymnastic Rings"));
+        draftItemProps.put("target_skill", Map.of("type", "STRING", "description", "Associated training focus or skill"));
+        Map<String, Object> draftItemSchema = new LinkedHashMap<>();
+        draftItemSchema.put("type", "OBJECT");
+        draftItemSchema.put("properties", draftItemProps);
+        draftItemSchema.put("required", List.of("name", "code", "category", "difficulty", "description", "instructions", "target_muscles", "equipment"));
+        return draftItemSchema;
+    }
+
+    public static Map<String, Object> buildExerciseDraftBatchSchema() {
+        Map<String, Object> props = new LinkedHashMap<>();
+        props.put("exercise_drafts", Map.of(
+                "type", "ARRAY",
+                "items", buildExerciseDraftItemSchema(),
+                "description", "Array containing the EXACT requested number of unique, schema-complete exercise drafts with zero duplicates"
+        ));
+        Map<String, Object> root = new LinkedHashMap<>();
+        root.put("type", "OBJECT");
+        root.put("properties", props);
+        root.put("required", List.of("exercise_drafts"));
         return root;
     }
 

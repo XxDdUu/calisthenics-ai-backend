@@ -153,4 +153,49 @@ class ExerciseDraftValidationServiceTest {
                 .contains("difficulty mismatch")
                 .contains("Missing description");
     }
+
+    @Test
+    void handstandPushUpSkillContractAllowsVerticalPushSkillShouldersIsometricAndItemizedKeepsValidSubset() {
+        ExerciseDraftRequestContract contract = service.parseRequestContract(
+                "Generate 10 exercises for Handstand Push Up",
+                null, null, null, null, 10
+        );
+
+        assertThat(contract.expectedCount()).isEqualTo(10);
+        assertThat(contract.skillFocus()).isEqualTo("Handstand Push-Up");
+        assertThat(contract.allowedCategories()).containsExactlyInAnyOrder(
+                ExerciseCategory.PUSH,
+                ExerciseCategory.SKILL,
+                ExerciseCategory.SHOULDERS,
+                ExerciseCategory.ISOMETRIC
+        );
+
+        List<ExerciseDraftCandidateDto> mixed = List.of(
+                ExerciseDraftCandidateDto.builder()
+                        .name("Wall Handstand Hold").code("WALL_HANDSTAND_HOLD")
+                        .category("ISOMETRIC").difficulty("BEGINNER")
+                        .description("Static chest-to-wall balance hold").instructions("Hold stacked shoulders")
+                        .targetMuscles("Anterior Delts, Core").equipment("Wall").build(),
+                ExerciseDraftCandidateDto.builder()
+                        .name("Wall Handstand Push-Up").code("WALL_HSPU")
+                        .category("PUSH").difficulty("ADVANCED")
+                        .description("Vertical wall press").instructions("Lower head and press up")
+                        .targetMuscles("Deltoids, Triceps").equipment("Wall").build(),
+                ExerciseDraftCandidateDto.builder()
+                        .name("Broken Item").code("BROKEN_ITEM")
+                        .category("PUSH").difficulty("BEGINNER")
+                        .description("").instructions("Missing description").targetMuscles("Shoulders").equipment("Floor").build(),
+                ExerciseDraftCandidateDto.builder()
+                        .name("Barbell Squat").code("BARBELL_SQUAT")
+                        .category("LEGS").difficulty("BEGINNER")
+                        .description("Lower body squat").instructions("Squat low").targetMuscles("Quads").equipment("Barbell").build()
+        );
+
+        ExerciseDraftValidationService.ItemizedValidationOutcome itemized =
+                service.validateRawCandidatesItemized(contract, mixed);
+        assertThat(itemized.parsedCount()).isEqualTo(4);
+        assertThat(itemized.validPayloads()).extracting(p -> p.getName())
+                .containsExactly("Wall Handstand Hold", "Wall Handstand Push-Up");
+        assertThat(itemized.rejectionReasons()).hasSize(2);
+    }
 }

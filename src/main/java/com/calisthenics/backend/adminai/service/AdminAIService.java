@@ -332,8 +332,10 @@ public class AdminAIService {
 
         // Step 1: Tool planning (Gemini planner if configured + deterministic rule router)
         GeminiAdminToolPlan toolPlan = null;
+        GeminiApiClient.GeminiCallDiagnostics plannerDiagnostics = null;
         try {
             toolPlan = geminiApiClient.planAdminTools(buildToolPlannerSystemPrompt(), geminiContents).orElse(null);
+            plannerDiagnostics = geminiApiClient.getLastCallDiagnostics();
         } catch (Exception ex) {
             log.warn("Admin AI tool planner call skipped/failed, using deterministic router: {}", ex.getMessage());
         }
@@ -347,41 +349,9 @@ public class AdminAIService {
                 request.getStartDate(),
                 request.getEndDate(),
                 detectedSkill,
-                toolPlan
+                toolPlan,
+                plannerDiagnostics
         );
-
-        // If AI-supplied exercise_drafts failed validation, allow one corrective AI regeneration retry against the exact user spec
-        if (routedTools.exerciseDraftResult() != null
-                && !routedTools.exerciseDraftResult().isSuccess()
-                && routedTools.exerciseDraftResult().isValidationFailed()
-                && toolPlan != null
-                && toolPlan.getExerciseDrafts() != null
-                && !toolPlan.getExerciseDrafts().isEmpty()) {
-            try {
-                String correctionPrompt = buildExerciseDraftCorrectionPrompt(
-                        userPrompt,
-                        routedTools.exerciseDraftResult(),
-                        toolPlan.getExerciseDrafts()
-                );
-                GeminiAdminToolPlan correctedPlan = geminiApiClient.planAdminTools(correctionPrompt, geminiContents).orElse(null);
-                if (correctedPlan != null
-                        && correctedPlan.getExerciseDrafts() != null
-                        && !correctedPlan.getExerciseDrafts().isEmpty()) {
-                    routedTools = adminToolRouter.routeAndExecuteForChat(
-                            userPrompt,
-                            routedRequest,
-                            AdminAiIntent.EXERCISE_DRAFT_CREATION,
-                            effectiveRange,
-                            request.getStartDate(),
-                            request.getEndDate(),
-                            detectedSkill,
-                            correctedPlan
-                    );
-                }
-            } catch (Exception ex) {
-                log.warn("Corrective AI exercise regeneration failed: {}", ex.getMessage());
-            }
-        }
 
         String baseSystemPrompt = contextService.buildAdminSystemPrompt(context);
         String fullSystemPrompt = baseSystemPrompt + "\n" + routedTools.sanitizedToolContextForPrompt();
@@ -421,7 +391,9 @@ public class AdminAIService {
 
         if (!skipGlobalRecs && (intent == AdminAiIntent.EXERCISE_RECOMMENDATION
                 || (geminiOutput != null && Boolean.TRUE.equals(geminiOutput.getGenerateExerciseRecommendations())))) {
-            generatedRecommendations.addAll(createExerciseRecommendations(admin, conversation, recommendationFilter, detectedLevel));
+            com.calisthenics.backend.exercise.ExerciseTrainingType promptTrainingType = detectTrainingTypeFromPrompt(userPrompt);
+            generatedRecommendations.addAll(createExerciseRecommendations(
+                    admin, conversation, recommendationFilter, detectedLevel, promptTrainingType, null));
         } else if (!skipGlobalRecs && (intent == AdminAiIntent.WORKOUT_PROGRAM_RECOMMENDATION
                 || (geminiOutput != null && Boolean.TRUE.equals(geminiOutput.getGenerateWorkoutProgram())))) {
             String levelStr = detectedLevel != null ? detectedLevel.name() : (geminiOutput != null ? geminiOutput.getTargetLevel() : null);
@@ -682,7 +654,8 @@ public class AdminAIService {
         // Otherwise generate via AI recommendation engines
         DifficultyLevel level = detectDifficultyFromPrompt(request.getTrainingLevel());
         return switch (type) {
-            case EXERCISE -> createExerciseRecommendations(admin, null, request.getTargetSkill(), level);
+            case EXERCISE -> createExerciseRecommendations(
+                    admin, null, request.getTargetSkill(), level, request.getTrainingType(), request.getCategory());
             case WORKOUT_PROGRAM -> createWorkoutProgramRecommendations(
                     admin,
                     null,
@@ -827,14 +800,37 @@ public class AdminAIService {
         return mapToRecommendationResponse(saved);
     }
 
+    private static com.calisthenics.backend.exercise.ExerciseTrainingType detectTrainingTypeFromPrompt(String prompt) {
+        if (prompt == null || prompt.isBlank()) {
+            return null;
+        }
+        String lower = prompt.toLowerCase(Locale.US);
+        boolean mentionsGym = lower.contains("gym") || lower.contains("weight training")
+                || lower.contains("barbell") || lower.contains("dumbbell") || lower.contains("cable")
+                || lower.contains("machine") || lower.contains("lat pulldown") || lower.contains("bench press");
+        boolean mentionsCal = lower.contains("calisthenics") || lower.contains("bodyweight")
+                || lower.contains("planche") || lower.contains("front lever") || lower.contains("back lever")
+                || lower.contains("handstand") || lower.contains("human flag") || lower.contains("muscle-up")
+                || lower.contains("muscle up");
+        if (mentionsGym && !mentionsCal) {
+            return com.calisthenics.backend.exercise.ExerciseTrainingType.GYM;
+        }
+        if (mentionsCal && !mentionsGym) {
+            return com.calisthenics.backend.exercise.ExerciseTrainingType.CALISTHENICS;
+        }
+        return null;
+    }
+
     private List<AdminRecommendationResponse> createExerciseRecommendations(
             User admin,
             AdminAiConversation conversation,
             String targetSkill,
-            DifficultyLevel difficulty
+            DifficultyLevel difficulty,
+            com.calisthenics.backend.exercise.ExerciseTrainingType trainingType,
+            String category
     ) {
         List<ExerciseRecommendationPayload> candidates =
-                exerciseRecommendationService.analyzeMissingExercises(targetSkill, difficulty);
+                exerciseRecommendationService.analyzeMissingExercises(targetSkill, difficulty, trainingType, category);
 
         List<AdminRecommendationResponse> savedList = new ArrayList<>();
         for (ExerciseRecommendationPayload p : candidates.stream().limit(6).toList()) {
@@ -1070,22 +1066,9 @@ public class AdminAIService {
                 - grantPro (prepare a confirmation request before granting unlimited admin PRO access to target_user_identifier [email, username, or user ID])
                 - revokePro (prepare a confirmation request before revoking admin-granted PRO access from target_user_identifier while preserving paid subscriptions)
                 - checkProStatus (inspect a user's current effective tier, paid subscription, and admin-granted PRO status)
-                - create_exercise_drafts (persist new AI-recommended exercises directly in the exercises catalog with DRAFT status and AI_RECOMMENDED origin when admin asks to add/create exercises; MUST set exercise_category matching the latest user prompt and populate exercise_drafts with the EXACT requested exercise names, categories, difficulties, descriptions, instructions, target_muscles, and equipment. NEVER substitute unrelated skills like Front Lever or reuse stale exercises/skill_keyword from earlier turns)
+                - create_exercise_drafts (persist new AI-recommended exercises directly in the exercises catalog with DRAFT status and AI_RECOMMENDED origin when admin asks to add/create exercises; MUST set requested_count to the exact integer requested by the admin, set exercise_category matching the latest user prompt, and populate exercise_drafts with ALL requested_count unique, non-duplicate, schema-complete exercises [name, code, category, difficulty, description, instructions, target_muscles, equipment, target_skill]. For skill prompts like Handstand Push Up, include real skill progressions and vertical pushing/handstand balance drills without trivial renames or duplicates. NEVER substitute unrelated skills like Front Lever or reuse stale exercises/skill_keyword from earlier turns)
                 Never fabricate data. Never request raw user passwords or private message text.
                 """;
-    }
-
-    private String buildExerciseDraftCorrectionPrompt(
-            String userPrompt,
-            ExerciseDraftBatchResultResponse failedResult,
-            List<ExerciseDraftCandidateDto> rejectedDrafts
-    ) {
-        return buildToolPlannerSystemPrompt() + "\n\n"
-                + "CORRECTION REQUIRED — YOUR PREVIOUS EXERCISE DRAFTS WERE REJECTED BEFORE PERSISTENCE:\n"
-                + "- Latest user request: " + userPrompt + "\n"
-                + "- Validation failure reason: " + failedResult.getErrorMessage() + "\n"
-                + "- Rejected names: " + rejectedDrafts.stream().map(ExerciseDraftCandidateDto::getName).toList() + "\n"
-                + "Regenerate create_exercise_drafts using ONLY the exact requested exercise names, categories, and difficulty levels.\n";
     }
 
     private AdminAiIntent resolveIntent(
@@ -1854,12 +1837,25 @@ public class AdminAIService {
                     .append(res.getErrorMessage() != null
                             ? res.getErrorMessage()
                             : "Validation or persistence failed before exercises could be saved.")
-                    .append("\n\nNo exercises were added to the database.\n");
+                    .append("\n\n");
+            if (res.getValidationErrors() != null && !res.getValidationErrors().isEmpty()) {
+                sb.append("Diagnostic details:\n");
+                res.getValidationErrors().stream()
+                        .limit(5)
+                        .forEach(err -> sb.append("- ").append(err).append("\n"));
+                sb.append("\n");
+            }
+            sb.append("No exercises were added to the database.\n");
             return;
         }
         if (res.getCreatedExercises() != null && !res.getCreatedExercises().isEmpty()) {
             sb.append("### Added ").append(res.getCreatedExercises().size())
-                    .append(" Exercise(s) to Draft (`AI Recommended`)\n\n");
+                    .append(" Exercise(s) to Draft (`AI Recommended`)\n\n")
+                    .append("Successfully generated and saved ")
+                    .append(res.getCreatedCount())
+                    .append("/")
+                    .append(res.getRequestedCount() > 0 ? res.getRequestedCount() : res.getCreatedCount())
+                    .append(" exercises.\n\n");
             int idx = 1;
             for (AdminExerciseResponse ex : res.getCreatedExercises()) {
                 sb.append(idx++).append(". **").append(ex.name()).append("** (`").append(ex.code())

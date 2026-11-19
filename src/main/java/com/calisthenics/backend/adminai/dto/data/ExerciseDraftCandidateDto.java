@@ -40,4 +40,10 @@ public class ExerciseDraftCandidateDto {
 
     @JsonProperty("target_skill")
     private String targetSkill;
+
+    @JsonProperty("training_type")
+    private String trainingType;
+
+    @JsonProperty("aliases")
+    private String aliases;
 }

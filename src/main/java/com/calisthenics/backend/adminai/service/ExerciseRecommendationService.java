@@ -19,12 +19,19 @@ import com.calisthenics.backend.exercise.ExerciseCategory;
 import com.calisthenics.backend.exercise.ExerciseOrigin;
 import com.calisthenics.backend.exercise.ExerciseRepository;
 import com.calisthenics.backend.exercise.ExerciseStatus;
+import com.calisthenics.backend.exercise.ExerciseTrainingType;
+import com.calisthenics.backend.skill.dto.SkillProgressionLevelSummaryDto;
+import com.calisthenics.backend.skill.dto.SkillSummaryDto;
+import com.calisthenics.backend.skill.service.SkillCatalogService;
 import com.calisthenics.backend.user.User;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.interceptor.TransactionAspectSupport;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -45,6 +52,11 @@ public class ExerciseRecommendationService {
     private final AdminAiConversationRepository conversationRepository;
     private final ExerciseDraftValidationService validationService;
     private final ObjectMapper objectMapper;
+    @Autowired(required = false)
+    private TransactionTemplate transactionTemplate;
+
+    @Autowired(required = false)
+    private SkillCatalogService skillCatalogService;
 
     private static final List<ExerciseRecommendationPayload> CANONICAL_PROGRESSION_LIBRARY = List.of(
             // Planche Progressions
@@ -663,6 +675,67 @@ public class ExerciseRecommendationService {
                     .description("Wide-grip pulling movement driving one shoulder toward the hand while keeping the assisting arm relatively straight.")
                     .instructions("Grip wide on bar, pull chest dynamically toward one hand while extending opposite arm toward straight, lower slowly, and alternate sides.")
                     .whyAdd("Essential bridge between weighted/high-rep pull-ups and One-Arm Pull-Ups.")
+                    .build(),
+            // Gym / Weight Training Progressions
+            ExerciseRecommendationPayload.builder()
+                    .name("Chest-Supported Machine Row")
+                    .code("CHEST_SUPPORTED_ROW")
+                    .category(ExerciseCategory.BACK)
+                    .difficulty(DifficultyLevel.BEGINNER)
+                    .trainingType(ExerciseTrainingType.GYM)
+                    .targetSkill("Seated Cable Row")
+                    .progressionLevel("Level 1 - Guided Horizontal Pull")
+                    .prerequisites("None")
+                    .targetMuscles("Rhomboids, Middle Trapezius, Latissimus Dorsi")
+                    .equipment("Row Machine")
+                    .description("Chest-supported horizontal row eliminating lower-back fatigue while building upper-back thickness.")
+                    .instructions("Brace chest firmly against pad, retract scapula first, pull handles toward lower ribs, pause 1s, and control the eccentric.")
+                    .whyAdd("Provides a low-fatigue Gym Pull progression before heavy Pendlay or Barbell rows.")
+                    .build(),
+            ExerciseRecommendationPayload.builder()
+                    .name("Incline Dumbbell Curl")
+                    .code("INCLINE_DUMBBELL_CURL")
+                    .category(ExerciseCategory.BICEPS)
+                    .difficulty(DifficultyLevel.INTERMEDIATE)
+                    .trainingType(ExerciseTrainingType.GYM)
+                    .targetSkill("Bicep Curl")
+                    .progressionLevel("Level 2 - Long-Head Stretch Curl")
+                    .prerequisites("12 strict Dumbbell Curls")
+                    .targetMuscles("Biceps Brachii (Long Head), Brachialis")
+                    .equipment("Incline Bench, Dumbbells")
+                    .description("Incline bench curl placing the shoulder in extension for heightened biceps long-head stretch stimulus.")
+                    .instructions("Set bench to 45 degrees, let arms hang behind torso, curl dumbbells up without swinging elbows forward, and lower slowly.")
+                    .whyAdd("Completes Gym Shoulders & Arms bicep hypertrophy progressions.")
+                    .build(),
+            ExerciseRecommendationPayload.builder()
+                    .name("Cable Overhead Triceps Extension")
+                    .code("CABLE_OVERHEAD_TRICEPS_EXTENSION")
+                    .category(ExerciseCategory.TRICEPS)
+                    .difficulty(DifficultyLevel.INTERMEDIATE)
+                    .trainingType(ExerciseTrainingType.GYM)
+                    .targetSkill("Triceps Extension")
+                    .progressionLevel("Level 2 - Long-Head Overhead Extension")
+                    .prerequisites("15 Rope Pushdowns")
+                    .targetMuscles("Triceps Brachii (Long Head)")
+                    .equipment("Cable Machine, Rope Attachment")
+                    .description("Overhead cable triceps extension loading the triceps long head under deep shoulder flexion.")
+                    .instructions("Face away from cable stack, stabilize ribs and elbows overhead, extend arms cleanly, and control return.")
+                    .whyAdd("Pairs with rope pushdowns to cover full triceps anatomy in Gym Shoulders & Arms.")
+                    .build(),
+            ExerciseRecommendationPayload.builder()
+                    .name("Hack Squat")
+                    .code("HACK_SQUAT")
+                    .category(ExerciseCategory.LEGS)
+                    .difficulty(DifficultyLevel.INTERMEDIATE)
+                    .trainingType(ExerciseTrainingType.GYM)
+                    .targetSkill("Leg Press")
+                    .progressionLevel("Level 2 - Deep Knee-Flexion Machine Compound")
+                    .prerequisites("3 x 12 Goblet Squats")
+                    .targetMuscles("Quadriceps, Glutes")
+                    .equipment("Hack Squat Machine")
+                    .description("Guided fixed-path squat machine allowing maximum knee flexion and quad hypertrophy with high stability.")
+                    .instructions("Set feet shoulder-width low-to-mid on sled, brace back to pad, descend to full depth, and drive evenly through mid-foot.")
+                    .whyAdd("Bridges goblet squats and heavy barbell/machine leg days.")
                     .build()
     );
 
@@ -698,11 +771,26 @@ public class ExerciseRecommendationService {
     );
 
     public List<String> getSupportedSkillFamilies() {
+        if (skillCatalogService != null) {
+            return skillCatalogService.getActiveSkillSummaries(null, null).stream()
+                    .map(SkillSummaryDto::getName)
+                    .toList();
+        }
         return List.of("Planche", "Front Lever", "Back Lever", "Handstand", "Muscle-up", "Human Flag");
     }
 
     @Transactional(readOnly = true)
     public List<ExerciseRecommendationPayload> analyzeMissingExercises(String targetSkillFilter, DifficultyLevel difficultyFilter) {
+        return analyzeMissingExercises(targetSkillFilter, difficultyFilter, null, null);
+    }
+
+    @Transactional(readOnly = true)
+    public List<ExerciseRecommendationPayload> analyzeMissingExercises(
+            String targetSkillFilter,
+            DifficultyLevel difficultyFilter,
+            ExerciseTrainingType trainingTypeFilter,
+            String categoryFilter
+    ) {
         List<Exercise> existingCatalog = exerciseRepository.findAll();
         Set<String> existingNormalizedNames = existingCatalog.stream()
                 .map(e -> normalizeIdentifier(e.getName()))
@@ -711,9 +799,25 @@ public class ExerciseRecommendationService {
                 .map(e -> normalizeIdentifier(e.getCode()))
                 .collect(Collectors.toSet());
 
+        ExerciseTrainingType effectiveTypeFilter = (trainingTypeFilter == ExerciseTrainingType.BOTH) ? null : trainingTypeFilter;
+        String categoryLower = categoryFilter != null && !categoryFilter.isBlank()
+                ? categoryFilter.trim().toLowerCase(Locale.US)
+                : null;
+
         return CANONICAL_PROGRESSION_LIBRARY.stream()
                 .filter(candidate -> !existingNormalizedNames.contains(normalizeIdentifier(candidate.getName())))
                 .filter(candidate -> !existingNormalizedCodes.contains(normalizeIdentifier(candidate.getCode())))
+                .filter(candidate -> {
+                    ExerciseTrainingType candidateType = resolvePayloadTrainingType(candidate);
+                    return effectiveTypeFilter == null || candidateType == effectiveTypeFilter || candidateType == ExerciseTrainingType.BOTH;
+                })
+                .filter(candidate -> {
+                    if (categoryLower == null) {
+                        return true;
+                    }
+                    return (candidate.getCategory() != null && candidate.getCategory().name().toLowerCase(Locale.US).contains(categoryLower))
+                            || (candidate.getTargetSkill() != null && candidate.getTargetSkill().toLowerCase(Locale.US).contains(categoryLower));
+                })
                 .filter(candidate -> {
                     if (targetSkillFilter == null || targetSkillFilter.isBlank()) {
                         return true;
@@ -731,6 +835,15 @@ public class ExerciseRecommendationService {
 
     @Transactional(readOnly = true)
     public List<String> getMissingProgressionNamesForSkill(String skillName, List<Exercise> existingCatalog) {
+        return getMissingProgressionNamesForSkill(skillName, null, existingCatalog);
+    }
+
+    @Transactional(readOnly = true)
+    public List<String> getMissingProgressionNamesForSkill(
+            String skillName,
+            ExerciseTrainingType skillTrainingType,
+            List<Exercise> existingCatalog
+    ) {
         Set<String> existingNormalizedNames = existingCatalog.stream()
                 .map(e -> normalizeIdentifier(e.getName()))
                 .collect(Collectors.toSet());
@@ -739,11 +852,58 @@ public class ExerciseRecommendationService {
                 .collect(Collectors.toSet());
 
         return CANONICAL_PROGRESSION_LIBRARY.stream()
-                .filter(c -> c.getTargetSkill().equalsIgnoreCase(skillName))
+                .filter(c -> skillTrainingType == null || resolvePayloadTrainingType(c) == skillTrainingType)
+                .filter(c -> c.getTargetSkill() != null && c.getTargetSkill().equalsIgnoreCase(skillName))
                 .filter(c -> !existingNormalizedNames.contains(normalizeIdentifier(c.getName()))
                         && !existingNormalizedCodes.contains(normalizeIdentifier(c.getCode())))
                 .map(ExerciseRecommendationPayload::getName)
                 .toList();
+    }
+
+    @Transactional(readOnly = true)
+    public List<String> getMissingProgressionNamesForSkillSummary(
+            SkillSummaryDto skill,
+            List<Exercise> compatibleExercises,
+            List<Exercise> allExercises
+    ) {
+        if (skill == null) {
+            return List.of();
+        }
+        List<String> missingFromCatalogLibrary = new ArrayList<>(
+                getMissingProgressionNamesForSkill(skill.getName(), skill.getTrainingType(), allExercises)
+        );
+        Set<DifficultyLevel> coveredDifficulties = compatibleExercises.stream()
+                .map(Exercise::getDifficulty)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+        for (SkillProgressionLevelSummaryDto level : skill.getProgressionLevels()) {
+            if (level.getExerciseCount() == 0 && !coveredDifficulties.contains(level.getDifficulty())) {
+                if (!missingFromCatalogLibrary.contains(level.getTitle())) {
+                    missingFromCatalogLibrary.add(level.getTitle());
+                }
+            }
+        }
+        return missingFromCatalogLibrary;
+    }
+
+    private static ExerciseTrainingType resolvePayloadTrainingType(ExerciseRecommendationPayload payload) {
+        if (payload == null) {
+            return ExerciseTrainingType.CALISTHENICS;
+        }
+        if (payload.getTrainingType() != null) {
+            return payload.getTrainingType();
+        }
+        String combined = ((payload.getEquipment() != null ? payload.getEquipment() : "") + " "
+                + (payload.getName() != null ? payload.getName() : "") + " "
+                + (payload.getTargetSkill() != null ? payload.getTargetSkill() : ""))
+                .toLowerCase(Locale.US);
+        if (combined.contains("barbell") || combined.contains("dumbbell") || combined.contains("cable")
+                || combined.contains("machine") || combined.contains("smith") || combined.contains("leg press")
+                || combined.contains("leg extension") || combined.contains("leg curl")
+                || combined.contains("lat pulldown")) {
+            return ExerciseTrainingType.GYM;
+        }
+        return ExerciseTrainingType.CALISTHENICS;
     }
 
     @Transactional
@@ -757,6 +917,7 @@ public class ExerciseRecommendationService {
             return adminExerciseService.getExercise(existingByName.get().getId());
         }
 
+        ExerciseTrainingType resolvedType = resolvePayloadTrainingType(payload);
         CreateAdminExerciseRequest createReq = new CreateAdminExerciseRequest(
                 name,
                 payload.getCode(),
@@ -771,7 +932,17 @@ public class ExerciseRecommendationService {
                 publishImmediately,
                 List.of(),
                 publishImmediately ? ExerciseStatus.PUBLISHED : ExerciseStatus.DRAFT,
-                ExerciseOrigin.AI_RECOMMENDED
+                ExerciseOrigin.AI_RECOMMENDED,
+                resolvedType,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                payload.getProgressionLevel(),
+                payload.getAliases()
         );
         return adminExerciseService.createExercise(createReq);
     }
@@ -844,18 +1015,10 @@ public class ExerciseRecommendationService {
                 : null;
 
         // Idempotent retry protection within the same conversation or within 60 seconds for the same admin
-        List<AdminExerciseResponse> priorRetryMatches = findExistingRetryBatchDrafts(admin, conversationId, signature);
-        if (!priorRetryMatches.isEmpty()) {
-            return ExerciseDraftBatchResultResponse.builder()
-                    .success(true)
-                    .category(categoryLabel)
-                    .requestedCount(targetCount)
-                    .createdCount(0)
-                    .createdExercises(List.of())
-                    .existingDrafts(priorRetryMatches)
-                    .message("Prevented duplicate creation on retry; returning " + priorRetryMatches.size()
-                            + " already saved draft exercise(s).")
-                    .build();
+        Optional<ExerciseDraftBatchResultResponse> retryResult =
+                findExistingRetryBatch(admin, conversationId, signature, categoryLabel, targetCount);
+        if (retryResult.isPresent()) {
+            return retryResult.get();
         }
 
         List<Exercise> existingCatalog = exerciseRepository.findAll();
@@ -961,6 +1124,8 @@ public class ExerciseRecommendationService {
                     .category(categoryLabel)
                     .requestedCount(targetCount)
                     .createdCount(0)
+                    .validCount(validatedPayloads.size())
+                    .duplicateCount(alreadyExisting.size())
                     .createdExercises(List.of())
                     .existingDrafts(alreadyExisting)
                     .message("Requested exercise(s) already exist in the catalog (" + alreadyExisting.size()
@@ -968,63 +1133,249 @@ public class ExerciseRecommendationService {
                     .build();
         }
 
-        List<AdminExerciseResponse> createdExercises = new ArrayList<>();
+        if (providedCandidates != null && !providedCandidates.isEmpty()
+                && !contract.hasExplicitExercises()
+                && contract.expectedCount() > 0
+                && toPersist.size() < targetCount) {
+            return validationFailure(
+                    categoryLabel,
+                    targetCount,
+                    List.of(String.format(
+                            "Generated %d/%d unique non-duplicate exercises (%d catalog duplicate(s) skipped). No exercises were saved.",
+                            toPersist.size(), targetCount, alreadyExisting.size()))
+            );
+        }
+
         try {
-            Set<String> reservedCodes = new HashSet<>(existingCodes);
-            for (ExerciseRecommendationPayload payload : toPersist) {
-                String uniqueCode = ensureUniqueCode(payload.getCode(), reservedCodes);
-                CreateAdminExerciseRequest createReq = new CreateAdminExerciseRequest(
-                        payload.getName().trim(),
-                        uniqueCode,
-                        payload.getCategory(),
-                        payload.getDifficulty(),
-                        payload.getDescription(),
-                        payload.getTargetMuscles(),
-                        payload.getInstructions(),
-                        null,
-                        null,
-                        payload.getEquipment(),
-                        false,
-                        List.of(),
-                        ExerciseStatus.DRAFT,
-                        ExerciseOrigin.AI_RECOMMENDED
-                );
-                AdminExerciseResponse saved = adminExerciseService.createExercise(createReq);
-                if (saved == null || saved.id() == null || !exerciseRepository.existsById(saved.id())) {
-                    throw new IllegalStateException("Persistence verification failed for exercise: " + payload.getName());
-                }
-                if (saved.status() != ExerciseStatus.DRAFT
-                        || saved.origin() != ExerciseOrigin.AI_RECOMMENDED
-                        || saved.category() != payload.getCategory()
-                        || saved.difficulty() != payload.getDifficulty()) {
-                    throw new IllegalStateException("Persisted record mismatch for exercise: " + payload.getName());
-                }
-                createdExercises.add(saved);
-                saveRecommendationTrace(admin, conversation, payload, saved.id(), signature);
-            }
+            List<AdminExerciseResponse> createdExercises = persistPayloadBatchAtomically(
+                    admin, conversation, signature, toPersist, existingCodes, true
+            );
+            return ExerciseDraftBatchResultResponse.builder()
+                    .success(true)
+                    .category(categoryLabel)
+                    .requestedCount(targetCount)
+                    .createdCount(createdExercises.size())
+                    .validCount(createdExercises.size())
+                    .duplicateCount(alreadyExisting.size())
+                    .createdExercises(createdExercises)
+                    .existingDrafts(alreadyExisting)
+                    .message("Successfully generated and saved " + createdExercises.size() + "/"
+                            + (targetCount > 0 ? targetCount : createdExercises.size()) + " exercises.")
+                    .build();
         } catch (Exception ex) {
-            log.error("Failed while persisting AI exercise drafts: {}", ex.getMessage(), ex);
+            markCurrentTransactionRollbackOnly();
+            log.error("Failed while persisting AI exercise drafts (atomic rollback enforced): {}", ex.getMessage(), ex);
             return ExerciseDraftBatchResultResponse.builder()
                     .success(false)
-                    .errorMessage("Failed to save AI exercise drafts to database: " + ex.getMessage())
+                    .failureReasonCode("ATOMIC_PERSISTENCE_FAILED")
+                    .errorMessage("Generated " + toPersist.size() + "/" + targetCount
+                            + " valid exercises, but database persistence failed. No exercises were saved. Please retry.")
+                    .validationErrors(List.of(ex.getMessage() != null ? ex.getMessage() : "Database write failed"))
                     .category(categoryLabel)
                     .requestedCount(targetCount)
                     .createdCount(0)
+                    .validCount(toPersist.size())
+                    .duplicateCount(alreadyExisting.size())
                     .createdExercises(List.of())
                     .existingDrafts(alreadyExisting)
                     .build();
         }
+    }
 
-        return ExerciseDraftBatchResultResponse.builder()
-                .success(!createdExercises.isEmpty())
-                .errorMessage(createdExercises.isEmpty() ? "No exercises were persisted." : null)
+    /**
+     * Checks idempotent retry protection for an already-completed batch signature in the same conversation or last 60s.
+     */
+    public Optional<ExerciseDraftBatchResultResponse> findExistingRetryBatch(
+            User admin,
+            Long conversationId,
+            String userPrompt,
+            ExerciseDraftValidationService.ExerciseDraftRequestContract contract,
+            String categoryLabel
+    ) {
+        String signature = buildDraftBatchSignature(userPrompt, contract);
+        return findExistingRetryBatch(admin, conversationId, signature, categoryLabel, contract.expectedCount());
+    }
+
+    private Optional<ExerciseDraftBatchResultResponse> findExistingRetryBatch(
+            User admin,
+            Long conversationId,
+            String signature,
+            String categoryLabel,
+            int targetCount
+    ) {
+        List<AdminExerciseResponse> priorRetryMatches = findExistingRetryBatchDrafts(admin, conversationId, signature);
+        if (priorRetryMatches.isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of(ExerciseDraftBatchResultResponse.builder()
+                .success(true)
                 .category(categoryLabel)
                 .requestedCount(targetCount)
-                .createdCount(createdExercises.size())
-                .createdExercises(createdExercises)
-                .existingDrafts(alreadyExisting)
-                .message("Saved " + createdExercises.size() + " AI-recommended exercise draft(s) in " + categoryLabel + ".")
-                .build();
+                .createdCount(0)
+                .validCount(priorRetryMatches.size())
+                .createdExercises(List.of())
+                .existingDrafts(priorRetryMatches)
+                .message("Prevented duplicate creation on retry; returning " + priorRetryMatches.size()
+                        + " already saved draft exercise(s).")
+                .build());
+    }
+
+    /**
+     * Atomically persists an exact N-sized, validated, non-duplicate batch of AI exercise drafts.
+     * Never writes partial batches: if any item fails to persist or verify, the entire transaction rolls back.
+     */
+    public ExerciseDraftBatchResultResponse persistExactDraftBatch(
+            User admin,
+            Long conversationId,
+            String userPrompt,
+            ExerciseDraftValidationService.ExerciseDraftRequestContract contract,
+            String categoryLabel,
+            List<ExerciseRecommendationPayload> exactPayloads,
+            int duplicateCount,
+            int rejectedCount,
+            int retryCount
+    ) {
+        int targetCount = contract.expectedCount();
+        if (exactPayloads == null || (targetCount > 0 && exactPayloads.size() != targetCount) || exactPayloads.isEmpty()) {
+            int validCount = exactPayloads == null ? 0 : exactPayloads.size();
+            return ExerciseDraftBatchResultResponse.builder()
+                    .success(false)
+                    .validationFailed(true)
+                    .failureReasonCode("PARTIAL_COUNT")
+                    .errorMessage(String.format("Generated %d/%d valid exercises. No exercises were saved. Please retry.",
+                            validCount, targetCount))
+                    .category(categoryLabel)
+                    .requestedCount(targetCount)
+                    .createdCount(0)
+                    .validCount(validCount)
+                    .duplicateCount(duplicateCount)
+                    .rejectedCount(rejectedCount)
+                    .retryCount(retryCount)
+                    .createdExercises(List.of())
+                    .build();
+        }
+
+        String signature = buildDraftBatchSignature(userPrompt, contract);
+        AdminAiConversation conversation = conversationId != null
+                ? conversationRepository.findById(conversationId).orElse(null)
+                : null;
+
+        try {
+            List<AdminExerciseResponse> persisted = executeInWriteTransaction(() -> {
+                Set<String> existingCodes = exerciseRepository.findAll().stream()
+                        .map(Exercise::getCode)
+                        .filter(Objects::nonNull)
+                        .collect(Collectors.toCollection(HashSet::new));
+                return persistPayloadBatchAtomically(admin, conversation, signature, exactPayloads, existingCodes, true);
+            });
+            return ExerciseDraftBatchResultResponse.builder()
+                    .success(true)
+                    .validationFailed(false)
+                    .category(categoryLabel)
+                    .requestedCount(targetCount)
+                    .createdCount(persisted.size())
+                    .validCount(persisted.size())
+                    .duplicateCount(duplicateCount)
+                    .rejectedCount(rejectedCount)
+                    .retryCount(retryCount)
+                    .createdExercises(persisted)
+                    .existingDrafts(List.of())
+                    .message(String.format("Successfully generated and saved %d/%d exercises.",
+                            persisted.size(), targetCount > 0 ? targetCount : persisted.size()))
+                    .build();
+        } catch (Exception ex) {
+            log.error("Atomic persistence rolled back after error for batch [category={}, targetCount={}]: {}",
+                    categoryLabel, targetCount, ex.getMessage(), ex);
+            return ExerciseDraftBatchResultResponse.builder()
+                    .success(false)
+                    .validationFailed(false)
+                    .failureReasonCode("ATOMIC_PERSISTENCE_FAILED")
+                    .errorMessage(String.format(
+                            "Generated %d/%d valid exercises, but database persistence failed. No exercises were saved. Please retry.",
+                            exactPayloads.size(), targetCount))
+                    .validationErrors(List.of(ex.getMessage() != null ? ex.getMessage() : "Atomic persistence failed"))
+                    .category(categoryLabel)
+                    .requestedCount(targetCount)
+                    .createdCount(0)
+                    .validCount(exactPayloads.size())
+                    .duplicateCount(duplicateCount)
+                    .rejectedCount(rejectedCount)
+                    .retryCount(retryCount)
+                    .createdExercises(List.of())
+                    .build();
+        }
+    }
+
+    private List<AdminExerciseResponse> executeInWriteTransaction(java.util.function.Supplier<List<AdminExerciseResponse>> work) {
+        if (transactionTemplate == null) {
+            return work.get();
+        }
+        return transactionTemplate.execute(status -> {
+            try {
+                return work.get();
+            } catch (RuntimeException | Error ex) {
+                status.setRollbackOnly();
+                throw ex;
+            }
+        });
+    }
+
+    private List<AdminExerciseResponse> persistPayloadBatchAtomically(
+            User admin,
+            AdminAiConversation conversation,
+            String signature,
+            List<ExerciseRecommendationPayload> toPersist,
+            Set<String> initialExistingCodes,
+            boolean requireFullBatch
+    ) {
+        if (toPersist == null || toPersist.isEmpty()) {
+            return List.of();
+        }
+        List<AdminExerciseResponse> createdExercises = new ArrayList<>();
+        Set<String> reservedCodes = new HashSet<>(initialExistingCodes);
+        for (ExerciseRecommendationPayload payload : toPersist) {
+            String uniqueCode = ensureUniqueCode(payload.getCode(), reservedCodes);
+            CreateAdminExerciseRequest createReq = new CreateAdminExerciseRequest(
+                    payload.getName().trim(),
+                    uniqueCode,
+                    payload.getCategory(),
+                    payload.getDifficulty(),
+                    payload.getDescription(),
+                    payload.getTargetMuscles(),
+                    payload.getInstructions(),
+                    null,
+                    null,
+                    payload.getEquipment(),
+                    false,
+                    List.of(),
+                    ExerciseStatus.DRAFT,
+                    ExerciseOrigin.AI_RECOMMENDED
+            );
+            AdminExerciseResponse saved = adminExerciseService.createExercise(createReq);
+            if (saved == null || saved.id() == null || !exerciseRepository.existsById(saved.id())) {
+                throw new IllegalStateException("Persistence verification failed for exercise: " + payload.getName());
+            }
+            if (saved.status() != ExerciseStatus.DRAFT
+                    || saved.origin() != ExerciseOrigin.AI_RECOMMENDED
+                    || saved.category() != payload.getCategory()
+                    || saved.difficulty() != payload.getDifficulty()) {
+                throw new IllegalStateException("Persisted record mismatch for exercise: " + payload.getName());
+            }
+            createdExercises.add(saved);
+            saveRecommendationTrace(admin, conversation, payload, saved.id(), signature);
+        }
+        if (requireFullBatch && createdExercises.size() != toPersist.size()) {
+            throw new IllegalStateException("Atomic batch count mismatch: expected " + toPersist.size()
+                    + " but persisted " + createdExercises.size());
+        }
+        return createdExercises;
+    }
+
+    private void markCurrentTransactionRollbackOnly() {
+        try {
+            TransactionAspectSupport.currentTransactionStatus().setRollbackOnly();
+        } catch (Exception ignored) {
+        }
     }
 
     private ExerciseDraftBatchResultResponse validationFailure(

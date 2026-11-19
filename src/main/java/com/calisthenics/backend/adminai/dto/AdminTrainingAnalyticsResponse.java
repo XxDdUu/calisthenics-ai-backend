@@ -61,6 +61,8 @@ public class AdminTrainingAnalyticsResponse {
     @AllArgsConstructor
     public static class SkillFocusStatDto {
         private String skillName;
+        private String trainingType;
+        private String category;
         private long existingExerciseCount;
         private long planReferencesCount;
         private long sessionPerformancesCount;

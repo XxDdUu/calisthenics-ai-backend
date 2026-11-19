@@ -11,8 +11,11 @@ import com.calisthenics.backend.exercise.DifficultyLevel;
 import com.calisthenics.backend.exercise.Exercise;
 import com.calisthenics.backend.exercise.ExerciseCategory;
 import com.calisthenics.backend.exercise.ExerciseRepository;
+import com.calisthenics.backend.exercise.ExerciseTrainingType;
 import com.calisthenics.backend.profile.entity.ClientProfile;
 import com.calisthenics.backend.profile.repository.ClientProfileRepository;
+import com.calisthenics.backend.skill.dto.SkillSummaryDto;
+import com.calisthenics.backend.skill.service.SkillCatalogService;
 import com.calisthenics.backend.user.Role;
 import com.calisthenics.backend.user.User;
 import com.calisthenics.backend.user.UserRepository;
@@ -22,6 +25,7 @@ import com.calisthenics.backend.workoutplan.entity.WorkoutPlanExercise;
 import com.calisthenics.backend.workoutplan.repository.WorkoutPlanExerciseRepository;
 import com.calisthenics.backend.workoutplan.repository.WorkoutPlanRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -48,11 +52,24 @@ public class TrainingAnalyticsService {
     private final UserRepository userRepository;
     private final ExerciseRecommendationService exerciseRecommendationService;
 
+    @Autowired(required = false)
+    private SkillCatalogService skillCatalogService;
+
     @Transactional(readOnly = true)
     public AdminTrainingAnalyticsResponse getTrainingAnalytics(
             AdminAnalyticsRange requestedRange,
             LocalDate customStart,
             LocalDate customEnd
+    ) {
+        return getTrainingAnalytics(requestedRange, customStart, customEnd, null);
+    }
+
+    @Transactional(readOnly = true)
+    public AdminTrainingAnalyticsResponse getTrainingAnalytics(
+            AdminAnalyticsRange requestedRange,
+            LocalDate customStart,
+            LocalDate customEnd,
+            ExerciseTrainingType trainingTypeFilter
     ) {
         PlatformAnalyticsService.DateWindow window =
                 platformAnalyticsService.resolveDateWindow(requestedRange, customStart, customEnd);
@@ -155,33 +172,66 @@ public class TrainingAnalyticsService {
         // 3. Skill Focus Breakdown
         List<ClientProfile> clientProfiles = clientProfileRepository.findAll();
         List<AdminTrainingAnalyticsResponse.SkillFocusStatDto> skillBreakdown = new ArrayList<>();
-        for (String skill : exerciseRecommendationService.getSupportedSkillFamilies()) {
-            String skillKey = skill.toLowerCase().replace("-", " ");
-            List<Exercise> matchingExercises = allExercises.stream()
-                    .filter(e -> matchesSkill(e, skillKey))
-                    .toList();
-            Set<Long> matchingIds = matchingExercises.stream().map(Exercise::getId).collect(Collectors.toSet());
+        if (skillCatalogService != null) {
+            for (SkillSummaryDto skill : skillCatalogService.getActiveSkillSummaries(trainingTypeFilter, null)) {
+                String skillKey = skill.getName().toLowerCase(Locale.US).replace("-", " ");
+                List<Exercise> matchingExercises = skillCatalogService.getCompatibleExercisesForSkill(skill, allExercises);
+                Set<Long> matchingIds = matchingExercises.stream().map(Exercise::getId).collect(Collectors.toSet());
 
-            long planRefs = matchingIds.stream().mapToLong(id -> planCountByExId.getOrDefault(id, 0L)).sum();
-            long sessPerfs = matchingIds.stream().mapToLong(id -> sessionTotalByExId.getOrDefault(id, 0L)).sum();
-            long prs = matchingIds.stream().mapToLong(id -> prCountByExId.getOrDefault(id, 0L)).sum();
-            long interestedUsers = clientProfiles.stream()
-                    .filter(cp -> containsSkillText(cp.getTrainingInterests(), skillKey)
-                            || containsSkillText(cp.getPrimaryGoals(), skillKey))
-                    .count();
+                long planRefs = matchingIds.stream().mapToLong(id -> planCountByExId.getOrDefault(id, 0L)).sum();
+                long sessPerfs = matchingIds.stream().mapToLong(id -> sessionTotalByExId.getOrDefault(id, 0L)).sum();
+                long prs = matchingIds.stream().mapToLong(id -> prCountByExId.getOrDefault(id, 0L)).sum();
+                long interestedUsers = clientProfiles.stream()
+                        .filter(cp -> containsSkillText(cp.getTrainingInterests(), skillKey)
+                                || containsSkillText(cp.getPrimaryGoals(), skillKey))
+                        .count();
 
-            List<String> missingProgressions =
-                    exerciseRecommendationService.getMissingProgressionNamesForSkill(skill, allExercises);
+                List<String> missingProgressions = exerciseRecommendationService
+                        .getMissingProgressionNamesForSkillSummary(skill, matchingExercises, allExercises);
 
-            skillBreakdown.add(AdminTrainingAnalyticsResponse.SkillFocusStatDto.builder()
-                    .skillName(skill)
-                    .existingExerciseCount(matchingExercises.size())
-                    .planReferencesCount(planRefs)
-                    .sessionPerformancesCount(sessPerfs)
-                    .prCount(prs)
-                    .interestedUsersCount(interestedUsers)
-                    .missingProgressions(missingProgressions)
-                    .build());
+                skillBreakdown.add(AdminTrainingAnalyticsResponse.SkillFocusStatDto.builder()
+                        .skillName(skill.getName())
+                        .trainingType(skill.getTrainingType() != null ? skill.getTrainingType().name() : ExerciseTrainingType.CALISTHENICS.name())
+                        .category(skill.getCategoryDisplayName())
+                        .existingExerciseCount(matchingExercises.size())
+                        .planReferencesCount(planRefs)
+                        .sessionPerformancesCount(sessPerfs)
+                        .prCount(prs)
+                        .interestedUsersCount(interestedUsers)
+                        .missingProgressions(missingProgressions)
+                        .build());
+            }
+        } else {
+            for (String skill : exerciseRecommendationService.getSupportedSkillFamilies()) {
+                String skillKey = skill.toLowerCase().replace("-", " ");
+                List<Exercise> matchingExercises = allExercises.stream()
+                        .filter(e -> matchesSkill(e, skillKey))
+                        .toList();
+                Set<Long> matchingIds = matchingExercises.stream().map(Exercise::getId).collect(Collectors.toSet());
+
+                long planRefs = matchingIds.stream().mapToLong(id -> planCountByExId.getOrDefault(id, 0L)).sum();
+                long sessPerfs = matchingIds.stream().mapToLong(id -> sessionTotalByExId.getOrDefault(id, 0L)).sum();
+                long prs = matchingIds.stream().mapToLong(id -> prCountByExId.getOrDefault(id, 0L)).sum();
+                long interestedUsers = clientProfiles.stream()
+                        .filter(cp -> containsSkillText(cp.getTrainingInterests(), skillKey)
+                                || containsSkillText(cp.getPrimaryGoals(), skillKey))
+                        .count();
+
+                List<String> missingProgressions =
+                        exerciseRecommendationService.getMissingProgressionNamesForSkill(skill, allExercises);
+
+                skillBreakdown.add(AdminTrainingAnalyticsResponse.SkillFocusStatDto.builder()
+                        .skillName(skill)
+                        .trainingType(ExerciseTrainingType.CALISTHENICS.name())
+                        .category("Skills")
+                        .existingExerciseCount(matchingExercises.size())
+                        .planReferencesCount(planRefs)
+                        .sessionPerformancesCount(sessPerfs)
+                        .prCount(prs)
+                        .interestedUsersCount(interestedUsers)
+                        .missingProgressions(missingProgressions)
+                        .build());
+            }
         }
 
         // 4. Common Training Goals
