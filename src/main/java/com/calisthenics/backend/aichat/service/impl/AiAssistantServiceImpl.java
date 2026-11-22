@@ -11,7 +11,9 @@ import com.calisthenics.backend.aichat.repository.AiMessageRepository;
 import com.calisthenics.backend.aichat.service.AiAssistantService;
 import com.calisthenics.backend.aichat.service.AiWorkoutRecommendationService;
 import com.calisthenics.backend.aichat.service.UserAiWorkoutToolService;
+import com.calisthenics.backend.aichat.service.WorkoutPlanAuditService;
 import com.calisthenics.backend.aichat.service.WorkoutPlanChangePreviewService;
+import com.calisthenics.backend.aichat.service.WorkoutPlanContextService;
 import com.calisthenics.backend.aiworkout.dto.AiWorkoutPlanPreviewResponse;
 import com.calisthenics.backend.aiworkout.dto.GenerateAiWorkoutPlanRequest;
 import com.calisthenics.backend.aiworkout.gemini.GeminiApiClient;
@@ -83,6 +85,12 @@ public class AiAssistantServiceImpl implements AiAssistantService {
 
     @Autowired(required = false)
     private CoachClientRelationshipRepository coachClientRelationshipRepository;
+
+    @Autowired(required = false)
+    private WorkoutPlanContextService workoutPlanContextService;
+
+    @Autowired(required = false)
+    private WorkoutPlanAuditService workoutPlanAuditService;
 
     private static final String TOOL_LIST_EXERCISES = "list_exercises";
     private static final String TOOL_RECOMMEND_EXERCISES = "recommend_exercises";
@@ -353,29 +361,65 @@ public class AiAssistantServiceImpl implements AiAssistantService {
                 return mapToMessageResponse(savedMsg, userId);
             }
         } else if (isPureConfirmMessage(userContent) || isPureCancelMessage(userContent)) {
-            // If user tried to confirm/cancel after a preview expired or when none is pending, reply cleanly without mutating DB
-            String noPendingReply = isPureConfirmMessage(userContent)
-                    ? (isVn ? "Hiện không có bản xem trước thay đổi lịch tập nào đang chờ xác nhận (hoặc bản trước đó đã hết hạn). Hãy gửi yêu cầu chỉnh sửa để tôi tạo bản xem trước mới nhé."
-                            : "There is no active pending workout plan preview to confirm (it may have already been resolved or expired). Let me know what change you'd like to make and I'll generate a fresh preview.")
-                    : (isVn ? "Hiện không có bản xem trước thay đổi lịch tập nào đang chờ để hủy. Lịch tập của bạn vẫn được giữ nguyên."
-                            : "There is no pending workout plan preview to cancel. Your workout plan remains unchanged.");
-            AiMessage savedMsg = aiMessageRepository.save(AiMessage.builder()
-                    .conversation(conversation)
-                    .role("assistant")
-                    .content(noPendingReply)
-                    .intent("WORKOUT_PLAN_PREVIEW")
-                    .metadata(safeToJson(Map.of(
-                            "type", WorkoutPlanChangePreviewService.METADATA_TYPE_CANCELLED,
-                            "code", "NO_PENDING_PREVIEW",
-                            "mutated", false
-                    )))
-                    .build());
-            conversation.setUpdatedAt(ZonedDateTime.now());
-            aiConversationRepository.save(conversation);
-            return mapToMessageResponse(savedMsg, userId);
+            PendingWorkoutClarification pendingClar = findPendingWorkoutClarification(fullPriorHistory);
+            if (pendingClar != null && isPureCancelMessage(userContent)) {
+                String cancelClarReply = isVn
+                        ? "Đã rõ, tôi sẽ không thay đổi lịch tập của bạn."
+                        : "Okay, I won't make any changes to your workout plan.";
+                AiMessage savedMsg = aiMessageRepository.save(AiMessage.builder()
+                        .conversation(conversation)
+                        .role("assistant")
+                        .content(cancelClarReply)
+                        .intent("WORKOUT_PLAN_UPDATE")
+                        .metadata(safeToJson(Map.of(
+                                "type", WorkoutPlanChangePreviewService.METADATA_TYPE_CANCELLED,
+                                "code", "CLARIFICATION_CANCELLED",
+                                "mutated", false
+                        )))
+                        .build());
+                conversation.setUpdatedAt(ZonedDateTime.now());
+                aiConversationRepository.save(conversation);
+                return mapToMessageResponse(savedMsg, userId);
+            }
+            boolean consultationFollowUpAccept = pendingClar == null
+                    && isPureConfirmMessage(userContent)
+                    && "WORKOUT_CONSULTATION".equals(findLastAssistantIntent(fullPriorHistory));
+            if (!consultationFollowUpAccept
+                    && (pendingClar == null || (!isPureConfirmMessage(userContent) || pendingClar.recommendedDayOfWeek() == null))) {
+                // If user tried to confirm/cancel after a preview expired or when none is pending, reply cleanly without mutating DB
+                String noPendingReply = isPureConfirmMessage(userContent)
+                        ? (isVn ? "Hiện không có bản xem trước thay đổi lịch tập nào đang chờ xác nhận (hoặc bản trước đó đã hết hạn). Hãy gửi yêu cầu chỉnh sửa để tôi tạo bản xem trước mới nhé."
+                                : "There is no active pending workout plan preview to confirm (it may have already been resolved or expired). Let me know what change you'd like to make and I'll generate a fresh preview.")
+                        : (isVn ? "Hiện không có bản xem trước thay đổi lịch tập nào đang chờ để hủy. Lịch tập của bạn vẫn được giữ nguyên."
+                                : "There is no pending workout plan preview to cancel. Your workout plan remains unchanged.");
+                AiMessage savedMsg = aiMessageRepository.save(AiMessage.builder()
+                        .conversation(conversation)
+                        .role("assistant")
+                        .content(noPendingReply)
+                        .intent("WORKOUT_PLAN_PREVIEW")
+                        .metadata(safeToJson(Map.of(
+                                "type", WorkoutPlanChangePreviewService.METADATA_TYPE_CANCELLED,
+                                "code", "NO_PENDING_PREVIEW",
+                                "mutated", false
+                        )))
+                        .build());
+                conversation.setUpdatedAt(ZonedDateTime.now());
+                aiConversationRepository.save(conversation);
+                return mapToMessageResponse(savedMsg, userId);
+            }
         }
 
-        WorkoutIntentClassification preClassifiedWorkout = classifyWorkoutIntent(userContent, fullPriorHistory);
+        Optional<WorkoutPlanContextService.ActiveWorkoutPlanContext> activePlanContext =
+                workoutPlanContextService != null
+                        ? workoutPlanContextService.getActivePlanContext(userId)
+                        : Optional.empty();
+        WorkoutPlanAuditService.AthleteProfileSnapshot athleteSnapshot =
+                workoutPlanAuditService != null
+                        ? workoutPlanAuditService.loadAthleteProfileSnapshot(userId, activePlanContext.orElse(null))
+                        : null;
+
+        WorkoutIntentClassification preClassifiedWorkout = classifyWorkoutIntent(
+                userContent, fullPriorHistory, activePlanContext.orElse(null));
 
         List<GeminiRequestDto.Content> geminiContents = new ArrayList<>();
         for (AiMessage msg : history) {
@@ -386,7 +430,9 @@ public class AiAssistantServiceImpl implements AiAssistantService {
                     .build());
         }
 
-        String systemPrompt = buildSystemPrompt(user, clientProfileOpt.orElse(null), latestWeight, recentPrs, recentSessions);
+        String systemPrompt = buildSystemPrompt(
+                user, clientProfileOpt.orElse(null), latestWeight, recentPrs, recentSessions,
+                activePlanContext.orElse(null), athleteSnapshot);
 
         // 4. Call Gemini Structured Intent Classifier & Assistant (skip when deterministic read-only or exercise-mutation intent applies)
         GeminiAssistantOutput assistantOutput = null;
@@ -492,7 +538,9 @@ public class AiAssistantServiceImpl implements AiAssistantService {
             ClientProfile profile,
             Double latestWeight,
             List<PersonalRecord> recentPrs,
-            List<WorkoutSession> recentSessions
+            List<WorkoutSession> recentSessions,
+            WorkoutPlanContextService.ActiveWorkoutPlanContext activePlanContext,
+            WorkoutPlanAuditService.AthleteProfileSnapshot athleteSnapshot
     ) {
         StringBuilder sb = new StringBuilder();
         sb.append("You are the Calisthenics AI Assistant, an automated AI software assistant (NEVER claim to be the user's assigned human coach and NEVER invent a coach profile).\n");
@@ -527,6 +575,21 @@ public class AiAssistantServiceImpl implements AiAssistantService {
         }
 
         sb.append("- Completed Sessions Count: ").append(recentSessions.size()).append("\n");
+        if (workoutPlanAuditService != null && athleteSnapshot != null) {
+            sb.append("\n").append(workoutPlanAuditService.formatAthleteSnapshotForSystemPrompt(athleteSnapshot));
+        }
+
+        sb.append("\n");
+        if (workoutPlanContextService != null) {
+            sb.append(workoutPlanContextService.formatStructuredContextForPrompt(activePlanContext));
+        } else {
+            sb.append("Active Workout Plan: Not loaded in current context.\n");
+        }
+        sb.append("Workout Schedule Context Rules:\n");
+        sb.append("- Use ONLY the Active Workout Plan above as the source of truth for weekdays, training focus, exercises, and Rest Days.\n");
+        sb.append("- NEVER treat a [REST DAY] as a Pull, Push, Leg, or Skill day, and NEVER recommend a Rest Day unless the user explicitly asks for it.\n");
+        sb.append("- When the user refers to a day by focus (e.g. 'my pull day', 'my Front Lever day', 'my pushing day', 'my leg day'), match against the actual weekdays, focuses, and assigned exercises above.\n");
+        sb.append("- If multiple days match, list all matching days and ask which one the user means instead of picking one arbitrarily; if no day matches, explain that no matching day exists in the current plan.\n");
 
         sb.append("\nCapabilities & Intent Detection Instructions:\n");
         sb.append("1. 'PR_RECORD': The user wants to record a Personal Record or reports achieving a new best (e.g., 'I did 10 muscle ups', 'Hit 30kg dip for 3 reps', 'Recorded a 10s handstand').\n");
@@ -1036,7 +1099,10 @@ public class AiAssistantServiceImpl implements AiAssistantService {
     private record PendingWorkoutClarification(
             String pendingAction,
             String exerciseName,
+            String exerciseQuery,
+            boolean multiExerciseRequest,
             WorkoutDayOfWeek targetDayOfWeek,
+            WorkoutDayOfWeek recommendedDayOfWeek,
             List<Long> selectedExerciseIds,
             List<String> selectedExerciseNames
     ) {}
@@ -1147,6 +1213,7 @@ public class AiAssistantServiceImpl implements AiAssistantService {
 
         boolean hasPrescription = WorkoutPlanChangePreviewService.parseExercisePrescription(text).hasAny();
         boolean hasWeekday = UserAiWorkoutToolService.extractWeekday(text) != null;
+        boolean hasSemanticDay = WorkoutPlanContextService.extractSemanticDayQuery(text) != null;
         boolean hasAnaphoraOrInstead = containsWord(lower, "instead") || containsWord(lower, "actually")
                 || containsWord(lower, "it") || containsWord(lower, "that")
                 || lower.contains("thay vì") || lower.contains("đổi thành") || lower.contains("sang ");
@@ -1155,8 +1222,8 @@ public class AiAssistantServiceImpl implements AiAssistantService {
         if (hasPrescription && !containsWord(lower, "move")) {
             return true;
         }
-        // E.g. "Move it to Wednesday instead", "Make it 4 sets and move it to Wednesday", "Actually Wednesday"
-        if ((hasPrescription || hasWeekday) && hasAnaphoraOrInstead) {
+        // E.g. "Move it to Wednesday instead", "Make it 4 sets and move it to Wednesday", "Actually Wednesday", "Move it to my pull day instead"
+        if ((hasPrescription || hasWeekday || hasSemanticDay) && hasAnaphoraOrInstead) {
             return true;
         }
         return false;
@@ -1202,10 +1269,14 @@ public class AiAssistantServiceImpl implements AiAssistantService {
         boolean detailed = action != null && Boolean.TRUE.equals(action.getDetailed());
         String exerciseName = action != null ? action.getExerciseName() : null;
         UserAiWorkoutToolService.MoveDays moveDays = UserAiWorkoutToolService.extractMoveDays(userMessage);
-        WorkoutDayOfWeek day = parseDayOfWeek(action != null ? action.getDayOfWeek() : null, userMessage);
+        boolean hasSemanticDayWithoutWeekday = UserAiWorkoutToolService.extractWeekday(userMessage) == null
+                && WorkoutPlanContextService.extractSemanticDayQuery(userMessage) != null;
+        WorkoutDayOfWeek day = hasSemanticDayWithoutWeekday
+                ? null
+                : parseDayOfWeek(action != null ? action.getDayOfWeek() : null, userMessage);
         WorkoutDayOfWeek sourceDay = moveDays.sourceDay() != null
                 ? moveDays.sourceDay()
-                : parseOptionalEnumDay(action != null ? action.getSourceDayOfWeek() : null);
+                : (hasSemanticDayWithoutWeekday ? null : parseOptionalEnumDay(action != null ? action.getSourceDayOfWeek() : null));
         WorkoutDayOfWeek moveTargetDay = moveDays.targetDay() != null ? moveDays.targetDay() : day;
         boolean isToday = day == null && action != null && "TODAY".equalsIgnoreCase(action.getDayOfWeek());
         boolean nextSession = day == null && action != null && "NEXT".equalsIgnoreCase(action.getDayOfWeek());
@@ -1296,11 +1367,15 @@ public class AiAssistantServiceImpl implements AiAssistantService {
                     case TOOL_RECOMMEND_EXERCISES -> {
                         if (aiWorkoutRecommendationService != null) {
                             WorkoutDayOfWeek focusDay = decision.targetDay() != null ? decision.targetDay() : selectedDayOfWeek;
+                            String recPrompt = (decision.exerciseName() != null && !decision.exerciseName().isBlank()
+                                    && isClarificationRecommendationAcceptance(userContent))
+                                    ? decision.exerciseName()
+                                    : userContent;
                             boolean planContextRequested = !decision.anotherFollowUp()
-                                    && aiWorkoutRecommendationService.planContextExplicitlyRequested(userContent);
+                                    && aiWorkoutRecommendationService.planContextExplicitlyRequested(recPrompt);
                             AiWorkoutRecommendationService.RecommendationOutcome recOut =
                                     aiWorkoutRecommendationService.recommendExercises(
-                                            userId, userContent, focusDay, planContextRequested,
+                                            userId, recPrompt, focusDay, planContextRequested,
                                             priorHistory, decision.anotherFollowUp(), isVn);
                             yield new UserAiWorkoutToolService.WorkoutToolResult(
                                     TOOL_RECOMMEND_EXERCISES, true, recOut.intent(), true, recOut.reply(), recOut.metadataJson());
@@ -1419,6 +1494,7 @@ public class AiAssistantServiceImpl implements AiAssistantService {
         if (UserAiWorkoutToolService.TOOL_UPDATE_WORKOUT_PLAN.equals(decision.toolName())
                 && decision.targetDay() == null
                 && UserAiWorkoutToolService.extractWeekday(userContent) == null
+                && WorkoutPlanContextService.extractSemanticDayQuery(userContent) == null
                 && selectedDayOfWeek == null
                 && !WorkoutPlanChangePreviewService.parseExercisePrescription(userContent).hasAny()) {
             UserAiWorkoutToolService.WorkoutToolResult res = userAiWorkoutToolService.createWorkoutPlan(
@@ -1446,6 +1522,14 @@ public class AiAssistantServiceImpl implements AiAssistantService {
     }
 
     private WorkoutIntentClassification classifyWorkoutIntent(String userMessage, List<AiMessage> priorHistory) {
+        return classifyWorkoutIntent(userMessage, priorHistory, null);
+    }
+
+    private WorkoutIntentClassification classifyWorkoutIntent(
+            String userMessage,
+            List<AiMessage> priorHistory,
+            WorkoutPlanContextService.ActiveWorkoutPlanContext activePlanContext
+    ) {
         if (userMessage == null || userMessage.isBlank()) {
             return null;
         }
@@ -1473,6 +1557,9 @@ public class AiAssistantServiceImpl implements AiAssistantService {
         }
 
         WorkoutDayOfWeek weekday = UserAiWorkoutToolService.extractWeekday(userMessage);
+        String semanticDayQuery = workoutPlanContextService != null
+                ? workoutPlanContextService.extractSemanticDayQueryWithPlanFallback(activePlanContext, userMessage)
+                : WorkoutPlanContextService.extractSemanticDayQuery(userMessage);
         UserAiWorkoutToolService.MoveDays moveDays = UserAiWorkoutToolService.extractMoveDays(userMessage);
         String prevIntent = findLastAssistantIntent(priorHistory);
         WorkoutDayOfWeek prevDay = findLastAssistantDay(priorHistory);
@@ -1512,44 +1599,63 @@ public class AiAssistantServiceImpl implements AiAssistantService {
                 || containsWord(lower, "list") || containsWord(lower, "explain")
                 || lower.contains("xem ");
 
-        // Pending clarification follow-up (e.g. Turn 1: "Add Front Lever Raises" or "I like Squat and RDL", Turn 2: "Tuesday" / "Add them to Wednesday")
+        // Pending clarification follow-up (e.g. Turn 1: "Add Front Lever Raises" or "Add some Front Lever exercises", Turn 2: "Tuesday" / "My pull day" / "Sunday")
         boolean isAnotherRequest = isAnotherExerciseRequest(lower, priorHistory);
         PendingWorkoutClarification pendingClarification = findPendingWorkoutClarification(priorHistory);
-        if (pendingClarification != null && weekday != null && !isViewVerb
-                && !isAnotherRequest && !isListExercisesRequest(lower, weekday, mentionsPlanOrSchedule, mentionsTodayTraining, mentionsNextSession)
-                && !isExerciseRecommendationRequest(lower) && !isWorkoutConsultationRequest(lower)) {
+        boolean acceptedRecommendedDay = pendingClarification != null
+                && pendingClarification.recommendedDayOfWeek() != null
+                && isClarificationRecommendationAcceptance(userMessage);
+        if (pendingClarification != null
+                && (weekday != null || semanticDayQuery != null || acceptedRecommendedDay)
+                && !isViewVerb
+                && !isAnotherRequest
+                && !isListExercisesRequest(lower, weekday, mentionsPlanOrSchedule, mentionsTodayTraining, mentionsNextSession)
+                && !isExerciseRecommendationRequest(lower)
+                && !isWorkoutConsultationRequest(lower)) {
+            WorkoutDayOfWeek clarifiedDay = weekday != null
+                    ? weekday
+                    : (semanticDayQuery == null && acceptedRecommendedDay ? pendingClarification.recommendedDayOfWeek() : null);
             if ("ADD_MULTI".equalsIgnoreCase(pendingClarification.pendingAction())
                     && pendingClarification.selectedExerciseIds() != null
                     && !pendingClarification.selectedExerciseIds().isEmpty()
                     && (isAnaphoraSelection(lower) || !mentionsAnyPublishedExercise(lower))) {
                 return new WorkoutIntentClassification("WORKOUT_PLAN_UPDATE",
-                        TOOL_APPLY_SELECTED_RECOMMENDATIONS, false, null, weekday, null, false, false, true);
+                        TOOL_APPLY_SELECTED_RECOMMENDATIONS, false, null, clarifiedDay, null, false, false, true);
             }
             if ("ADD".equalsIgnoreCase(pendingClarification.pendingAction())
                     && !containsWord(lower, "remove") && !containsWord(lower, "delete")) {
                 return new WorkoutIntentClassification("WORKOUT_PLAN_UPDATE",
-                        UserAiWorkoutToolService.TOOL_ADD_EXERCISE_TO_WORKOUT, false, null, weekday,
+                        UserAiWorkoutToolService.TOOL_ADD_EXERCISE_TO_WORKOUT, false, null, clarifiedDay,
                         pendingClarification.exerciseName(), false, false, true);
             }
             if ("REMOVE".equalsIgnoreCase(pendingClarification.pendingAction())
-                    && !containsWord(lower, "add")) {
+                    && !containsWord(lower, "add") && clarifiedDay != null) {
                 return new WorkoutIntentClassification("WORKOUT_PLAN_UPDATE",
-                        UserAiWorkoutToolService.TOOL_REMOVE_EXERCISE_FROM_WORKOUT, false, null, weekday,
+                        UserAiWorkoutToolService.TOOL_REMOVE_EXERCISE_FROM_WORKOUT, false, null, clarifiedDay,
                         pendingClarification.exerciseName(), false, false, true);
             }
-            if ("MOVE".equalsIgnoreCase(pendingClarification.pendingAction())) {
-                WorkoutDayOfWeek clarifiedSource = pendingClarification.targetDayOfWeek() != null ? weekday : null;
+            if ("MOVE".equalsIgnoreCase(pendingClarification.pendingAction()) && clarifiedDay != null) {
+                WorkoutDayOfWeek clarifiedSource = pendingClarification.targetDayOfWeek() != null ? clarifiedDay : null;
                 WorkoutDayOfWeek clarifiedTarget = pendingClarification.targetDayOfWeek() != null
-                        ? pendingClarification.targetDayOfWeek() : weekday;
+                        ? pendingClarification.targetDayOfWeek() : clarifiedDay;
                 return new WorkoutIntentClassification("WORKOUT_PLAN_UPDATE",
                         UserAiWorkoutToolService.TOOL_MOVE_EXERCISE_BETWEEN_DAYS, false, clarifiedSource, clarifiedTarget,
                         pendingClarification.exerciseName(), false, false, true);
             }
-            if ("UPDATE".equalsIgnoreCase(pendingClarification.pendingAction())) {
+            if ("UPDATE".equalsIgnoreCase(pendingClarification.pendingAction()) && clarifiedDay != null) {
                 return new WorkoutIntentClassification("WORKOUT_PLAN_UPDATE",
-                        WorkoutPlanChangePreviewService.TOOL_UPDATE_EXERCISE_IN_WORKOUT, false, null, weekday,
+                        WorkoutPlanChangePreviewService.TOOL_UPDATE_EXERCISE_IN_WORKOUT, false, null, clarifiedDay,
                         pendingClarification.exerciseName(), false, false, true);
             }
+        }
+
+        if (pendingClarification == null && "WORKOUT_CONSULTATION".equals(prevIntent)
+                && isClarificationRecommendationAcceptance(userMessage)) {
+            String suggestedPrompt = findLastConsultationSuggestedPrompt(priorHistory);
+            return new WorkoutIntentClassification("EXERCISE_RECOMMENDATION",
+                    TOOL_RECOMMEND_EXERCISES, true, null, null,
+                    suggestedPrompt != null ? suggestedPrompt : "What exercises am I missing in my current routine?",
+                    false, false, true);
         }
 
         // 0. Check multi-turn selection follow-up from a recent EXERCISE_RECOMMENDATIONS card
@@ -1639,7 +1745,7 @@ public class AiAssistantServiceImpl implements AiAssistantService {
 
         boolean hasAddVerb = containsWord(lower, "add") || containsWord(lower, "insert") || lower.contains("thêm ");
         if (hasAddVerb && (mentionsExerciseVerb || mentionsPlanOrSchedule || weekday != null
-                || hasWorkoutHistoryContext || mentionsAnyPublishedExercise(lower))) {
+                || semanticDayQuery != null || hasWorkoutHistoryContext || mentionsAnyPublishedExercise(lower))) {
             return new WorkoutIntentClassification("WORKOUT_PLAN_UPDATE",
                     UserAiWorkoutToolService.TOOL_ADD_EXERCISE_TO_WORKOUT, false, null, weekday, null, false, false, true);
         }
@@ -2010,6 +2116,7 @@ public class AiAssistantServiceImpl implements AiAssistantService {
                 && (lower.contains("enough") || lower.contains("too much") || lower.contains("too little") || lower.contains("properly"));
         boolean hasConsultationCue = hasExplicitPlanBalance
                 || isTrainingAdequacyQuestion
+                || AiWorkoutRecommendationService.isComprehensiveAuditQuery(lower)
                 || lower.contains("enough recovery")
                 || lower.contains("enough rest") || lower.contains("too high")
                 || lower.contains("too much volume") || lower.contains("overtraining")
@@ -2024,6 +2131,24 @@ public class AiAssistantServiceImpl implements AiAssistantService {
         }
         return (lower.contains("is my ") || lower.contains("are my "))
                 && (lower.contains("enough") || lower.contains("balanced") || lower.contains("too much") || lower.contains("too high"));
+    }
+
+    private String findLastConsultationSuggestedPrompt(List<AiMessage> history) {
+        if (history == null) return null;
+        for (int i = history.size() - 1; i >= 0; i--) {
+            AiMessage m = history.get(i);
+            if ("assistant".equalsIgnoreCase(m.getRole()) && m.getMetadata() != null) {
+                try {
+                    JsonNode root = objectMapper.readTree(m.getMetadata());
+                    if ("WORKOUT_CONSULTATION".equals(root.path("type").asText())
+                            && root.hasNonNull("suggestedActionPrompt")) {
+                        return root.get("suggestedActionPrompt").asText();
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+        }
+        return null;
     }
 
     private static boolean isAnaphoraSelection(String lower) {
@@ -2140,6 +2265,18 @@ public class AiAssistantServiceImpl implements AiAssistantService {
                 .anyMatch(e -> lowerText.contains(e.getName().toLowerCase(Locale.US)));
     }
 
+    private static boolean isClarificationRecommendationAcceptance(String text) {
+        if (text == null || text.isBlank()) {
+            return false;
+        }
+        String norm = normalizeShortCommand(text);
+        return Set.of(
+                "yes", "yeah", "yep", "sure", "ok", "okay", "sounds good", "go ahead", "do it",
+                "your recommendation", "the recommended day", "recommend", "the first one", "first option",
+                "có", "đồng ý", "được", "ok bạn", "theo đề xuất của bạn"
+        ).contains(norm);
+    }
+
     private PendingWorkoutClarification findPendingWorkoutClarification(List<AiMessage> history) {
         if (history == null || history.isEmpty()) {
             return null;
@@ -2154,28 +2291,34 @@ public class AiAssistantServiceImpl implements AiAssistantService {
             }
             try {
                 JsonNode root = objectMapper.readTree(m.getMetadata());
-                    if ("WORKOUT_PLAN_CLARIFICATION".equals(root.path("type").asText())) {
-                        String action = root.path("pendingAction").asText(null);
-                        String exName = root.hasNonNull("exerciseName") ? root.get("exerciseName").asText() : null;
-                        WorkoutDayOfWeek targetDay = root.hasNonNull("targetDayOfWeek")
-                                ? parseOptionalEnumDay(root.get("targetDayOfWeek").asText())
-                                : null;
-                        List<Long> selectedIds = new ArrayList<>();
-                        if (root.has("selectedExerciseIds") && root.get("selectedExerciseIds").isArray()) {
-                            for (JsonNode n : root.get("selectedExerciseIds")) {
-                                if (n.canConvertToLong()) selectedIds.add(n.asLong());
-                            }
-                        }
-                        List<String> selectedNames = new ArrayList<>();
-                        if (root.has("selectedExerciseNames") && root.get("selectedExerciseNames").isArray()) {
-                            for (JsonNode n : root.get("selectedExerciseNames")) {
-                                if (n.isTextual() && !n.asText().isBlank()) selectedNames.add(n.asText());
-                            }
-                        }
-                        if (action != null && !action.isBlank()) {
-                            return new PendingWorkoutClarification(action, exName, targetDay, selectedIds, selectedNames);
+                if ("WORKOUT_PLAN_CLARIFICATION".equals(root.path("type").asText())) {
+                    String action = root.path("pendingAction").asText(null);
+                    String exName = root.hasNonNull("exerciseName") ? root.get("exerciseName").asText() : null;
+                    String exQuery = root.hasNonNull("exerciseQuery") ? root.get("exerciseQuery").asText() : null;
+                    boolean multiReq = root.path("multiExerciseRequest").asBoolean(false);
+                    WorkoutDayOfWeek targetDay = root.hasNonNull("targetDayOfWeek")
+                            ? parseOptionalEnumDay(root.get("targetDayOfWeek").asText())
+                            : null;
+                    WorkoutDayOfWeek recommendedDay = root.hasNonNull("recommendedDayOfWeek")
+                            ? parseOptionalEnumDay(root.get("recommendedDayOfWeek").asText())
+                            : null;
+                    List<Long> selectedIds = new ArrayList<>();
+                    if (root.has("selectedExerciseIds") && root.get("selectedExerciseIds").isArray()) {
+                        for (JsonNode n : root.get("selectedExerciseIds")) {
+                            if (n.canConvertToLong()) selectedIds.add(n.asLong());
                         }
                     }
+                    List<String> selectedNames = new ArrayList<>();
+                    if (root.has("selectedExerciseNames") && root.get("selectedExerciseNames").isArray()) {
+                        for (JsonNode n : root.get("selectedExerciseNames")) {
+                            if (n.isTextual() && !n.asText().isBlank()) selectedNames.add(n.asText());
+                        }
+                    }
+                    if (action != null && !action.isBlank()) {
+                        return new PendingWorkoutClarification(
+                                action, exName, exQuery, multiReq, targetDay, recommendedDay, selectedIds, selectedNames);
+                    }
+                }
             } catch (Exception ignored) {
             }
             return null;

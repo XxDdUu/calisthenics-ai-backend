@@ -34,6 +34,16 @@ public class WorkoutConsultationCardDto {
     private List<String> undertrainedMuscles = new ArrayList<>();
     @Builder.Default
     private List<String> overloadedMuscles = new ArrayList<>();
+    @Builder.Default
+    private List<String> adequatelyCoveredMuscles = new ArrayList<>();
+    @Builder.Default
+    private List<String> programPriorities = new ArrayList<>();
+    private Boolean specializedProgram;
+    private AthleteSnapshotDto athleteSnapshot;
+    @Builder.Default
+    private List<MuscleCoverageDto> muscleCoverage = new ArrayList<>();
+    @Builder.Default
+    private List<MovementPatternAuditDto> movementPatterns = new ArrayList<>();
     private String suggestedActionPrompt;
 
     @Data
@@ -45,5 +55,56 @@ public class WorkoutConsultationCardDto {
         private String severity; // "INFO", "WARNING"
         private String title;
         private String detail;
+        private Integer priorityTier;
+        private String coverageStatus; // "MISSING", "UNDERDEVELOPED", "ADEQUATELY_COVERED", "OVERLOADED"
+        private WorkoutDayOfWeek recommendedDay;
+    }
+
+    @Data
+    @Builder
+    @NoArgsConstructor
+    @AllArgsConstructor
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static class AthleteSnapshotDto {
+        private Double weightKg;
+        private Double heightCm;
+        private String experienceLevel;
+        private String primaryGoals;
+        private String preferredFrequency;
+        private Integer completedSessionsCount;
+        private Integer incompleteSessionsCount;
+        @Builder.Default
+        private List<String> keyPrs = new ArrayList<>();
+        @Builder.Default
+        private List<String> missingData = new ArrayList<>();
+    }
+
+    @Data
+    @Builder
+    @NoArgsConstructor
+    @AllArgsConstructor
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static class MuscleCoverageDto {
+        private String muscleName;
+        private Double directSets;
+        private Double indirectSets;
+        private Double effectiveSets;
+        private String status;
+        @Builder.Default
+        private List<String> contributingExercises = new ArrayList<>();
+    }
+
+    @Data
+    @Builder
+    @NoArgsConstructor
+    @AllArgsConstructor
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static class MovementPatternAuditDto {
+        private String patternName;
+        private Double weeklySets;
+        private Integer exerciseCount;
+        private String status;
+        @Builder.Default
+        private List<String> existingExercises = new ArrayList<>();
     }
 }

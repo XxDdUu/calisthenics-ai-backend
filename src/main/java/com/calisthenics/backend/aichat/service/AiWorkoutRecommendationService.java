@@ -87,6 +87,9 @@ public class AiWorkoutRecommendationService {
     @Autowired(required = false)
     private GeminiApiClient geminiApiClient;
 
+    @Autowired(required = false)
+    private WorkoutPlanAuditService workoutPlanAuditService;
+
     public record RecommendationOutcome(
             String intent,
             String reply,
@@ -471,7 +474,18 @@ public class AiWorkoutRecommendationService {
         WorkoutPlanDay focusDay = explicitDay != null
                 ? findDay(snapshot.days(), explicitDay)
                 : matchSemanticPlanDay(lower, snapshot);
-        if (focusDay == null && selectedDayOfWeek != null && !lower.contains("weekly") && !lower.contains("routine") && !lower.contains("recovery")) {
+        boolean comprehensiveAudit = focusDay == null && isComprehensiveAuditQuery(lower);
+        if (comprehensiveAudit && workoutPlanAuditService != null) {
+            WorkoutPlanAuditService.ComprehensiveWorkoutAudit audit =
+                    workoutPlanAuditService.auditActiveWorkoutPlan(userId);
+            if (audit != null) {
+                WorkoutConsultationCardDto auditCard = workoutPlanAuditService.toConsultationCard(audit);
+                String auditMarkdown = workoutPlanAuditService.formatComprehensiveAuditMarkdown(audit, isVn);
+                return new ConsultationOutcome("WORKOUT_CONSULTATION", auditMarkdown, safeToJson(auditCard), auditCard);
+            }
+        }
+        if (focusDay == null && selectedDayOfWeek != null && !comprehensiveAudit
+                && !lower.contains("weekly") && !lower.contains("routine") && !lower.contains("recovery")) {
             focusDay = findDay(snapshot.days(), selectedDayOfWeek);
         }
 
@@ -840,6 +854,7 @@ public class AiWorkoutRecommendationService {
                 || lower.contains("upper day")
                 || lower.contains("lower day")
                 || lower.contains("planche day")
+                || lower.contains("front lever day")
                 || lower.contains("skill day")
                 || lower.contains("in my routine")
                 || lower.contains("current routine")
@@ -851,6 +866,38 @@ public class AiWorkoutRecommendationService {
                 || lower.contains("vào lịch")
                 || lower.contains("nên thêm")
                 || lower.contains("thiếu trong lịch");
+    }
+
+    public static boolean isComprehensiveAuditQuery(String lower) {
+        if (lower == null || lower.isBlank()) {
+            return false;
+        }
+        return lower.contains("missing anything")
+                || lower.contains("improve in my")
+                || lower.contains("should i improve")
+                || lower.contains("can i improve")
+                || lower.contains("improve my")
+                || lower.contains("neglecting")
+                || lower.contains("neglected")
+                || lower.contains("weakness")
+                || lower.contains("weaknesses")
+                || lower.contains("weak point")
+                || lower.contains("weak points")
+                || lower.contains("training balanced")
+                || lower.contains("routine balanced")
+                || lower.contains("workout balanced")
+                || lower.contains("program balanced")
+                || lower.contains("plan balanced")
+                || lower.contains("audit my")
+                || lower.contains("evaluate my")
+                || lower.contains("critique my")
+                || lower.contains("review my")
+                || lower.contains("assess my")
+                || lower.contains("analyze my")
+                || lower.contains("cải thiện")
+                || lower.contains("thiếu sót")
+                || lower.contains("bỏ sót")
+                || lower.contains("đánh giá lịch");
     }
 
     public String extractCriteriaKey(String prompt) {
