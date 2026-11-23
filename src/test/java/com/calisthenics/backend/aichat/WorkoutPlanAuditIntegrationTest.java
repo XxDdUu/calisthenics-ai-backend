@@ -62,6 +62,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -458,5 +459,78 @@ class WorkoutPlanAuditIntegrationTest {
         assertThat(resp.getContent()).contains("1 incomplete/scheduled session(s) excluded");
         assertThat(resp.getContent()).contains("Personal Records (PRs)**: None recorded yet");
         assertThat(resp.getContent()).contains("Data Gaps Acknowledged");
+    }
+
+    @Test
+    @DisplayName("Consultation follow-up recommendation buttons pass muscle group, include routine context, and preserve history")
+    void consultationRecommendationFollowUp_includesRoutineContextTargetsMuscleGroupAndPreservesHistory() throws Exception {
+        WorkoutPlan plan = WorkoutPlan.builder()
+                .user(athlete).name("Push Pull Leg Split").splitType(WorkoutSplitType.PPL).active(true).build();
+        for (WorkoutDayOfWeek dow : WorkoutDayOfWeek.values()) {
+            boolean rest = dow == WorkoutDayOfWeek.THURSDAY || dow == WorkoutDayOfWeek.SUNDAY;
+            WorkoutPlanDay day = WorkoutPlanDay.builder()
+                    .workoutPlan(plan).dayOfWeek(dow).displayOrder(dow.getOrder()).restDay(rest)
+                    .name(switch (dow) {
+                        case MONDAY -> "Push Day";
+                        case TUESDAY -> "Pull Day";
+                        case WEDNESDAY -> "Leg Day";
+                        case FRIDAY -> "Upper Push";
+                        case SATURDAY -> "Upper Pull";
+                        default -> "Rest Day";
+                    })
+                    .sessionType(switch (dow) {
+                        case MONDAY, FRIDAY -> WorkoutSessionType.PUSH;
+                        case TUESDAY, SATURDAY -> WorkoutSessionType.PULL;
+                        case WEDNESDAY -> WorkoutSessionType.LEGS;
+                        default -> WorkoutSessionType.REST;
+                    })
+                    .build();
+            if (dow == WorkoutDayOfWeek.MONDAY || dow == WorkoutDayOfWeek.FRIDAY) {
+                addDayEx(day, pushUp, 4, 12, null, 1);
+            } else if (dow == WorkoutDayOfWeek.TUESDAY || dow == WorkoutDayOfWeek.SATURDAY) {
+                addDayEx(day, pullUp, 4, 8, null, 1);
+            } else if (dow == WorkoutDayOfWeek.WEDNESDAY) {
+                addDayEx(day, pistolSquat, 4, 8, null, 1);
+            }
+            plan.getDays().add(day);
+        }
+        workoutPlanRepository.save(plan);
+
+        Long convId = createConversation();
+
+        // 1. User asks if current workout routine is balanced
+        AiMessageResponse auditResp = sendMessage(convId, "📊 Is my current workout routine balanced?");
+        assertThat(auditResp.getIntent()).isEqualTo("WORKOUT_CONSULTATION");
+        JsonNode auditMeta = objectMapper.readTree(auditResp.getMetadata());
+        assertThat(auditMeta.path("undertrainedMuscles").toString()).contains("Hamstrings");
+
+        // 2. Click muscle recommendation button with explicit routine context phrasing
+        AiMessageResponse hamResp = sendMessage(convId, "Recommend exercise for Hamstrings for my current routine");
+        assertThat(hamResp.getIntent()).isEqualTo("EXERCISE_RECOMMENDATION");
+        JsonNode hamMeta = objectMapper.readTree(hamResp.getMetadata());
+        assertThat(hamMeta.path("informationalOnly").asBoolean()).isFalse();
+        assertThat(hamMeta.path("focusLabel").asText()).containsIgnoringCase("Hamstrings");
+        assertThat(hamMeta.path("suggestedDayOfWeek").asText()).isEqualTo("WEDNESDAY");
+        assertThat(hamMeta.path("availablePlanDays")).isNotEmpty();
+        assertThat(hamMeta.path("recommendations").findValuesAsText("name"))
+                .contains("Single-Leg Romanian Deadlift");
+
+        // 3. Click a second recommendation button from the earlier consultation (e.g. without routine suffix)
+        AiMessageResponse chestResp = sendMessage(convId, "Recommend exercise for Chest");
+        assertThat(chestResp.getIntent()).isEqualTo("EXERCISE_RECOMMENDATION");
+        JsonNode chestMeta = objectMapper.readTree(chestResp.getMetadata());
+        assertThat(chestMeta.path("informationalOnly").asBoolean()).isFalse();
+        assertThat(chestMeta.path("focusLabel").asText()).isEqualTo("Chest");
+        assertThat(chestMeta.path("suggestedDayOfWeek").asText()).isIn("MONDAY", "FRIDAY");
+        assertThat(chestMeta.path("recommendations").findValuesAsText("name"))
+                .contains("Dips");
+
+        // 4. Verify full conversation history remains intact in exact order
+        MvcResult convRes = mockMvc.perform(get("/api/v1/ai/conversations/" + convId)
+                        .header("Authorization", "Bearer " + athleteToken))
+                .andExpect(status().isOk())
+                .andReturn();
+        JsonNode convJson = objectMapper.readTree(convRes.getResponse().getContentAsString(StandardCharsets.UTF_8));
+        assertThat(convJson.path("messages").size()).isEqualTo(6);
     }
 }

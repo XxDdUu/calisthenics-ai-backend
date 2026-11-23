@@ -1371,8 +1371,10 @@ public class AiAssistantServiceImpl implements AiAssistantService {
                                     && isClarificationRecommendationAcceptance(userContent))
                                     ? decision.exerciseName()
                                     : userContent;
+                            boolean isConsultationContext = isRecentWorkoutConsultationContext(priorHistory);
                             boolean planContextRequested = !decision.anotherFollowUp()
-                                    && aiWorkoutRecommendationService.planContextExplicitlyRequested(recPrompt);
+                                    && (aiWorkoutRecommendationService.planContextExplicitlyRequested(recPrompt)
+                                        || isConsultationContext);
                             AiWorkoutRecommendationService.RecommendationOutcome recOut =
                                     aiWorkoutRecommendationService.recommendExercises(
                                             userId, recPrompt, focusDay, planContextRequested,
@@ -2131,6 +2133,29 @@ public class AiAssistantServiceImpl implements AiAssistantService {
         }
         return (lower.contains("is my ") || lower.contains("are my "))
                 && (lower.contains("enough") || lower.contains("balanced") || lower.contains("too much") || lower.contains("too high"));
+    }
+
+    private static boolean isRecentWorkoutConsultationContext(List<AiMessage> history) {
+        if (history == null || history.isEmpty()) {
+            return false;
+        }
+        int assistantSteps = 0;
+        for (int i = history.size() - 1; i >= 0 && assistantSteps < 6; i--) {
+            AiMessage m = history.get(i);
+            if (m == null || !"assistant".equalsIgnoreCase(m.getRole())) {
+                continue;
+            }
+            assistantSteps++;
+            String intent = m.getIntent() != null ? m.getIntent().trim().toUpperCase(Locale.US) : "";
+            if ("WORKOUT_CONSULTATION".equals(intent)) {
+                return true;
+            }
+            if ("EXERCISE_RECOMMENDATION".equals(intent)) {
+                continue;
+            }
+            return false;
+        }
+        return false;
     }
 
     private String findLastConsultationSuggestedPrompt(List<AiMessage> history) {

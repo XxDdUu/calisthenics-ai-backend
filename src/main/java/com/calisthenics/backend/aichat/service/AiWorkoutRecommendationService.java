@@ -417,10 +417,20 @@ public class AiWorkoutRecommendationService {
             items.add(toRecommendationItem(sc, targetDayExerciseIds.contains(sc.exercise().getId())));
         }
 
+        List<SupplementalCandidate> supplemental = List.of();
+        boolean usedSupplementalAi = false;
+        if (items.isEmpty() && geminiApiClient != null) {
+            ExerciseDeduplicator.DeduplicationState exclusions = copyDeduplicationState(history.exclusions());
+            supplemental = fetchSupplementalFromGemini(
+                    prompt, criteria, exclusions, criteria.requestedCount(), publishedCatalog, true, isVn);
+            usedSupplementalAi = !supplemental.isEmpty();
+        }
+
         List<String> planWarnings = buildRecommendationPlanWarnings(snapshot, suggestedDay, targetDayExercises, includedAlreadyOnTargetDay, isVn);
 
+        boolean informationalFallback = items.isEmpty() && !supplemental.isEmpty();
         ExerciseRecommendationsCardDto card = ExerciseRecommendationsCardDto.builder()
-                .informationalOnly(false)
+                .informationalOnly(informationalFallback)
                 .focusLabel(criteria.focusLabel())
                 .criteriaKey(criteria.criteriaKey())
                 .topicPrompt(effectiveTopicPrompt(prompt, history))
@@ -438,8 +448,11 @@ public class AiWorkoutRecommendationService {
                 .collect(Collectors.toMap(Exercise::getId, e -> e, (a, b) -> a));
         ExerciseRecommendationsCardDto validatedCard = validateAndSanitizeCard(card, catalogById);
 
-        String markdown = formatRecommendationsMarkdown(validatedCard, snapshot, suggestedDay, isVn);
-        return new RecommendationOutcome("EXERCISE_RECOMMENDATION", markdown, safeToJson(validatedCard), validatedCard);
+        String markdown = supplemental.isEmpty()
+                ? formatRecommendationsMarkdown(validatedCard, snapshot, suggestedDay, isVn)
+                : formatPlanContextSupplementalMarkdown(validatedCard, snapshot, suggestedDay, supplemental, isVn);
+        String metaJson = injectExtraFieldsIntoJson(safeToJson(validatedCard), usedSupplementalAi, supplemental);
+        return new RecommendationOutcome("EXERCISE_RECOMMENDATION", markdown, metaJson, validatedCard);
     }
 
     @Transactional(readOnly = true)
@@ -857,9 +870,17 @@ public class AiWorkoutRecommendationService {
                 || lower.contains("front lever day")
                 || lower.contains("skill day")
                 || lower.contains("in my routine")
+                || lower.contains("for my routine")
+                || lower.contains("my current routine")
                 || lower.contains("current routine")
+                || lower.contains("workout routine")
+                || lower.contains("current workout")
+                || lower.contains("my routine")
                 || lower.contains("my current plan")
                 || lower.contains("my workout plan")
+                || lower.contains("my plan")
+                || lower.contains("imbalance")
+                || lower.contains("balance my")
                 || lower.contains("missing in")
                 || lower.contains("what am i missing")
                 || lower.contains("what's missing")
@@ -927,8 +948,6 @@ public class AiWorkoutRecommendationService {
             }
         }
 
-        boolean wholeGap = lower.contains("missing") || lower.contains("current routine")
-                || lower.contains("my routine") || lower.contains("imbalance") || lower.contains("gap");
         boolean lowerBody = lower.contains("leg") || lower.contains("lower body") || lower.contains("squat")
                 || muscles.contains(MuscleId.QUADRICEPS) || muscles.contains(MuscleId.HAMSTRINGS)
                 || muscles.contains(MuscleId.GLUTES) || muscles.contains(MuscleId.CALVES) || muscles.contains(MuscleId.ADDUCTORS);
@@ -941,6 +960,10 @@ public class AiWorkoutRecommendationService {
         boolean core = lower.contains("core") || lower.contains("abs") || lower.contains("l sit") || lower.contains("l-sit")
                 || lower.contains("dragon flag")
                 || muscles.contains(MuscleId.RECTUS_ABDOMINIS) || muscles.contains(MuscleId.OBLIQUES);
+        boolean hasExplicitFocus = !muscles.isEmpty() || !categories.isEmpty() || !skillKeywords.isEmpty()
+                || lowerBody || push || pull || core;
+        boolean wholeGap = !hasExplicitFocus && (lower.contains("missing") || lower.contains("current routine")
+                || lower.contains("my routine") || lower.contains("imbalance") || lower.contains("gap"));
 
         if (lower.contains("leg") || lower.contains("lower body")) {
             categories.add(ExerciseCategory.LEGS);
@@ -1054,7 +1077,7 @@ public class AiWorkoutRecommendationService {
         } else if (lowerBody && lower.contains("hamstring")) {
             focusLabel = "Hamstrings & Posterior Chain";
             listHeading = "Hamstring Exercises";
-        } else if (lowerBody) {
+        } else if (lowerBody && (lower.contains("leg") || lower.contains("lower body") || muscles.size() > 2)) {
             focusLabel = "Lower Body & Legs";
             listHeading = "Leg Exercises";
         } else if (wholeGap) {
@@ -1133,7 +1156,77 @@ public class AiWorkoutRecommendationService {
         if (selectedDayOfWeek != null && !criteria.wholeRoutineGapAnalysis()) {
             return findDay(snapshot.days(), selectedDayOfWeek);
         }
-        return null;
+        return inferBestDayForCriteria(criteria, snapshot);
+    }
+
+    private WorkoutPlanDay inferBestDayForCriteria(PromptCriteria criteria, PlanSnapshot snapshot) {
+        if (snapshot.days().isEmpty() || criteria.wholeRoutineGapAnalysis() || criteria.targetMuscles().isEmpty()) {
+            return null;
+        }
+        boolean hasLower = criteria.lowerBodyFocus() || criteria.targetMuscles().stream()
+                .anyMatch(m -> m.getRegion() == MuscleRegion.LOWER_BODY);
+        boolean hasPush = criteria.upperPushFocus() || criteria.targetMuscles().stream()
+                .anyMatch(m -> m == MuscleId.CHEST || m == MuscleId.FRONT_DELTOIDS
+                        || m == MuscleId.LATERAL_DELTOIDS || m == MuscleId.TRICEPS);
+        boolean hasPull = criteria.upperPullFocus() || criteria.targetMuscles().stream()
+                .anyMatch(m -> m == MuscleId.LATISSIMUS_DORSI || m == MuscleId.TERES_MAJOR
+                        || m == MuscleId.RHOMBOIDS || m == MuscleId.MIDDLE_TRAPEZIUS
+                        || m == MuscleId.LOWER_TRAPEZIUS || m == MuscleId.UPPER_TRAPEZIUS
+                        || m == MuscleId.REAR_DELTOIDS || m == MuscleId.BICEPS || m == MuscleId.FOREARMS);
+
+        if (hasLower) {
+            return pickLightestMatchingDay(
+                    snapshot,
+                    List.of(WorkoutSessionType.LEGS, WorkoutSessionType.LOWER, WorkoutSessionType.FULL_BODY),
+                    List.of("leg", "lower", "squat", "glute", "full body")
+            );
+        }
+        if (hasPush && !hasPull) {
+            return pickLightestMatchingDay(
+                    snapshot,
+                    List.of(WorkoutSessionType.PUSH, WorkoutSessionType.UPPER, WorkoutSessionType.PLANCHE, WorkoutSessionType.FULL_BODY),
+                    List.of("push", "chest", "planche", "upper", "full body")
+            );
+        }
+        if (hasPull && !hasPush) {
+            return pickLightestMatchingDay(
+                    snapshot,
+                    List.of(WorkoutSessionType.PULL, WorkoutSessionType.UPPER, WorkoutSessionType.FRONT_LEVER, WorkoutSessionType.FULL_BODY),
+                    List.of("pull", "back", "lever", "upper", "full body")
+            );
+        }
+        return snapshot.days().stream()
+                .filter(d -> !d.isRestDay())
+                .min(Comparator.comparingInt((WorkoutPlanDay d) -> snapshot.exercisesByDayId().getOrDefault(d.getId(), List.of()).size())
+                        .thenComparingInt(d -> d.getDayOfWeek() != null ? d.getDayOfWeek().getOrder() : 99))
+                .orElse(null);
+    }
+
+    private WorkoutPlanDay pickLightestMatchingDay(
+            PlanSnapshot snapshot,
+            List<WorkoutSessionType> types,
+            List<String> titleKeywords
+    ) {
+        List<WorkoutPlanDay> matches = snapshot.days().stream()
+                .filter(d -> !d.isRestDay())
+                .filter(d -> {
+                    if (d.getSessionType() != null && types.contains(d.getSessionType())) {
+                        return true;
+                    }
+                    if (d.getName() != null) {
+                        String n = d.getName().toLowerCase(Locale.US);
+                        return titleKeywords.stream().anyMatch(n::contains);
+                    }
+                    return false;
+                })
+                .toList();
+        if (matches.isEmpty()) {
+            return null;
+        }
+        return matches.stream()
+                .min(Comparator.comparingInt((WorkoutPlanDay d) -> snapshot.exercisesByDayId().getOrDefault(d.getId(), List.of()).size())
+                        .thenComparingInt(d -> d.getDayOfWeek() != null ? d.getDayOfWeek().getOrder() : 99))
+                .orElse(matches.get(0));
     }
 
     private WorkoutPlanDay matchSemanticPlanDay(String lower, PlanSnapshot snapshot) {
@@ -1583,12 +1676,51 @@ public class AiWorkoutRecommendationService {
                 sb.append("\n");
             }
         }
+        if (card.getRecommendations().isEmpty()) {
+            sb.append(isVn
+                    ? "Hiện chưa tìm thấy bài tập phù hợp trong danh mục cho tiêu chí này."
+                    : "No matching published exercises were found in the catalog for this focus.");
+            return sb.toString().trim();
+        }
         if (card.getSuggestedDayOfWeek() == null) {
             sb.append("\nSelect any exercises you'd like to include and choose a weekday below (or tell me e.g. _\"Add Bulgarian Split Squat to Wednesday\"_) to preview the update before saving.");
         } else {
             sb.append("\nSelect exercises below to generate a **Workout Plan Preview** for **")
                     .append(formatDayLabel(card.getSuggestedDayOfWeek(), isVn))
                     .append("** — nothing will be modified until you confirm.");
+        }
+        return sb.toString().trim();
+    }
+
+    private String formatPlanContextSupplementalMarkdown(
+            ExerciseRecommendationsCardDto card,
+            PlanSnapshot snapshot,
+            WorkoutPlanDay suggestedDay,
+            List<SupplementalCandidate> supplemental,
+            boolean isVn
+    ) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("### 🎯 ").append(card.getFocusLabel() != null ? card.getFocusLabel() : "Exercise Recommendations").append("\n\n");
+        if (suggestedDay != null) {
+            sb.append("**Suggested Target Session**: ").append(formatDayTitle(suggestedDay, isVn)).append("\n\n");
+        } else if (snapshot.plan() != null) {
+            sb.append("**Current Plan Analyzed**: ").append(snapshot.plan().getName()).append("\n\n");
+        }
+        if (!card.getUndertrainedMuscles().isEmpty()) {
+            sb.append("**Gaps Detected**: ");
+            sb.append(card.getUndertrainedMuscles().stream()
+                    .map(g -> g.getDisplayName() + " (" + g.getReason() + ")")
+                    .collect(Collectors.joining(" · ")));
+            sb.append("\n\n");
+        }
+        sb.append("**Recommended Exercises**:\n");
+        int index = 1;
+        for (SupplementalCandidate sup : supplemental) {
+            sb.append(index++).append(". **").append(sup.name()).append("**");
+            if (sup.description() != null && !sup.description().isBlank()) {
+                sb.append(" — ").append(sup.description());
+            }
+            sb.append("\n");
         }
         return sb.toString().trim();
     }
