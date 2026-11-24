@@ -92,6 +92,12 @@ public class AiAssistantServiceImpl implements AiAssistantService {
     @Autowired(required = false)
     private WorkoutPlanAuditService workoutPlanAuditService;
 
+    @Autowired(required = false)
+    private com.calisthenics.backend.exercisetree.service.ExerciseTreeService exerciseTreeService;
+
+    private static final Pattern EXERCISE_ID_TAG_PATTERN =
+            Pattern.compile("\\[exerciseId=(\\d+)]", Pattern.CASE_INSENSITIVE);
+
     private static final String TOOL_LIST_EXERCISES = "list_exercises";
     private static final String TOOL_RECOMMEND_EXERCISES = "recommend_exercises";
     private static final String TOOL_CONSULT_WORKOUT_PLAN = "consult_workout_plan";
@@ -433,6 +439,13 @@ public class AiAssistantServiceImpl implements AiAssistantService {
         String systemPrompt = buildSystemPrompt(
                 user, clientProfileOpt.orElse(null), latestWeight, recentPrs, recentSessions,
                 activePlanContext.orElse(null), athleteSnapshot);
+        Long focusedExerciseId = resolveFocusedExerciseId(request.getExerciseId(), userContent);
+        if (focusedExerciseId != null && exerciseTreeService != null) {
+            Optional<String> treeContext = exerciseTreeService.buildAiProgressionContextForExercise(focusedExerciseId);
+            if (treeContext.isPresent()) {
+                systemPrompt = systemPrompt + "\n" + treeContext.get();
+            }
+        }
 
         // 4. Call Gemini Structured Intent Classifier & Assistant (skip when deterministic read-only or exercise-mutation intent applies)
         GeminiAssistantOutput assistantOutput = null;
@@ -531,6 +544,24 @@ public class AiAssistantServiceImpl implements AiAssistantService {
                 conversationId, detectedIntent, actionMetadataJson != null);
 
         return mapToMessageResponse(savedAssistantMessage, userId);
+    }
+
+    private Long resolveFocusedExerciseId(Long explicitExerciseId, String userContent) {
+        if (explicitExerciseId != null && explicitExerciseId > 0L) {
+            return explicitExerciseId;
+        }
+        if (userContent == null || userContent.isBlank()) {
+            return null;
+        }
+        Matcher matcher = EXERCISE_ID_TAG_PATTERN.matcher(userContent);
+        if (matcher.find()) {
+            try {
+                return Long.parseLong(matcher.group(1));
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+        return null;
     }
 
     private String buildSystemPrompt(

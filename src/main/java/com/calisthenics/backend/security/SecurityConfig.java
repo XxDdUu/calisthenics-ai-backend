@@ -63,8 +63,21 @@ public class SecurityConfig {
                         ).permitAll()
                         .requestMatchers(
                                 HttpMethod.GET,
+                                "/api/v1/exercise-trees/user-progress",
+                                "/api/exercise-trees/user-progress"
+                        ).authenticated()
+                        .requestMatchers(
+                                HttpMethod.GET,
                                 "/api/v1/storage/exercise-media/**",
                                 "/api/v1/exercises/**",
+                                "/api/v1/exercise-trees",
+                                "/api/v1/exercise-trees/categories",
+                                "/api/v1/exercise-trees/exercises/*",
+                                "/api/v1/exercise-trees/*/*",
+                                "/api/exercise-trees",
+                                "/api/exercise-trees/categories",
+                                "/api/exercise-trees/exercises/*",
+                                "/api/exercise-trees/*/*",
                                 "/api/v1/skills",
                                 "/api/v1/skills/**",
                                 "/api/v1/muscles",

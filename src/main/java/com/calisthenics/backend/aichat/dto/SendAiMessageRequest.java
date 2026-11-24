@@ -20,8 +20,16 @@ public class SendAiMessageRequest {
 
     private WorkoutDayOfWeek selectedDayOfWeek;
 
+    private Long exerciseId;
+
     public SendAiMessageRequest(String message, String timezone) {
         this.message = message;
         this.timezone = timezone;
+    }
+
+    public SendAiMessageRequest(String message, String timezone, WorkoutDayOfWeek selectedDayOfWeek) {
+        this.message = message;
+        this.timezone = timezone;
+        this.selectedDayOfWeek = selectedDayOfWeek;
     }
 }
